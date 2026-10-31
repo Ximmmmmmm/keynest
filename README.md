@@ -125,6 +125,23 @@ npm start
 
 或直接双击 `start.cmd`（会自动清理 `ELECTRON_RUN_AS_NODE` 并安装依赖）。
 
+### 打包成安装包
+
+```bash
+npm run icon       # 生成 build/icon.ico（需要 Pillow）
+npm run dist       # 产出 NSIS 安装包 + 便携版到 dist/
+npm run dist:dir   # 只产目录，用于快速验证打包配置
+```
+
+产物：
+
+| 文件 | 说明 |
+| --- | --- |
+| `dist/钥巢-0.1.0-x64.exe` | NSIS 安装包，可选安装目录，创建桌面与开始菜单快捷方式 |
+| `dist/钥巢-0.1.0-portable.exe` | 便携版，免安装，双击即用 |
+
+安装包未做代码签名，Windows SmartScreen 首次运行会提示「未知发布者」，选择「更多信息 → 仍要运行」即可。
+
 首次启动会让你设置主密码（至少 8 位）。**主密码无法找回**，忘记就只能删库重建。
 
 ### 数据位置
@@ -271,7 +288,7 @@ npm run test:e2e  # 端到端：创建（含引导）→ 写入密文 → 重启
 
 ## 已知限制与可继续做的方向
 
-- 未打包成安装包：目前通过 `npm start` / `start.cmd` 运行。需要分发时加 `electron-builder`，产出 NSIS 安装包或 portable exe。
+- 仅支持 Windows x64：`browser-import.js` 用 DPAPI 读浏览器密钥，`start.cmd` 是批处理，跨平台需要另做适配。
 - 无浏览器插件/自动填充、无 TOTP、无附件。
 - 浏览器导入是单向、按需的合并，不是实时同步；新版 Chrome / Edge 的 v20 条目只能走浏览器的 CSV 导出（原因见上一节实测结论）。
 - 浏览器的「导出密码」这一步无法脚本化：Chrome / Edge 导出前会要求 Windows Hello 或账户密码，这是浏览器自身的行为。CLI 自动化的是「导出之后」的合并环节。

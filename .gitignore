@@ -40,3 +40,5 @@ keynest-*.json
 .DS_Store
 Thumbs.db
 desktop.ini
+dist/
+build/icon.png

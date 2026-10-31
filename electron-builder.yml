@@ -1,0 +1,56 @@
+{
+  "appId": "com.keynest.app",
+  "productName": "钥巢",
+  "copyright": "Copyright © 2026 KeyNest contributors",
+
+  "directories": {
+    "output": "dist",
+    "buildResources": "build"
+  },
+
+  "files": [
+    "src/**/*",
+    "scripts/launch.js",
+    "package.json",
+    "LICENSE",
+    "README.md",
+    "!test/**/*",
+    "!docs/**/*",
+    "!**/*.map"
+  ],
+
+  "extraMetadata": {
+    "main": "src/main/main.js"
+  },
+
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      },
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      }
+    ],
+    "icon": "build/icon.ico",
+    "artifactName": "${productName}-${version}-${arch}.${ext}"
+  },
+
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "钥巢",
+    "deleteAppDataOnUninstall": false,
+    "installerIcon": "build/icon.ico",
+    "uninstallerIcon": "build/icon.ico"
+  },
+
+  "portable": {
+    "artifactName": "${productName}-${version}-portable.${ext}"
+  }
+}
