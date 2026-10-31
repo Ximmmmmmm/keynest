@@ -2,6 +2,10 @@
 //!
 //! 前端 `src/renderer/` 完全复用，只把 `preload.js` 的 IPC 调用换成 Tauri 的 invoke。
 
+// 关键：release 版用 Windows 子系统，避免弹出黑色命令行窗口。
+// debug 版保留 console，方便看日志。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod browser;
 mod commands;
 mod helpers;
