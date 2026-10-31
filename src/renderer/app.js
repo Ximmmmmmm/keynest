@@ -946,9 +946,18 @@ function promptImportOnFirstRun() {
   );
 }
 
-function openImport() {
-  openModal(
-    `${modalHeader('导入浏览器密码', '点一下就好，其余自动完成')}
+/**
+ * 导入弹窗的纯渲染函数集合。
+ *
+ * 抽出来的目的：
+ *   1. 每个函数只做「数据 → HTML 字符串」，不碰 DOM，能单独测试
+ *   2. openImport() 只负责编排（取数、绑定事件、调 API）
+ *
+ * 这里所有输出都必须经过 esc()，因为文件名、URL、用户名都来自外部。
+ */
+
+/* 弹窗骨架：只放固定结构，动态内容由下面的函数填充 */
+const IMPORT_MODAL_TEMPLATE = () => `
       <div class="modal-body">
         <div id="quickImport" class="quick-import">
           <div class="import-loading">正在找最近导出的 CSV…</div>
@@ -988,335 +997,414 @@ function openImport() {
       <div class="modal-foot">
         <span class="spacer"></span>
         <button class="btn primary" data-action="close-modal">完成</button>
-      </div>`,
-    {
-      wide: true,
-      onMount(modal) {
-        const quick = modal.querySelector('#quickImport');
-        const list = modal.querySelector('#importSources');
-        const warnBox = modal.querySelector('#importWarn');
-        const resultBox = modal.querySelector('#importResult');
-        const errorBox = modal.querySelector('#importError');
-        const preview = modal.querySelector('#csvPreview');
-        const csvButton = modal.querySelector('[data-action="pick-csv"]');
-        let mode = 'skip';
-        let csvToken = null;
-        let discovered = null;
+      </div>`;
 
-        const showError = (message) => {
-          errorBox.textContent = message || '';
-          errorBox.classList.toggle('show', !!message);
-        };
+/**
+ * 一键导入卡片的 HTML。
+ * @param {{found:boolean, confident:boolean, truncated:boolean, files:Array, file:Object|null}} data
+ * @returns {string}
+ */
+function renderQuickCard(data) {
+  const files = Array.isArray(data && data.files) && data.files.length
+    ? data.files
+    : data && data.file
+      ? [data.file]
+      : [];
 
-        const showResult = (stats, prefix = '') => {
-          const parts = [`新增 ${stats.added} 条`];
-          if (stats.updated) parts.push(`更新 ${stats.updated} 条`);
-          if (stats.skipped) parts.push(`跳过 ${stats.skipped} 条`);
-          if (stats.appBound) parts.push(`${stats.appBound} 条需改用 CSV`);
-          if (stats.failed && !stats.appBound) parts.push(`${stats.failed} 条无法解密`);
-          const warn = stats.appBound
-            ? `<div class="import-warn"><strong>这些条目受应用绑定加密保护</strong><span>Chrome 127+ / Edge 127+ 的机制，只有浏览器自己能解密。请用「导出密码」生成 CSV 后再导入。</span></div>`
-            : '';
-          resultBox.innerHTML = `<div class="import-result">${icon('check')}<span>${esc(prefix)}${parts.join(' · ')}</span></div>${warn}`;
-        };
+  if (!files.length) {
+    return `
+      <div class="import-empty">
+        <strong>还没找到 CSV 文件</strong>
+        <span>先在浏览器里导出一次密码（下面有步骤），然后点这里重新查找。</span>
+        <button class="btn sm" data-action="rescan-csv">重新查找</button>
+      </div>`;
+  }
 
-        /** 渲染一键导入卡片 */
-        const renderQuick = async () => {
-          const res = await api.discoverCsv();
-          if (!res.ok) {
-            quick.innerHTML = `<div class="import-empty">查找失败：${esc(res.error.message)}</div>`;
-            return;
+  const stale = !data.confident;
+  const totalSize = files.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
+  const newest = files[0];
+  const ageNote = stale
+    ? `<span class="import-stale">这些文件是 ${esc(newest.ageLabel)}的，可能不是刚导出的</span>`
+    : `<span class="import-fresh">${esc(newest.ageLabel)}导出</span>`;
+
+  const headline =
+    files.length === 1
+      ? `<div class="quick-name">${esc(files[0].name)}</div>`
+      : `<div class="quick-name">${files.length} 个文件</div>
+         <ul class="quick-filelist">
+           ${files.map((f) => `<li>${esc(f.name)}</li>`).join('')}
+         </ul>`;
+
+  const buttonText = files.length === 1 ? '一键导入' : `一键导入这 ${files.length} 个`;
+
+  const truncated = data.truncated
+    ? `<p class="quick-hint-text">文件较多，只导入最近 ${files.length} 个。</p>`
+    : '';
+
+  return `
+    <div class="quick-card">
+      <div class="quick-main">
+        <div class="quick-icon">${icon('download')}</div>
+        <div class="quick-text">
+          ${headline}
+          <div class="quick-meta">${ageNote} · ${formatSize(totalSize)}${
+            files.length > 1 ? ` · 合计 ${files.length} 个` : ''
+          }</div>
+        </div>
+      </div>
+      <button class="btn primary" data-action="quick-import">${buttonText}</button>
+    </div>
+    <p class="quick-hint">会把这 ${files.length} 个文件合并导入，按「域名 + 账号」去重。</p>${truncated}`;
+}
+
+/**
+ * 导入结果摘要的 HTML。
+ * @param {Object} stats
+ * @param {string} prefix
+ */
+function renderImportResult(stats, prefix = '') {
+  const parts = [`新增 ${stats.added} 条`];
+  if (stats.updated) parts.push(`更新 ${stats.updated} 条`);
+  if (stats.skipped) parts.push(`跳过 ${stats.skipped} 条`);
+  if (stats.appBound) parts.push(`${stats.appBound} 条需改用 CSV`);
+  if (stats.failed && !stats.appBound) parts.push(`${stats.failed} 条无法解密`);
+
+  const warn = stats.appBound
+    ? `<div class="import-warn"><strong>这些条目受应用绑定加密保护</strong><span>Chrome 127+ / Edge 127+ 的机制，只有浏览器自己能解密。请用「导出密码」生成 CSV 后再导入。</span></div>`
+    : '';
+
+  return `<div class="import-result">${icon('check')}<span>${esc(prefix)}${parts.join(' · ')}</span></div>${warn}`;
+}
+
+/**
+ * 浏览器密码库列表的 HTML。
+ * @param {Array} sources
+ * @returns {{html: string, appBoundTotal: number}}
+ */
+function renderBrowserSources(sources) {
+  if (!sources || !sources.length) {
+    return {
+      html: '<div class="import-empty">没有检测到 Chrome / Edge / Brave 的密码库</div>',
+      appBoundTotal: 0,
+    };
+  }
+
+  let appBoundTotal = 0;
+
+  const html = sources
+    .flatMap((source) =>
+      source.profiles.map((profile) => {
+        const color = colorFor(source.name);
+        const bound = Number(profile.appBound) || 0;
+        const importable =
+          profile.importable == null
+            ? Math.max(0, (profile.count || 0) - bound)
+            : Number(profile.importable);
+        appBoundTotal += bound;
+
+        let meta;
+        if (profile.count < 0) meta = '无法读取，可关闭浏览器后再试';
+        else if (bound && !importable) meta = `${profile.count} 条 · 全部需用 CSV 导出`;
+        else if (bound) meta = `${profile.count} 条（${bound} 条需 CSV）`;
+        else meta = `${profile.count} 条`;
+
+        const control =
+          importable > 0
+            ? `<button class="btn sm" data-action="import-profile" data-id="${esc(source.id)}" data-dir="${esc(profile.dir)}" data-label="${esc(source.name)}">导入</button>`
+            : `<button class="btn sm" data-action="focus-csv">导出步骤</button>`;
+
+        return `<div class="import-source">
+          <div class="import-source-icon" style="--avatar:${color.fg};--avatar-bg:${color.bg}">${esc(source.name[0])}</div>
+          <div class="import-source-main">
+            <strong>${esc(source.name)}</strong>
+            <span>${esc(profile.label || profile.dir)} · ${esc(meta)}</span>
+          </div>
+          <div class="import-source-actions">${control}</div>
+        </div>`;
+      }),
+    )
+    .join('');
+
+  return { html, appBoundTotal };
+}
+
+/** 应用绑定加密的总量提示 */
+function renderAppBoundWarn(appBoundTotal) {
+  if (!appBoundTotal) return '';
+  return `<div class="import-warn"><strong>${appBoundTotal} 条密码受应用绑定加密保护</strong><span>Chrome 127+ / Edge 127+ 默认开启，只有浏览器自己能解密。请用「导出密码」生成 CSV，再用下方导入。</span></div>`;
+}
+
+/** 导入成功后「删除明文」这一行 */
+function renderDiscardRow(paths) {
+  const list = Array.isArray(paths) ? paths.filter(Boolean) : [];
+  if (!list.length) {
+    return '<span class="quick-hint-text">文件已不在原位，无需删除。</span>';
+  }
+  const label = list.length > 1 ? `删掉这 ${list.length} 个 CSV（明文文件）` : '删掉这个 CSV（明文文件）';
+  return `<button class="btn sm" data-action="discard-csv" data-paths="${esc(JSON.stringify(list))}">${label}</button>
+          <span class="quick-hint-text">留着也行，但它们是未加密的。</span>`;
+}
+
+/**
+ * 导入弹窗：只负责编排（取数 → 渲染 → 绑定事件 → 调 API）。
+ * 具体 HTML 由 import-view.js 生成，那里是纯函数，可单独测试。
+ */
+function openImport() {
+  openModal(`${modalHeader('导入浏览器密码', '点一下就好，其余自动完成')}${IMPORT_MODAL_TEMPLATE()}`, {
+    wide: true,
+    onMount(modal) {
+      const quick = modal.querySelector('#quickImport');
+      const list = modal.querySelector('#importSources');
+      const warnBox = modal.querySelector('#importWarn');
+      const resultBox = modal.querySelector('#importResult');
+      const errorBox = modal.querySelector('#importError');
+      const preview = modal.querySelector('#csvPreview');
+      const csvButton = modal.querySelector('[data-action="pick-csv"]');
+
+      let mode = 'skip';
+      let csvToken = null;
+      let discovered = null;
+
+      const showError = (message) => {
+        errorBox.textContent = message || '';
+        errorBox.classList.toggle('show', !!message);
+      };
+
+      const showResult = (stats, prefix = '') => {
+        resultBox.innerHTML = renderImportResult(stats, prefix);
+      };
+
+      /** 取回当前应导入的文件列表（兼容单/多文件两种返回形状） */
+      const currentTargets = () => {
+        if (!discovered) return [];
+        if (Array.isArray(discovered.files) && discovered.files.length) return discovered.files;
+        return discovered.file ? [discovered.file] : [];
+      };
+
+      const renderQuick = async () => {
+        const res = await api.discoverCsv();
+        if (!res.ok) {
+          quick.innerHTML = `<div class="import-empty">查找失败：${esc(res.error.message)}</div>`;
+          return;
+        }
+        discovered = res.data;
+        quick.innerHTML = renderQuickCard(discovered);
+      };
+
+      /* ---------------- 一键导入 ---------------- */
+
+      const doQuickImport = async (button) => {
+        const targets = currentTargets();
+        if (!targets.length) return;
+
+        showError('');
+        button.disabled = true;
+        button.textContent = '导入中…';
+
+        // 多文件合并成一次导入，保证去重与原子写入只发生一次 save
+        const res = await api.importCsvFiles(
+          targets.map((f) => f.path),
+          mode,
+        );
+
+        if (!res.ok) {
+          button.disabled = false;
+          button.textContent = targets.length > 1 ? `一键导入这 ${targets.length} 个` : '一键导入';
+          showError(res.error.message);
+          return;
+        }
+
+        applySnapshot(res.data.snapshot);
+        renderAll();
+        showResult(
+          res.data.stats,
+          targets.length > 1 ? `${res.data.fileCount} 个文件：` : `${res.data.fileName}：`,
+        );
+        toast(`已导入：新增 ${res.data.stats.added} 条`);
+
+        // 单个文件读取失败要明确告知，不能静默跳过
+        const failed = (res.data.perFile || []).filter((f) => f.error);
+        if (failed.length) {
+          showError(`${failed.length} 个文件读取失败：${failed.map((f) => f.name).join('、')}`);
+        }
+
+        button.disabled = false;
+        button.textContent = '再导入一次';
+        button.classList.remove('primary');
+
+        const metaEl = modal.querySelector('.quick-meta');
+        if (metaEl) {
+          metaEl.innerHTML = `<span class="import-fresh">已导入 · 新增 ${res.data.stats.added} 条</span>`;
+        }
+
+        const after = modal.querySelector('.quick-hint');
+        if (after) after.innerHTML = renderDiscardRow(res.data.filePaths || []);
+      };
+
+      /* ---------------- 删除明文 ---------------- */
+
+      const doDiscard = async (button) => {
+        let paths = [];
+        if (button.dataset.paths) {
+          try {
+            paths = JSON.parse(button.dataset.paths);
+          } catch {
+            paths = [];
           }
-          discovered = res.data;
+        } else if (button.dataset.path) {
+          paths = [button.dataset.path];
+        }
 
-          const files = Array.isArray(discovered.files) && discovered.files.length
-            ? discovered.files
-            : discovered.file
-              ? [discovered.file]
-              : [];
-          if (!files.length) {
-            quick.innerHTML = `
-              <div class="import-empty">
-                <strong>还没找到 CSV 文件</strong>
-                <span>先在浏览器里导出一次密码（下面有步骤），然后点这里重新查找。</span>
-                <button class="btn sm" data-action="rescan-csv">重新查找</button>
-              </div>`;
-            return;
-          }
+        const res = await api.discardCsv(paths);
+        if (res.ok && res.data.removed > 0) {
+          button.disabled = true;
+          button.textContent = res.data.total > 1 ? `已删除 ${res.data.removed} 个` : '已删除';
+          toast(res.data.total > 1 ? `已删除 ${res.data.removed} 个明文 CSV` : '明文 CSV 已删除');
+        } else if (res.ok) {
+          button.textContent = '文件已不存在';
+          button.disabled = true;
+        } else {
+          showError(res.error.message);
+        }
+      };
 
-          const stale = !discovered.confident;
-          const totalSize = files.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
-          const newest = files[0];
-          const ageNote = stale
-            ? `<span class="import-stale">这些文件是 ${esc(newest.ageLabel)}的，可能不是刚导出的</span>`
-            : `<span class="import-fresh">${esc(newest.ageLabel)}导出</span>`;
+      /* ---------------- 直接读浏览器 ---------------- */
 
-          // 单个文件时显示文件名；多个时显示「N 个文件」并列出名字
-          const headline =
-            files.length === 1
-              ? `<div class="quick-name">${esc(files[0].name)}</div>`
-              : `<div class="quick-name">${files.length} 个文件</div>
-                 <ul class="quick-filelist">
-                   ${files.map((f) => `<li>${esc(f.name)}</li>`).join('')}
-                 </ul>`;
+      const doImportProfile = async (button) => {
+        showError('');
+        const label = button.dataset.label || '';
+        button.disabled = true;
+        button.textContent = '导入中…';
 
-          const buttonText = files.length === 1 ? '一键导入' : `一键导入这 ${files.length} 个`;
+        const res = await api.importBrowser(button.dataset.id, button.dataset.dir, mode);
 
-          quick.innerHTML = `
-            <div class="quick-card">
-              <div class="quick-main">
-                <div class="quick-icon">${icon('download')}</div>
-                <div class="quick-text">
-                  ${headline}
-                  <div class="quick-meta">${ageNote} · ${formatSize(totalSize)}${
-                    files.length > 1 ? ` · 合计 ${files.length} 个` : ''
-                  }</div>
-                </div>
-              </div>
-              <button class="btn primary" data-action="quick-import">${buttonText}</button>
-            </div>
-            <p class="quick-hint">会把这 ${files.length} 个文件合并导入，按「域名 + 账号」去重。</p>`;
+        button.disabled = false;
+        button.textContent = '导入';
+        if (!res.ok) {
+          showError(res.error.message);
+          return;
+        }
 
-          if (discovered.truncated) {
-            quick.insertAdjacentHTML(
-              'beforeend',
-              `<p class="quick-hint-text">文件较多，只导入最近 ${files.length} 个。</p>`,
-            );
-          }
-        };
+        applySnapshot(res.data.snapshot);
+        renderAll();
+        showResult(res.data.stats, label ? `${label}：` : '');
+        toast('浏览器密码已导入');
+      };
 
-        modal.addEventListener('change', (event) => {
-          if (event.target.name === 'impMode') {
-            mode = event.target.value;
-          }
-        });
+      /* ---------------- 手动选 CSV ---------------- */
 
-        modal.addEventListener('click', async (event) => {
-          const button = event.target.closest('[data-action]');
-          if (!button) return;
-          const action = button.dataset.action;
+      const doPickCsv = async () => {
+        showError('');
+        csvButton.disabled = true;
+        const res = await api.pickCsv();
+        csvButton.disabled = false;
 
-          if (action === 'rescan-csv') {
+        if (!res.ok) {
+          showError(res.error.message);
+          return;
+        }
+        if (res.data.canceled) return;
+
+        csvToken = res.data.token;
+        const { count, skippedRows, fileName } = res.data;
+        preview.innerHTML = `<div class="import-result">
+          <span>${esc(fileName)}：读取 ${count} 条${skippedRows ? `，忽略 ${skippedRows} 行` : ''}</span>
+          <button class="btn sm" data-action="import-csv">导入这 ${count} 条</button>
+        </div>`;
+      };
+
+      const doImportCsv = async (button) => {
+        if (!csvToken) return;
+        showError('');
+        button.disabled = true;
+        button.textContent = '导入中…';
+
+        const res = await api.importCsv(csvToken, mode);
+
+        if (!res.ok) {
+          button.disabled = false;
+          button.textContent = '重试';
+          showError(res.error.message);
+          return;
+        }
+
+        csvToken = null;
+        preview.innerHTML = '';
+        applySnapshot(res.data.snapshot);
+        renderAll();
+        showResult(res.data.stats, `${res.data.fileName}：`);
+        toast('CSV 已导入');
+      };
+
+      /* ---------------- 事件绑定 ---------------- */
+
+      modal.addEventListener('change', (event) => {
+        if (event.target.name === 'impMode') mode = event.target.value;
+      });
+
+      modal.addEventListener('click', async (event) => {
+        const button = event.target.closest('[data-action]');
+        if (!button) return;
+
+        switch (button.dataset.action) {
+          case 'rescan-csv':
             quick.innerHTML = '<div class="import-loading">正在找最近导出的 CSV…</div>';
             await renderQuick();
-            return;
-          }
+            break;
 
-          if (action === 'quick-import') {
-            const targets =
-              discovered && Array.isArray(discovered.files) && discovered.files.length
-                ? discovered.files
-                : discovered && discovered.file
-                  ? [discovered.file]
-                  : [];
-            if (!targets.length) return;
+          case 'quick-import':
+            await doQuickImport(button);
+            break;
 
-            showError('');
-            button.disabled = true;
-            button.textContent = '导入中…';
+          case 'discard-csv':
+            await doDiscard(button);
+            break;
 
-            // 多文件合并成一次导入，保证去重和原子写入只在一次 save 里发生
-            const res = await api.importCsvFiles(
-              targets.map((f) => f.path),
-              mode,
-            );
-
-            if (!res.ok) {
-              button.disabled = false;
-              button.textContent = targets.length > 1 ? `一键导入这 ${targets.length} 个` : '一键导入';
-              showError(res.error.message);
-              return;
-            }
-
-            applySnapshot(res.data.snapshot);
-            renderAll();
-            showResult(res.data.stats, targets.length > 1 ? `${res.data.fileCount} 个文件：` : `${res.data.fileName}：`);
-            toast(`已导入：新增 ${res.data.stats.added} 条`);
-
-            // 单个文件读取出错时明确告诉用户，不要静默跳过
-            const failed = (res.data.perFile || []).filter((f) => f.error);
-            if (failed.length) {
-              showError(`${failed.length} 个文件读取失败：${failed.map((f) => f.name).join('、')}`);
-            }
-
-            // 恢复按钮，并把主操作换成「删掉明文 CSV」
-            button.disabled = false;
-            button.textContent = '再导入一次';
-            button.classList.remove('primary');
-
-            // 把文件名旁的「N 分钟前导出」换成导入结果，避免误导
-            const metaEl = modal.querySelector('.quick-meta');
-            if (metaEl) {
-              metaEl.innerHTML = `<span class="import-fresh">已导入 · 新增 ${res.data.stats.added} 条</span>`;
-            }
-
-            const after = modal.querySelector('.quick-hint');
-            if (after) {
-              const ok = res.data.filePaths || [];
-              const label = ok.length > 1 ? `删掉这 ${ok.length} 个 CSV（明文文件）` : '删掉这个 CSV（明文文件）';
-              after.innerHTML = ok.length
-                ? `<button class="btn sm" data-action="discard-csv" data-paths="${esc(JSON.stringify(ok))}">${label}</button>
-                   <span class="quick-hint-text">留着也行，但它们是未加密的。</span>`
-                : '<span class="quick-hint-text">文件已不在原位，无需删除。</span>';
-            }
-            return;
-          }
-
-          if (action === 'discard-csv') {
-            let paths = [];
-            if (button.dataset.paths) {
-              try {
-                paths = JSON.parse(button.dataset.paths);
-              } catch {
-                paths = [];
-              }
-            } else if (button.dataset.path) {
-              paths = [button.dataset.path];
-            }
-            const res = await api.discardCsv(paths);
-            if (res.ok && res.data.removed > 0) {
-              button.disabled = true;
-              button.textContent = res.data.total > 1 ? `已删除 ${res.data.removed} 个` : '已删除';
-              toast(res.data.total > 1 ? `已删除 ${res.data.removed} 个明文 CSV` : '明文 CSV 已删除');
-            } else if (res.ok) {
-              button.textContent = '文件已不存在';
-              button.disabled = true;
-            } else {
-              showError(res.error.message);
-            }
-            return;
-          }
-
-          if (action === 'focus-csv') {
+          case 'focus-csv': {
             // 折叠区里的「导出步骤」：展开兜底区并滚到导出说明
             const more = modal.querySelector('.import-more');
             if (more) more.open = true;
             const steps = modal.querySelector('.import-steps');
             if (steps) steps.open = true;
             (steps || more)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-            return;
+            break;
           }
 
-          if (action === 'import-profile') {
-            showError('');
-            const label = button.dataset.label || '';
-            button.disabled = true;
-            button.textContent = '导入中…';
-            const res = await api.importBrowser(button.dataset.id, button.dataset.dir, mode);
-            button.disabled = false;
-            button.textContent = '导入';
-            if (!res.ok) {
-              showError(res.error.message);
-              return;
-            }
-            applySnapshot(res.data.snapshot);
-            renderAll();
-            showResult(res.data.stats, label ? `${label}：` : '');
-            toast('浏览器密码已导入');
-            return;
-          }
+          case 'import-profile':
+            await doImportProfile(button);
+            break;
 
-          if (action === 'pick-csv') {
-            showError('');
-            csvButton.disabled = true;
-            const res = await api.pickCsv();
-            csvButton.disabled = false;
-            if (!res.ok) {
-              showError(res.error.message);
-              return;
-            }
-            if (res.data.canceled) return;
-            csvToken = res.data.token;
-            const { count, skippedRows, fileName } = res.data;
-            preview.innerHTML = `<div class="import-result">
-              <span>${esc(fileName)}：读取 ${count} 条${skippedRows ? `，忽略 ${skippedRows} 行` : ''}</span>
-              <button class="btn sm" data-action="import-csv">导入这 ${count} 条</button>
-            </div>`;
-            return;
-          }
+          case 'pick-csv':
+            await doPickCsv();
+            break;
 
-          if (action === 'import-csv') {
-            if (!csvToken) return;
-            showError('');
-            button.disabled = true;
-            button.textContent = '导入中…';
-            const res = await api.importCsv(csvToken, mode);
-            if (!res.ok) {
-              button.disabled = false;
-              button.textContent = '重试';
-              showError(res.error.message);
-              return;
-            }
-            csvToken = null;
-            preview.innerHTML = '';
-            applySnapshot(res.data.snapshot);
-            renderAll();
-            showResult(res.data.stats, `${res.data.fileName}：`);
-            toast('CSV 已导入');
-          }
-        });
+          case 'import-csv':
+            await doImportCsv(button);
+            break;
 
-        // 一键导入卡片先渲染
-        renderQuick();
+          default:
+            break;
+        }
+      });
 
-        // 浏览器扫描沿用原逻辑
-        (async () => {
-          const res = await api.scanBrowsers();
-          if (!res.ok) {
-            list.innerHTML = '<div class="import-empty">扫描失败</div>';
-            showError(res.error.message);
-            return;
-          }
-          const sources = res.data.sources || [];
-          if (!sources.length) {
-            list.innerHTML = '<div class="import-empty">没有检测到 Chrome / Edge / Brave 的密码库</div>';
-            return;
-          }
+      /* ---------------- 初始加载 ---------------- */
 
-          let boundTotal = 0;
-          list.innerHTML = sources
-            .flatMap((source) =>
-              source.profiles.map((profile) => {
-                const color = colorFor(source.name);
-                const bound = Number(profile.appBound) || 0;
-                const importable =
-                  profile.importable == null
-                    ? Math.max(0, (profile.count || 0) - bound)
-                    : Number(profile.importable);
-                boundTotal += bound;
+      renderQuick();
 
-                let meta;
-                if (profile.count < 0) meta = '无法读取，可关闭浏览器后再试';
-                else if (bound && !importable) meta = `${profile.count} 条 · 全部需用 CSV 导出`;
-                else if (bound) meta = `${profile.count} 条（${bound} 条需 CSV）`;
-                else meta = `${profile.count} 条`;
+      (async () => {
+        const res = await api.scanBrowsers();
+        if (!res.ok) {
+          list.innerHTML = '<div class="import-empty">扫描失败</div>';
+          showError(res.error.message);
+          return;
+        }
 
-                const control =
-                  importable > 0
-                    ? `<button class="btn sm" data-action="import-profile" data-id="${esc(source.id)}" data-dir="${esc(profile.dir)}" data-label="${esc(source.name)}">导入</button>`
-                    : bound > 0
-                      ? `<button class="btn sm" data-action="focus-csv">导出步骤</button>`
-                      : `<button class="btn sm" disabled>无可导入</button>`;
-
-                return `<div class="import-source">
-                  <div class="import-source-icon" style="--avatar:${color.fg};--avatar-bg:${color.bg}">${esc(source.name[0])}</div>
-                  <div class="import-source-main">
-                    <strong>${esc(source.name)}</strong>
-                    <span>${esc(profile.label)} · ${meta}</span>
-                  </div>
-                  ${control}
-                </div>`;
-              }),
-            )
-            .join('');
-
-          if (boundTotal) {
-            warnBox.innerHTML = `<div class="import-warn"><strong>${boundTotal} 条密码受应用绑定加密保护</strong><span>Chrome 127+ / Edge 127+ 默认开启，只有浏览器自己能解密。请用「导出密码」生成 CSV，再用下方导入。</span></div>`;
-          }
-        })();
-      },
+        const { html, appBoundTotal } = renderBrowserSources(res.data.sources || []);
+        list.innerHTML = html;
+        warnBox.innerHTML = renderAppBoundWarn(appBoundTotal);
+      })();
     },
-  );
+  });
 }
 
 function openChangeMaster() {

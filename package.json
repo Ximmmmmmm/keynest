@@ -27,7 +27,7 @@
     "start": "node scripts/launch.js",
     "import": "node src/cli/keynest-cli.js import",
     "scan": "node src/cli/keynest-cli.js scan",
-    "test": "node test/vault.test.js && node test/import.test.js && node test/export.test.js && node test/cli.test.js && node test/csv-discovery.test.js && node test/launcher.test.js",
+    "test": "node test/vault.test.js && node test/import.test.js && node test/export.test.js && node test/import-view.test.js && node test/cli.test.js && node test/csv-discovery.test.js && node test/launcher.test.js",
     "test:ui": "node scripts/launch.js test/ui-check.js",
     "test:e2e": "node scripts/launch.js test/e2e-create.js && node scripts/launch.js test/e2e-reopen.js && node scripts/launch.js test/e2e-onboard.js"
   },
