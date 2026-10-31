@@ -264,6 +264,10 @@
     <div class="modal-root" id="modalRoot"></div>
     <div class="toast-root" id="toastRoot" role="status" aria-live="polite"></div>
 
+    <!-- 桥接层必须在 app.js 之前加载：
+         Electron 环境由 preload 注入 window.vaultApi；
+         Tauri 环境由 tauri-bridge.js 提供同样形状的 API。 -->
+    <script src="tauri-bridge.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

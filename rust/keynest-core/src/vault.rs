@@ -384,6 +384,57 @@ impl Vault {
         Ok(entry)
     }
 
+    /// 直接替换内存中的数据结构（供 update_settings / add_category 使用）。
+    pub fn replace_data(&mut self, data: VaultData) {
+        self.data = Some(data);
+    }
+
+    /// 换主密码：新盐、重新派生、整体重加密。
+    pub fn change_master(&mut self, old_password: &str, new_password: &str) -> Result<()> {
+        if new_password.chars().count() < MIN_MASTER_LEN {
+            return Err(VaultError::WeakPassword(MIN_MASTER_LEN));
+        }
+
+        // 验证旧密码
+        let header = self.header.clone().ok_or(VaultError::Locked)?;
+        let salt = unb64(&header.salt)?;
+        let old_key = derive_key(old_password, &salt, &header)?;
+        let current = self.key.ok_or(VaultError::Locked)?;
+        if old_key != current {
+            return Err(VaultError::InvalidPassword);
+        }
+
+        // 换新盐与新密钥
+        let mut new_salt = [0u8; 16];
+        OsRng.fill_bytes(&mut new_salt);
+        let new_header = KdfParams {
+            salt: b64(&new_salt),
+            ..header
+        };
+        let new_key = derive_key(new_password, &new_salt, &new_header)?;
+
+        if let Some(mut k) = self.key.take() {
+            k.zeroize();
+        }
+        self.key = Some(new_key);
+        self.header = Some(new_header);
+        self.save()?;
+
+        // 备份也要用新密码重写
+        let _ = fs::copy(&self.path, self.backup_path());
+        Ok(())
+    }
+
+    /// 彻底删除仓库与备份。
+    pub fn wipe(&mut self) -> Result<()> {
+        self.lock();
+        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(self.backup_path());
+        let tmp = self.path.with_extension("dat.tmp");
+        let _ = fs::remove_file(tmp);
+        Ok(())
+    }
+
     pub fn delete_entry(&mut self, id: &str) -> Result<()> {
         let mut data = self.data.clone().ok_or(VaultError::Locked)?;
         let before = data.entries.len();

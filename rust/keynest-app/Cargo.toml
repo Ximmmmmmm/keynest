@@ -1,0 +1,33 @@
+[package]
+name = "keynest-app"
+version = "0.1.0"
+edition = "2021"
+description = "钥巢 — 本地加密密码管理器"
+license = "MIT"
+
+[dependencies]
+keynest-core = { path = "../keynest-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+base64 = "0.22"
+thiserror = "2"
+parking_lot = "0.12"
+zeroize = "1"
+aes-gcm = "0.10"
+rand = "0.8"
+memmap2 = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Security_Cryptography",
+    "Win32_Foundation",
+] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
