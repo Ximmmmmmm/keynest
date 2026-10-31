@@ -1,0 +1,42 @@
+# 依赖
+node_modules/
+
+# 测试产物
+test/e2e-data/
+test/e2e-onboard-data/
+test/shots/
+
+# 日志
+*.log
+
+# ===== 密码与密钥：绝不能进仓库 =====
+# 真实的密码库文件
+vault.dat
+vault.dat.bak
+vault.dat.tmp
+*.dat.bak
+
+# 浏览器导出的明文 CSV（最常见的事故源）
+passwords*.csv
+*密码*.csv
+*passwords*.csv
+Chrome*.csv
+Edge*.csv
+Firefox*.csv
+
+# 明文导出
+keynest-*.csv
+keynest-*.json
+
+# 环境变量与本地配置
+.env
+.env.*
+*.local
+.npmrc.local
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

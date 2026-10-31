@@ -1,0 +1,37 @@
+{
+  "name": "keynest",
+  "productName": "钥巢",
+  "version": "0.1.0",
+  "description": "钥巢 KeyNest — 本地加密密码管理器",
+  "license": "MIT",
+  "private": false,
+  "homepage": "",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "keywords": [
+    "password-manager",
+    "electron",
+    "offline",
+    "local-first",
+    "aes-256-gcm",
+    "scrypt",
+    "密码管理器"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "node scripts/launch.js",
+    "import": "node src/cli/keynest-cli.js import",
+    "scan": "node src/cli/keynest-cli.js scan",
+    "test": "node test/vault.test.js && node test/import.test.js && node test/export.test.js && node test/cli.test.js && node test/csv-discovery.test.js && node test/launcher.test.js",
+    "test:ui": "node scripts/launch.js test/ui-check.js",
+    "test:e2e": "node scripts/launch.js test/e2e-create.js && node scripts/launch.js test/e2e-reopen.js && node scripts/launch.js test/e2e-onboard.js"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0"
+  }
+}

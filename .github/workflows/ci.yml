@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    # 单元测试不依赖 Electron 渲染，但测试里用到 node:sqlite 与 Windows 路径语义
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['20', '22', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 使用 Node ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci --ignore-scripts
+        continue-on-error: true
+
+      # Electron 只在界面测试时需要；单元测试不依赖它
+      - name: 安装依赖（回退到 npm install）
+        run: npm install --ignore-scripts
+        continue-on-error: true
+
+      - name: 单元测试
+        run: |
+          node test/vault.test.js
+          node test/import.test.js
+          node test/export.test.js
+          node test/cli.test.js
+          node test/csv-discovery.test.js
+
+      - name: start.cmd 启动检查
+        run: node test/launcher.test.js

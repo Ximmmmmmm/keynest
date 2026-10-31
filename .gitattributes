@@ -1,0 +1,19 @@
+# 换行符策略
+#
+# start.cmd / *.cmd / *.bat 必须是 CRLF：
+# LF 行尾会让 cmd.exe 解析错乱（本项目实际出现过 start.cmd 误触发 npm install、最后一行不执行）。
+# 显式文件名规则放在最前面，通配符规则随后，二者并存以防某一层匹配失效。
+start.cmd text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.dat binary
+
+package-lock.json -diff linguist-generated
