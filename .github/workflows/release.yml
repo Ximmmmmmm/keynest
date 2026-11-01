@@ -132,7 +132,9 @@ jobs:
           Copy-Item "LICENSE-MIT"  "$stage/LICENSE-MIT"
           Copy-Item "LICENSE-APACHE" "$stage/LICENSE-APACHE"
 
-          # 使用说明：把数据位置与"没有审计"这件事写在最显眼处
+          # 使用说明：把数据位置与"没有审计"这件事写在最显眼处。
+          # 文件名必须是纯 ASCII：GitHub Releases 的上传 API 不接受非 ASCII 文件名，
+          # 中文名会被改写成 default.txt，导致 SHA256SUMS 与实际下载文件名对不上。
           @"
           钥巢 KeyNest $env:REF_NAME（Windows x64 绿色版）
 
@@ -151,7 +153,7 @@ jobs:
           校验
             同目录下的 SHA256SUMS 可用于核对文件完整性：
               certutil -hashfile KeyNest.exe SHA256
-          "@ | Set-Content -Encoding UTF8 "$stage/使用说明.txt"
+          "@ | Set-Content -Encoding UTF8 "$stage/INSTALL.txt"
 
           Get-ChildItem $stage | Select-Object Name, Length
 
@@ -193,7 +195,8 @@ jobs:
           set -euo pipefail
           # 覆盖全部随包发布的文件，而不是只算 exe——
           # 用户要能确认自己拿到的 README/LICENSE 也没被替换过。
-          sha256sum KeyNest.exe "使用说明.txt" README.md README_EN.md SECURITY.md                     LICENSE-MIT LICENSE-APACHE > SHA256SUMS
+          sha256sum KeyNest.exe INSTALL.txt README.md README_EN.md SECURITY.md \
+                    LICENSE-MIT LICENSE-APACHE > SHA256SUMS
           cat SHA256SUMS
 
       # Release Notes 直接取 CHANGELOG 里对应版本那一节，避免"发布说明和实际改动对不上"。
@@ -223,7 +226,7 @@ jobs:
           set -euo pipefail
           ls -la
           # 发布包里只允许这些文件，多一个都要停下来看
-          BAD=$(ls | grep -vE '^(KeyNest\.exe|README\.md|README_EN\.md|SECURITY\.md|LICENSE-MIT|LICENSE-APACHE|使用说明\.txt|SHA256SUMS)$' || true)
+          BAD=$(ls | grep -vE '^(KeyNest\.exe|README\.md|README_EN\.md|SECURITY\.md|LICENSE-MIT|LICENSE-APACHE|INSTALL\.txt|SHA256SUMS)$' || true)
           if [ -n "$BAD" ]; then
             echo "::error::发布包里出现了预期之外的文件: $BAD"
             exit 1
@@ -235,11 +238,14 @@ jobs:
       - name: 创建 Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.2.2
         with:
+          # 必须显式指定 tag_name：workflow_dispatch 触发时没有 tag 上下文，
+          # 不写这一行会生成一个 untagged-* 的孤儿 Release，与 v0.4.3 脱钩。
+          tag_name: ${{ env.REF_NAME }}
           name: "钥巢 KeyNest ${{ env.REF_NAME }}"
           body_path: release-notes.md
           files: |
             release-stage/KeyNest.exe
-            release-stage/使用说明.txt
+            release-stage/INSTALL.txt
             release-stage/README.md
             release-stage/README_EN.md
             release-stage/SECURITY.md
