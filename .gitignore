@@ -19,6 +19,8 @@ vault.dat
 vault.dat.bak
 vault.dat.tmp
 *.dat.bak
+# 单实例锁文件
+vault.lock
 
 # 浏览器导出的明文 CSV（最常见的事故源）
 passwords*.csv
@@ -49,3 +51,9 @@ desktop.ini
 dist/
 build/icon.png
 rust/keynest-app/gen/
+
+# ===== 单文件绿色版与备份产物（第二阶段补充）=====
+# dist-egui 里是直接可双击的 exe，体积大且可重新构建
+dist-egui/
+*.exe
+*.bundle
