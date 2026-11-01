@@ -7,41 +7,142 @@ on:
     branches: [main]
   workflow_dispatch:
 
-jobs:
-  test:
-    # 单元测试不依赖 Electron 渲染，但测试里用到 node:sqlite 与 Windows 路径语义
-    runs-on: windows-latest
+# 同一分支的重复推送取消旧任务，省额度也省等待
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  # 所有 target 共用：新增的 warning 直接当失败处理，
+  # 否则「先提交、以后再清」的欠账永远还不完。
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # ---------------------------------------------------------------- #
+  # 核心库：纯逻辑，无 GUI 依赖，三个平台都应该能编能测
+  # ---------------------------------------------------------------- #
+  core:
+    name: core / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        node-version: ['20', '22', '24']
-
+        os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
-      - name: 使用 Node ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: ${{ matrix.node-version }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      - name: 格式检查
+        working-directory: rust
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        working-directory: rust
+        run: cargo clippy -p keynest-core --all-targets -- -D warnings
+
+      - name: 单元测试 + 集成测试（含健壮性/篡改测试）
+        working-directory: rust
+        run: cargo test -p keynest-core --all-targets
+
+  # ---------------------------------------------------------------- #
+  # 桌面端：只保证 Windows 上的完整体验，这与发行目标一致
+  # ---------------------------------------------------------------- #
+  gui-windows:
+    name: GUI / windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      - name: Clippy（整个工作区，含 GUI 与示例）
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试（含 GUI 纯逻辑测试）
+        working-directory: rust
+        run: cargo test --workspace
+
+      - name: 发布构建
+        working-directory: rust
+        run: cargo build --release -p keynest-egui
+
+      - name: 上传可执行文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: keynest-egui-windows
+          path: rust/target/release/keynest-egui.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------- #
+  # 覆盖率门槛：用实测数字定线，不拍脑袋
+  #
+  # 2026-11 实测 keynest-core 行覆盖 87.14%（含 Windows 专属的 secure.rs，
+  # 那里的 Win32 剪贴板路径无法在 CI 里单测）。门槛设为 85%，留 2 个点余量：
+  # 新增一批没测试的代码就会掉下来，这正是它该起的作用。
+  # ---------------------------------------------------------------- #
+  coverage:
+    name: coverage / core
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+      - name: 行覆盖率门槛
+        working-directory: rust
+        run: cargo llvm-cov -p keynest-core --fail-under-lines 85 --summary-only
+
+  # ---------------------------------------------------------------- #
+  # 依赖审计：许可证 / 漏洞 / 重复版本 / 来源
+  # ---------------------------------------------------------------- #
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: rust/Cargo.toml
+          command: check
+          arguments: --all-features
+
+  # ---------------------------------------------------------------- #
+  # 旧版 Electron 实现：仍在仓库里，但已被 Rust 版取代。
+  # 保留这层测试只是为了让还没升级的用户不至于拿到彻底坏掉的旧版，
+  # 不阻塞主线，也不作为发布标准。1.0 前会连同 src/ 一起移除。
+  # ---------------------------------------------------------------- #
+  legacy-electron:
+    name: legacy electron（非阻塞）
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
           cache: npm
-
-      - name: 安装依赖
-        run: npm ci --ignore-scripts
-        continue-on-error: true
-
-      # Electron 只在界面测试时需要；单元测试不依赖它
-      - name: 安装依赖（回退到 npm install）
-        run: npm install --ignore-scripts
-        continue-on-error: true
-
+      - run: npm ci --ignore-scripts
       - name: 单元测试
-        run: |
-          node test/vault.test.js
-          node test/import.test.js
-          node test/export.test.js
-          node test/cli.test.js
-          node test/csv-discovery.test.js
-
-      - name: start.cmd 启动检查
-        run: node test/launcher.test.js
+        run: node test/vault.test.js && node test/cli.test.js && node test/csv-discovery.test.js

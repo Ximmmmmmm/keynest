@@ -2,71 +2,124 @@
 
 感谢你愿意参与。这是个小型项目，规则尽量少，但有几条是硬的。
 
+---
+
+## 先说清楚：这是个安全软件
+
+改动会被几百个不认识的人用来存真实密码。因此：
+
+- **安全优先于功能数量，数据安全优先于开发便利。**
+- 不接受「为了通过测试而删掉测试」。
+- 不接受「先合并、以后再补测试」。
+- 不接受自研加密算法、硬编码密钥、用 Base64 冒充加密。
+- 不接受未经独立审计却宣称「已审计」。
+
+如果你不确定某个改动会不会削弱安全性，**先开 issue 讨论**，不要直接写一大坨 PR。
+
+---
+
 ## 开发环境
 
 ```bash
-git clone <repo>
-cd keynest
-npm install
-npm start          # 启动应用
-npm test           # 单元测试（不需要 Electron）
+# Rust 1.89+（用到标准库的 File::try_lock）
+rustup toolchain install stable
+rustup component add clippy rustfmt
+
+cd rust
+cargo build
+cargo run -p keynest-egui        # 启动界面
 ```
 
-要求 Windows 10/11 + Node.js 18+（开发时用的是 Node 24）。
-
-## 提交前必须跑
+可选但推荐：
 
 ```bash
-npm test           # 全部单元测试必须通过
+cargo install cargo-deny          # 依赖审计
 ```
 
-改动涉及界面时，额外跑：
+---
+
+## 提交前必须全绿
 
 ```bash
-npm run test:ui
-npm run test:e2e
+cd rust
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo deny check
 ```
 
-CI 会跑 `npm test`，不通过的 PR 不会合并。
+这四条与 CI 完全一致。本地过了、CI 挂了，通常是漏了某个 target——
+`--all-targets` 会把示例与集成测试一起编进去，别只跑 `cargo test`。
+
+---
 
 ## 代码约定
 
-- **纯 CommonJS + 原生 JS**，不引入构建步骤。这个项目刻意保持「改完就能跑」。
-- **不新增运行时依赖**。加密只用 Node 内置 `crypto`。需要新依赖时请在 issue 里说明理由。
-- 主进程代码放在 `src/main/`，必须能在无 Electron 环境下被 `require` 并单测（参考 `vault.js` / `browser-import.js`）。
-- 所有用户内容进 DOM 前必须过 `esc()`。
-- 新增 IPC 通道要同时改 `main.js`（handle）和 `preload.js`（白名单），不要在渲染进程里碰 `ipcRenderer`。
+### 分层
 
-## 测试要求
+- `keynest-core` **不许**依赖任何 UI / WebView / 网络库。它是纯逻辑。
+- 界面状态只在 `keynest-egui/src/app.rs` 里迁移；`views/*` 只画界面并返回意图枚举。
+- 新交互的固定套路见 [ARCHITECTURE.md](docs/ARCHITECTURE.md#6-意图intent模式)。
 
-- 新增纯逻辑（解析、加密、转换）→ 加单元测试，放在 `test/`，用现有的裸 `test()` 写法即可。
-- 修复 bug → 补一个能复现该 bug 的测试。
-- 涉及界面的改动 → 在 `test/ui-check.js` 里加断言。
+### 敏感数据
 
-## 不接受的内容
+- 主密码、密钥、明文密码一律用 `Zeroizing` 或 `SecretKey` 包裹。
+- 任何结构体都不要 `#[derive(Debug)]` 后直接包含秘密——手写 `Debug` 并打 `<redacted>`。
+- 错误信息里不许拼接可能含秘密的原始数据。
+- 新增的错误变体必须给 `code()` 一个稳定值。
 
-见 [SECURITY.md](SECURITY.md) 的「不在范围内的做法」。简单说：
+### 磁盘与兼容
 
-- 不实现绕过浏览器凭据保护（v20 / App-Bound Encryption）的任何方案
-- 不注入或替换浏览器进程
-- 不引入把密码或密钥外传的代码，包括「可选的云同步」这类默认关闭的功能
-- 不加遥测、崩溃上报、使用统计
+- 新增 `Entry` 字段必须带 `#[serde(default)]`，**并配一条「缺该字段的旧 JSON 仍可解析」的测试**。
+- 改文件格式必须新增版本号，不许原地改语义。旧版本读取路径至少要保留一个大版本。
+- 任何破坏性迁移都要：先备份 → 写入 → 用主密码重新打开验证 → 失败自动回滚。
+
+### 测试
+
+- 修 bug 先写一个会失败的测试，再修。
+- 涉及解密的改动，至少要覆盖：正确密码、错误密码、文件被改、文件被截断。
+- 新增界面交互，尽量把逻辑抽成纯函数放进 `app.rs`，那样能脱离渲染单测。
+
+---
 
 ## 提交信息
 
-用中文或英文都行，一句话说清做了什么：
+用中文或英文都可以，标题一句话说清"做了什么"，正文说"为什么"。
 
+```text
+修复：导入时同名条目覆盖已有密码
+
+import_entries 的去重键原来只比较标题，导致同名不同账号的记录互相覆盖。
+改成「标题 + 账号」（忽略大小写），并补一条回归测试。
 ```
-修复：导入超过 1000 条时界面卡顿
-新增：条目支持 TOTP
-文档：补充威胁模型说明
-```
 
-## 报告问题
+---
 
-- 功能建议 / 普通 bug → 开 issue
-- 安全漏洞 → 走 [SECURITY.md](SECURITY.md) 里的私下渠道，不要开公开 issue
+## Pull Request
 
-## 许可
+- 一个 PR 做一件事。重构和功能分开。
+- 描述里写清楚：**改了什么 / 为什么 / 怎么验证的**。
+- 涉及界面的改动，附一张 `cargo run -p keynest-egui --example shots` 生成的截图。
+- 涉及格式或迁移的改动，说明回滚方案。
 
-提交的代码默认以 MIT 许可发布（见 [LICENSE](LICENSE)）。
+---
+
+## 文档
+
+- 安全相关的说法必须能在源码里指到具体位置（文件 + 函数）。
+- 不要写"银行级加密""军工级"这类词。
+- 改了行为就同步更新 [README](README.md) / [SECURITY](SECURITY.md) / [ARCHITECTURE](docs/ARCHITECTURE.md)。
+- 用户可感知的变更写进 [CHANGELOG](CHANGELOG.md)。
+
+---
+
+## 安全问题
+
+**不要**在公开 issue 或 PR 里描述漏洞细节。见 [SECURITY.md](SECURITY.md)。
+
+---
+
+## 许可证
+
+项目采用 MIT OR Apache-2.0 双许可。提交 PR 即表示你同意以这两个许可证分发你的贡献，
+并且你有权这样做（例如不是从别处抄来的、不是雇主独占的代码）。

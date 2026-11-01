@@ -1,9 +1,9 @@
 {
   "name": "keynest",
   "productName": "钥巢",
-  "version": "0.1.0",
+  "version": "0.4.3",
   "description": "钥巢 KeyNest — 本地加密密码管理器",
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "private": false,
   "homepage": "",
   "repository": {
