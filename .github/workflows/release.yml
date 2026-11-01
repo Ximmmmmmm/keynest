@@ -5,6 +5,15 @@ on:
   push:
     tags:
       - "v*"
+  # 手动触发：用于在不移动 tag 的前提下重跑某个已存在的 tag。
+  # 注意 checkout 用的 ref 是 inputs.tag（见各作业），所以构建的仍然是
+  # tag 指向的那个提交，不会拿 main 的最新代码去冒充 v0.4.3。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（例如 v0.4.3）"
+        required: true
+        type: string
 
 # 最小权限：默认只读。只有真正创建 Release 的 publish 作业才提权到 write，
 # 其余两个作业（校验、构建）即使被注入也拿不到写权限。
@@ -22,9 +31,12 @@ jobs:
   verify:
     name: 发布前校验
     runs-on: windows-latest
+    env:
+      REF_NAME: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
         with:
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
 
       - name: 安装 Rust
@@ -42,7 +54,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${REF_NAME#v}"
           CORE=$(grep -m1 '^version' keynest-core/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
           GUI=$(grep -m1 '^version' keynest-egui/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
           echo "tag=$TAG core=$CORE gui=$GUI"
@@ -63,8 +75,20 @@ jobs:
         working-directory: rust
         run: cargo test --workspace
 
-      - name: 依赖审计
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
+  # ------------------------------------------------------------------ #
+  # 依赖审计：必须跑在 Linux。
+  # cargo-deny-action 是 Docker 容器型 action，Windows/macOS runner
+  # 不支持容器型 action——第一次真实运行就卡在这里。
+  # ------------------------------------------------------------------ #
+  audit:
+    name: 依赖审计
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25  # v2.1.1
         with:
           manifest-path: rust/Cargo.toml
           command: check
@@ -75,11 +99,14 @@ jobs:
   # ------------------------------------------------------------------ #
   build:
     name: 构建 Windows x64
-    needs: verify
+    needs: [verify, audit]
     runs-on: windows-latest
+    env:
+      REF_NAME: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
         with:
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
 
       - name: 安装 Rust
@@ -107,7 +134,7 @@ jobs:
 
           # 使用说明：把数据位置与"没有审计"这件事写在最显眼处
           @"
-          钥巢 KeyNest $env:GITHUB_REF_NAME（Windows x64 绿色版）
+          钥巢 KeyNest $env:REF_NAME（Windows x64 绿色版）
 
           用法
             1. 把 KeyNest.exe 放到任意目录，双击运行。
@@ -145,9 +172,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # 只在这个作业里需要写权限
+    env:
+      REF_NAME: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
         with:
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
 
       - name: 下载构建产物
@@ -171,7 +201,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VER="${GITHUB_REF_NAME#v}"
+          VER="${REF_NAME#v}"
           # 用 index() 而不是正则：版本号里的点和方括号在正则里都要转义，
           # 少转一个就会把 [0.4.3] 当成字符类，抽出来是空的。
           awk -v ver="$VER" '
@@ -205,7 +235,7 @@ jobs:
       - name: 创建 Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.2.2
         with:
-          name: "钥巢 KeyNest ${{ github.ref_name }}"
+          name: "钥巢 KeyNest ${{ env.REF_NAME }}"
           body_path: release-notes.md
           files: |
             release-stage/KeyNest.exe
