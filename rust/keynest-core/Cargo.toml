@@ -1,21 +1,65 @@
 [package]
 name = "keynest-core"
-version = "0.1.0"
+version = "0.4.3"
 edition = "2021"
-description = "钥巢的加密仓库核心（纯逻辑，无 UI 依赖）"
-license = "MIT"
+description = "钥巢的加密仓库核心（纯逻辑，无 UI / 无 WebView 依赖）"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
+# --- 序列化 ---
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# --- 密钥派生 ---
+# v2 新库使用 Argon2id（内存硬，抗 GPU/ASIC 爆破）
+argon2 = "0.5"
+# v1 旧库兼容读取仍需要 scrypt，保留但不用于新建
 scrypt = "0.11"
+
+# --- 对称加密 ---
+# v2 使用 XChaCha20-Poly1305（192 位随机 nonce，随机生成无碰撞风险）
+chacha20poly1305 = "0.10"
+# v1 旧库兼容读取仍需要 AES-256-GCM
 aes-gcm = "0.10"
-rand = "0.8"
-base64 = "0.22"
+
+# --- 随机数 ---
+# 直接调用操作系统 CSPRNG，不再经由 rand。
+# 这样 salt / nonce / 生成密码全部走同一个可信来源。
+getrandom = "0.2"
+
+# --- 内存清零 ---
 zeroize = { version = "1", features = ["derive"] }
+
+# --- 常量时间比较 ---
+# 只用于比对派生出的密钥（验证旧主密码）。已在 aead 的依赖树里，不引入新代码。
+subtle = "2"
+
+# --- 导入导出 ---
+# 手写 CSV 解析是 bug 温床（引号、内嵌逗号/换行、BOM），用成熟实现。
+csv = "1"
+
+# --- TOTP ---
+# HMAC + 三种摘要。注意：这里的 SHA-1 只用于 TOTP（RFC 6238 规定，
+# 认证器 App 普遍只支持 SHA-1），**不用于任何密码派生或口令保护**。
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+
+# --- 其他 ---
+base64 = "0.22"
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+# 仅用于剪贴板（含历史排除）与系统级闲置检测，不涉及任何 WebView
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -22,7 +22,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("    条目数: {}", data.entries.len());
             println!("    分类: {:?}", data.categories);
             for e in &data.entries {
-                println!("    - {} | {} | {} | {}", e.title, e.username, e.password, e.url);
+                println!(
+                    "    - {} | {} | {} | {}",
+                    e.title, e.username, e.password, e.url
+                );
             }
             // 输出 JSON，便于和 Node 版逐字节比对
             println!("--- JSON ---");

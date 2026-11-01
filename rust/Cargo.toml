@@ -1,9 +1,11 @@
 [workspace]
-members = ["keynest-core", "keynest-app"]
+members = ["keynest-core", "keynest-egui"]
 resolver = "2"
 
+# 任务要求：strip + lto + opt-level="z" + panic=abort + codegen-units=1
 [profile.release]
-opt-level = "s"
-lto = true
-codegen-units = 1
 strip = true
+lto = true
+opt-level = "z"
+panic = "abort"
+codegen-units = 1

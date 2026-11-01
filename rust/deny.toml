@@ -1,0 +1,68 @@
+# cargo-deny 配置：依赖审计的自动门禁。
+#
+# 三件事必须自动化，否则「依赖是安全的」永远只是一句话：
+#   1. 许可证兼容性 —— 别人能不能合法地用这个项目；
+#   2. 已知漏洞  —— RustSec 公告库；
+#   3. 依赖来源  —— 只能来自 crates.io，不能有 git 依赖或来路不明的镜像。
+#
+# 本地运行：`cd rust && cargo deny check`
+
+[graph]
+# 不按目标平台过滤：CI 在三个平台上跑，任何平台的依赖都要合规。
+targets = []
+
+[advisories]
+version = 2
+# 带漏洞的依赖一律失败；被 yank 的包只警告（它通常仍可用，只是不该新增引用）。
+yanked = "warn"
+# 「无人维护」只检查工作区**直接**依赖的 crate。
+#
+# 理由：Linux 图形栈会带进一批 D-Bus / 字体相关的传递依赖
+# （zbus、zvariant、ttf-parser 等），它们只出现在 Linux GUI 构建里，
+# 而本项目的发布目标是 Windows。把整棵传递树都算进来，只会制造
+# 永远清不掉的红灯，最后的结果是没人再看这个门禁——比不开更糟。
+# 真正的漏洞（vulnerability）仍然对所有 crate 生效。
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+version = 2
+# 这些都是 OSI 认可、可安全用于开源与商业再分发的许可证。
+# 本项目采用 MIT OR Apache-2.0 双许可，依赖必须能与之共存。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "Unlicense",
+    "NCSA",
+    "OpenSSL",
+    "CDLA-Permissive-2.0",
+    # 字体许可证：egui 内置的默认字体来自 Ubuntu 与 SIL OFL。
+    # 允许它们的前提是**随程序一起分发时保留许可证与署名**，
+    # 这一点写进了 docs/THREAT_MODEL.md 与发行说明。
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# 同一个 crate 出现多个版本只是警告：图形栈里几乎无法避免，
+# 但新增时要有人看一眼是不是引入了老的、不再维护的分支。
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+# 只允许 crates.io。git 依赖会让「构建结果可复现」变成一句空话。
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

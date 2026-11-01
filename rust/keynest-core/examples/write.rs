@@ -23,6 +23,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         url: "https://rust.test".into(),
         category: "网站".into(),
         notes: "由 Rust 版写入".into(),
+        favorite: false,
+        kind: keynest_core::kinds::LOGIN.to_string(),
+        fields: Vec::new(),
+        totp: None,
+        password_changed_at: None,
+        deleted_at: None,
         created_at: String::new(),
         updated_at: String::new(),
     })?;
