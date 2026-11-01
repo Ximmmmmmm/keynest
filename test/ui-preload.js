@@ -16,7 +16,7 @@ const snapshot = {
     {
       id: 'e1',
       title: 'GitHub',
-      username: 'xim.dev@outlook.com',
+      username: 'demo.dev@example.com',
       password: 'kR7#vQm2!xLp9@Wd',
       url: 'https://github.com',
       category: '网站',
@@ -27,7 +27,7 @@ const snapshot = {
     {
       id: 'e2',
       title: '腾讯云控制台',
-      username: 'admin@ximlab.cn',
+      username: 'admin@example.com',
       password: 'Tcloud-2026!Aq7#z',
       url: 'https://console.cloud.tencent.com',
       category: '服务器',
@@ -38,7 +38,7 @@ const snapshot = {
     {
       id: 'e3',
       title: 'QQ 邮箱',
-      username: 'xim@qq.com',
+      username: 'demo.user@example.com',
       password: 'mail-Passw0rd!77',
       url: 'https://mail.qq.com',
       category: '邮箱',
@@ -82,7 +82,7 @@ const snapshot = {
     {
       id: 'e7',
       title: 'Notion',
-      username: 'xim.workspace@gmail.com',
+      username: 'demo.workspace@example.com',
       password: 'N0tion!Workspace#9',
       url: 'https://www.notion.so',
       category: '应用',
@@ -111,7 +111,7 @@ contextBridge.exposeInMainWorld('vaultApi', {
     ok({
       exists: true,
       unlocked: false,
-      path: 'C:\\Users\\XIM\\AppData\\Roaming\\KeyNest\\vault.dat',
+      path: 'C:\\Users\\Public\\AppData\\Roaming\\KeyNest\\vault.dat',
       version: '0.1.0',
     }),
   create: async () => ok(snapshot),
@@ -130,7 +130,7 @@ contextBridge.exposeInMainWorld('vaultApi', {
     ok({ password: 'q7#Vx2!Lm9@Rt4$Kw', strength: { score: 4, bits: 118, label: '很强' } }),
   estimateStrength: async () => ok({ score: 4, bits: 118, label: '很强' }),
   copy: async () => ok({ clearedIn: 30 }),
-  exportBackup: async () => ok({ canceled: false, path: 'C:\\Users\\XIM\\Desktop\\vault-backup.dat' }),
+  exportBackup: async () => ok({ canceled: false, path: 'C:\\Users\\Public\\Desktop\\vault-backup.dat' }),
   wipe: async () => ok({ wiped: false }),
   openDataFolder: async () => ok(true),
   openExternal: async () => ok(true),
@@ -168,17 +168,17 @@ contextBridge.exposeInMainWorld('vaultApi', {
       found: true,
       confident: true,
       truncated: false,
-      scannedDirs: ['C:\\Users\\XIM\\Downloads'],
+      scannedDirs: ['C:\\Users\\Public\\Downloads'],
       files: [
         {
-          path: 'C:\\Users\\XIM\\Downloads\\Chrome 密码.csv',
+          path: 'C:\\Users\\Public\\Downloads\\Chrome 密码.csv',
           name: 'Chrome 密码.csv',
           size: 8421,
           ageLabel: '2 分钟前',
           ageMs: 120000,
         },
         {
-          path: 'C:\\Users\\XIM\\Downloads\\Edge 密码.csv',
+          path: 'C:\\Users\\Public\\Downloads\\Edge 密码.csv',
           name: 'Edge 密码.csv',
           size: 21500,
           ageLabel: '3 分钟前',
@@ -187,14 +187,14 @@ contextBridge.exposeInMainWorld('vaultApi', {
       ],
       candidates: [
         {
-          path: 'C:\\Users\\XIM\\Downloads\\Chrome 密码.csv',
+          path: 'C:\\Users\\Public\\Downloads\\Chrome 密码.csv',
           name: 'Chrome 密码.csv',
           size: 8421,
           ageLabel: '2 分钟前',
           ageMs: 120000,
         },
         {
-          path: 'C:\\Users\\XIM\\Downloads\\Edge 密码.csv',
+          path: 'C:\\Users\\Public\\Downloads\\Edge 密码.csv',
           name: 'Edge 密码.csv',
           size: 21500,
           ageLabel: '3 分钟前',
@@ -202,7 +202,7 @@ contextBridge.exposeInMainWorld('vaultApi', {
         },
       ],
       file: {
-        path: 'C:\\Users\\XIM\\Downloads\\Chrome 密码.csv',
+        path: 'C:\\Users\\Public\\Downloads\\Chrome 密码.csv',
         name: 'Chrome 密码.csv',
         size: 8421,
         ageLabel: '2 分钟前',
@@ -213,7 +213,7 @@ contextBridge.exposeInMainWorld('vaultApi', {
     ok({
       stats: { added: 64, updated: 0, skipped: 0, invalid: 0, failed: 0, appBound: 0, total: 64, skippedRows: 2 },
       fileName: 'Chrome 密码.csv',
-      filePath: 'C:\\Users\\XIM\\Downloads\\Chrome 密码.csv',
+      filePath: 'C:\\Users\\Public\\Downloads\\Chrome 密码.csv',
       snapshot,
     }),
   importCsvFiles: async () =>
@@ -221,13 +221,13 @@ contextBridge.exposeInMainWorld('vaultApi', {
       stats: { added: 64, updated: 0, skipped: 0, invalid: 0, failed: 0, appBound: 0, total: 64, skippedRows: 2 },
       fileCount: 2,
       perFile: [
-        { path: 'C:\\Users\\XIM\\Downloads\\Chrome 密码.csv', name: 'Chrome 密码.csv', count: 40, error: null },
-        { path: 'C:\\Users\\XIM\\Downloads\\Edge 密码.csv', name: 'Edge 密码.csv', count: 24, error: null },
+        { path: 'C:\\Users\\Public\\Downloads\\Chrome 密码.csv', name: 'Chrome 密码.csv', count: 40, error: null },
+        { path: 'C:\\Users\\Public\\Downloads\\Edge 密码.csv', name: 'Edge 密码.csv', count: 24, error: null },
       ],
       fileName: '2 个文件（Chrome 密码.csv、Edge 密码.csv）',
       filePaths: [
-        'C:\\Users\\XIM\\Downloads\\Chrome 密码.csv',
-        'C:\\Users\\XIM\\Downloads\\Edge 密码.csv',
+        'C:\\Users\\Public\\Downloads\\Chrome 密码.csv',
+        'C:\\Users\\Public\\Downloads\\Edge 密码.csv',
       ],
       filePath: null,
       snapshot,
@@ -243,7 +243,7 @@ contextBridge.exposeInMainWorld('vaultApi', {
   },
 
   exportPlain: async (format) =>
-    ok({ canceled: false, path: `C:\\Users\\XIM\\Downloads\\keynest-demo.${format}`, count: 8, format }),
+    ok({ canceled: false, path: `C:\\Users\\Public\\Downloads\\keynest-demo.${format}`, count: 8, format }),
   touch: async () => ok(true),
   onLocked: () => () => {},
   onCommand: () => () => {},

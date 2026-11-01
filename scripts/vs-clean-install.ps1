@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Continue'
-$log = 'C:\Users\XIM\AppData\Local\Temp\vs-clean.log'
+$log = "$env:TEMP\vs-clean.log"
 function Log($m) { $m | Out-File $log -Append -Encoding utf8 }
 "=== $(Get-Date -Format o) ===" | Out-File $log -Encoding utf8
 
@@ -15,7 +15,7 @@ Get-Process -Name 'setup','vs_installer','vs_installershell' -EA SilentlyContinu
 Start-Sleep -Seconds 3
 
 # 3) 用 bootstrapper 全新安装（明确指定工作负载 + 组件）
-$boot = 'C:\Users\XIM\AppData\Local\Temp\vs_community.exe'
+$boot = "$env:TEMP\vs_community.exe"
 $argList = @(
   '--quiet', '--wait', '--norestart', '--nocache',
   '--add', 'Microsoft.VisualStudio.Workload.VCTools',

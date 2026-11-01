@@ -1,10 +1,10 @@
 $ErrorActionPreference = 'Continue'
-$log = 'C:\Users\XIM\AppData\Local\Temp\vs-bt.log'
-$done = 'C:\Users\XIM\AppData\Local\Temp\vs-bt.done'
+$log = "$env:TEMP\vs-bt.log"
+$done = "$env:TEMP\vs-bt.done"
 Remove-Item $done -EA SilentlyContinue
 "=== $(Get-Date -Format o) ===" | Out-File $log -Encoding utf8
 
-$bootstrapper = 'C:\Users\XIM\AppData\Local\Temp\vs_buildtools.exe'
+$bootstrapper = "$env:TEMP\vs_buildtools.exe"
 
 $argList = @(
   '--quiet',

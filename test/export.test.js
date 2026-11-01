@@ -43,7 +43,7 @@ const SAMPLE = [
   {
     title: '腾讯云',
     url: 'https://console.cloud.tencent.com',
-    username: 'admin@ximlab.cn',
+    username: 'admin@example.com',
     password: 'Tc-2026!Aq7',
     category: '服务器',
     notes: '',

@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         (
             "腾讯云控制台",
-            "admin@ximlab.cn",
+            "admin@example.com",
             "Tc-2026!Aq7#z",
             "https://console.cloud.tencent.com",
             "服务器",
@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         (
             "QQ 邮箱",
-            "xim@qq.com",
+            "demo.user@example.com",
             "mail-Passw0rd!77",
             "https://mail.qq.com",
             "邮箱",
@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         (
             "Figma",
-            "design@ximlab.cn",
+            "design@example.com",
             "Fg-2026$Design!",
             "https://www.figma.com",
             "应用",
@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         (
             "Steam",
-            "xim_steam",
+            "demo_steam",
             "St3am!#Secret",
             "https://store.steampowered.com",
             "其他",

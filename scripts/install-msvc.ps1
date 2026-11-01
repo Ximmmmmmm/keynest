@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Continue'
-$log = 'C:\Users\XIM\AppData\Local\Temp\vs-install.log'
+$log = "$env:TEMP\vs-install.log"
 "=== $(Get-Date -Format o) ===" | Out-File $log -Encoding utf8
 
 # 只装最小可用的 C++ 工具链（Tauri 编译需要 link.exe + Windows SDK）

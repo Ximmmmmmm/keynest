@@ -1,10 +1,10 @@
 $ErrorActionPreference = 'Continue'
-$log = 'C:\Users\XIM\AppData\Local\Temp\winsdk.log'
-$done = 'C:\Users\XIM\AppData\Local\Temp\winsdk.done'
+$log = "$env:TEMP\winsdk.log"
+$done = "$env:TEMP\winsdk.done"
 Remove-Item $done -EA SilentlyContinue
 "=== $(Get-Date -Format o) ===" | Out-File $log -Encoding utf8
 
-$installer = 'C:\Users\XIM\AppData\Local\Temp\winsdk.exe'
+$installer = "$env:TEMP\winsdk.exe"
 "安装器存在: $(Test-Path $installer)" | Out-File $log -Append -Encoding utf8
 
 # winsdksetup.exe 支持 /features 指定组件

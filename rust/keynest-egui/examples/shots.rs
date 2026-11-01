@@ -109,7 +109,7 @@ const SAMPLES: [(&str, &str, &str, &str, &str, &str, bool); 8] = [
     ),
     (
         "QQ 邮箱",
-        "xim@example.com",
+        "demo.user@example.com",
         "mail-Passw0rd!77",
         "https://mail.example.com",
         "邮箱",
@@ -136,7 +136,7 @@ const SAMPLES: [(&str, &str, &str, &str, &str, &str, bool); 8] = [
     ),
     (
         "Steam",
-        "xim_steam",
+        "demo_steam",
         "St3am!#Secret",
         "https://store.example.com",
         "其他",

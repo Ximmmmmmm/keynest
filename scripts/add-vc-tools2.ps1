@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Continue'
-$log = 'C:\Users\XIM\AppData\Local\Temp\vs-add2.log'
-$done = 'C:\Users\XIM\AppData\Local\Temp\vs-add2.done'
+$log = "$env:TEMP\vs-add2.log"
+$done = "$env:TEMP\vs-add2.done"
 Remove-Item $done -EA SilentlyContinue
 "=== $(Get-Date -Format o) ===" | Out-File $log -Encoding utf8
 

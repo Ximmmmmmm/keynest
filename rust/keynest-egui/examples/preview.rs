@@ -34,12 +34,18 @@ fn sample() -> VaultData {
         ),
         (
             "腾讯云控制台",
-            "admin@ximlab.cn",
+            "admin@example.com",
             "Tc-2026!Aq7#z",
             "服务器",
             "轻量服务器 2 台",
         ),
-        ("QQ 邮箱", "xim@qq.com", "mail-Passw0rd!77", "邮箱", ""),
+        (
+            "QQ 邮箱",
+            "demo.user@example.com",
+            "mail-Passw0rd!77",
+            "邮箱",
+            "",
+        ),
         (
             "招商银行",
             "6225 **** **** 8842",
@@ -49,12 +55,12 @@ fn sample() -> VaultData {
         ),
         (
             "Figma",
-            "design@ximlab.cn",
+            "design@example.com",
             "Fg-2026$Design!",
             "应用",
             "团队协作",
         ),
-        ("Steam", "xim_steam", "St3am!#Secret", "其他", ""),
+        ("Steam", "demo_steam", "St3am!#Secret", "其他", ""),
         // 超长标题 / 用户名，用来验证列内省略与裁剪
         (
             "一个非常非常长的标题用来测试会不会溢出压到用户名那一列上",

@@ -1,10 +1,10 @@
 $ErrorActionPreference = 'Continue'
-$log = 'C:\Users\XIM\AppData\Local\Temp\vs-bt2.log'
-$done = 'C:\Users\XIM\AppData\Local\Temp\vs-bt2.done'
+$log = "$env:TEMP\vs-bt2.log"
+$done = "$env:TEMP\vs-bt2.done"
 Remove-Item $done -EA SilentlyContinue
 "=== $(Get-Date -Format o) ===" | Out-File $log -Encoding utf8
 
-$boot = 'C:\Users\XIM\AppData\Local\Temp\vs_buildtools.exe'
+$boot = "$env:TEMP\vs_buildtools.exe"
 
 # 最简参数：只装 C++ 工具链，SDK 由 includeRecommended 自动带
 $argList = @(
