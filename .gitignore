@@ -57,3 +57,6 @@ rust/keynest-app/gen/
 dist-egui/
 *.exe
 *.bundle
+
+# 旧版 Electron 时期的截图（已被 docs/shots/ 取代，仅本地留存）
+docs/ui/
