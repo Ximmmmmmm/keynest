@@ -1,0 +1,25 @@
+[package]
+name = "keynest-egui"
+version = "0.4.3"
+edition = "2021"
+description = "钥巢 — 纯 Rust egui 桌面端"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+eframe = "0.37.0"
+egui = "0.37"
+# 带 version：cargo-deny 会把「只有 path 没有 version」的依赖判为 wildcard
+keynest-core = { path = "../keynest-core", version = "0.4.3" }
+raw-window-handle = "0.6"
+zeroize = "1.9.1"
+# 原生文件对话框（Windows IFileDialog），不自己拼路径输入框
+# 打开条目里的网址。只用于把 http/https 交给系统默认浏览器。
+webbrowser = "1"
+rfd = "0.15"
+# 备份文件名里的时间戳
+chrono = "0.4"
+
+[dev-dependencies]
+# 截图工具：把界面渲染成 PNG 做视觉回归
+png = "0.17"
+tempfile = "3"
