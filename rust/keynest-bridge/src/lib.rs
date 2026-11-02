@@ -16,14 +16,18 @@
 pub mod auth;
 pub mod error;
 pub mod framing;
+pub mod keyfile;
 pub mod limits;
 pub mod pipe;
 pub mod protocol;
 pub mod server;
+pub mod watchdog;
 
 pub use error::BridgeError;
 pub use limits::*;
 pub use protocol::{Command, LockState, Request, Response};
+/// 让下游（GUI）不必为了一个 Value 类型再加一次 serde_json 依赖。
+pub use serde_json;
 pub use server::{serve, VaultOps};
 
 /// 桥接层的自述版本，写进 `status` 回包，便于排查"扩展和 GUI 版本不匹配"。

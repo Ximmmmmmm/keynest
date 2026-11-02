@@ -2037,6 +2037,7 @@ dependencies = [
  "chrono",
  "eframe",
  "egui",
+ "keynest-bridge",
  "keynest-core",
  "png 0.17.16",
  "raw-window-handle",

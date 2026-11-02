@@ -10,6 +10,8 @@ eframe = "0.37.0"
 egui = "0.37"
 # 带 version：cargo-deny 会把「只有 path 没有 version」的依赖判为 wildcard
 keynest-core = { path = "../keynest-core", version = "0.4.3" }
+# 浏览器桥：只暴露 VaultOps trait 与协议类型，GUI 不直接碰管道细节
+keynest-bridge = { path = "../keynest-bridge", version = "0.1.0" }
 raw-window-handle = "0.6"
 zeroize = "1.9.1"
 # 原生文件对话框（Windows IFileDialog），不自己拼路径输入框

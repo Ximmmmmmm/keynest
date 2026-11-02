@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "KeyNest",
+  "version": "0.5.0",
+  "description": "用本地 KeyNest 密码库填充网页登录表单（不读取也不写入浏览器内置密码库）",
+
+  "minimum_chrome_version": "102",
+
+  "permissions": ["nativeMessaging", "activeTab", "scripting"],
+
+  "optional_host_permissions": ["https://*/*"],
+
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+
+  "action": {
+    "default_title": "KeyNest",
+    "default_popup": "popup/popup.html"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://*/*"],
+      "js": ["content/content-script.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+
+  "options_ui": {
+    "page": "popup/popup.html",
+    "open_in_tab": true
+  },
+
+  "web_accessible_resources": []
+}

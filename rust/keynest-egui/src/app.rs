@@ -203,6 +203,9 @@ struct Job {
 pub struct App {
     pub path: PathBuf,
 
+    /// 浏览器桥服务。只在解锁期间运行；锁定时必须停止。
+    pub bridge: crate::bridge::BridgeService,
+
     pub state: AppState,
 
     /// 单实例锁。**持有即生效**，不读它的值；drop（进程退出）时由操作系统释放。
@@ -283,8 +286,11 @@ impl App {
             AppState::NoVault
         };
 
+        let bridge = crate::bridge::BridgeService::new(keynest_core::paths::resolve_data_dir());
+
         Self {
             path,
+            bridge,
             state,
             _instance: instance,
             create_master: Zeroizing::new(String::new()),
@@ -354,6 +360,7 @@ impl App {
                             reveal: None,
                             copy_banner: None,
                         };
+                        self.bridge.start();
                     }
                     Err(e) => {
                         let msg = e.to_string();
@@ -471,6 +478,7 @@ impl App {
                     reveal: None,
                     copy_banner: None,
                 };
+                self.bridge.start();
                 self.set_toast("已从备份恢复，原文件已改名留档");
             }
             Err(e) => {
@@ -534,6 +542,9 @@ impl App {
             // vault 在此 drop，key 由 Zeroizing 清零
         }
 
+        // 锁定即断开浏览器桥：不留任何能读密码的通道
+        self.bridge.stop();
+
         clipboard::clear_on_lock(&mut self.last_copied);
 
         // 关闭所有浮层，清掉选中与展开的明文
@@ -591,6 +602,144 @@ impl App {
                 }
             }
         }
+    }
+
+    /// 消费浏览器桥的请求。
+    ///
+    /// 所有密码库访问都在这里发生——UI 线程持有 `&mut Vault`，
+    /// 后台线程只能通过通道请求，拿不到 Vault。
+    fn pump_bridge(&mut self) {
+        use crate::bridge::Call;
+        use keynest_bridge::protocol::{EntrySummary, LockState};
+
+        let calls = self.bridge.collect_calls();
+        if calls.is_empty() {
+            return;
+        }
+
+        for call in calls {
+            match call {
+                Call::LockState(reply) => {
+                    let locked = !matches!(self.state, AppState::Unlocked { .. });
+                    let _ = reply.send(if locked {
+                        LockState::Locked
+                    } else {
+                        LockState::Unlocked
+                    });
+                }
+                Call::Version(reply) => {
+                    let _ = reply.send(env!("CARGO_PKG_VERSION").to_string());
+                }
+                Call::Query { origin, reply } => {
+                    let out = self.bridge_query(&origin);
+                    let _ = reply.send(out);
+                }
+                Call::Fill {
+                    entry_id,
+                    origin,
+                    reply,
+                } => {
+                    let out = self.bridge_fill(&entry_id, &origin);
+                    let _ = reply.send(out);
+                }
+                Call::Save { payload, reply } => {
+                    let out = self.bridge_save(payload);
+                    let _ = reply.send(out);
+                }
+                Call::Conflicts(reply) => {
+                    // 冲突裁决在阶段 5，这里先回空数组而不是报错——
+                    // 扩展需要能区分"没有冲突"和"功能没做"
+                    let _ = reply.send(Ok(keynest_bridge::serde_json::json!([])));
+                }
+            }
+        }
+        let _ = EntrySummary {
+            id: String::new(),
+            title: String::new(),
+            username: String::new(),
+            url: String::new(),
+        };
+    }
+
+    /// 只读查询：绝不返回密码。
+    fn bridge_query(
+        &mut self,
+        origin: &str,
+    ) -> Result<Vec<keynest_bridge::protocol::EntrySummary>, keynest_bridge::BridgeError> {
+        use keynest_bridge::protocol::EntrySummary;
+        let AppState::Unlocked { data, .. } = &self.state else {
+            return Err(keynest_bridge::BridgeError::VaultLocked);
+        };
+
+        // 精确 origin 匹配：不做子串、不做子域通配
+        let want = crate::bridge::origin::normalize(origin)
+            .ok_or(keynest_bridge::BridgeError::InvalidRequest("origin 不合法"))?;
+
+        Ok(data
+            .entries
+            .iter()
+            .filter(|e| !e.is_deleted())
+            .filter(|e| {
+                crate::bridge::origin::normalize(&e.url)
+                    .map(|u| u == want)
+                    .unwrap_or(false)
+            })
+            .map(|e| EntrySummary {
+                id: e.id.clone(),
+                title: e.title.clone(),
+                username: e.username.clone(),
+                url: e.url.clone(),
+            })
+            .collect())
+    }
+
+    /// 取密码。每次调用都重新检查解锁状态与条目状态，不缓存。
+    fn bridge_fill(
+        &mut self,
+        entry_id: &str,
+        origin: &str,
+    ) -> Result<Zeroizing<String>, keynest_bridge::BridgeError> {
+        let AppState::Unlocked { data, .. } = &self.state else {
+            return Err(keynest_bridge::BridgeError::VaultLocked);
+        };
+
+        let want = crate::bridge::origin::normalize(origin)
+            .ok_or(keynest_bridge::BridgeError::InvalidRequest("origin 不合法"))?;
+
+        let e = data
+            .entries
+            .iter()
+            .find(|e| e.id == entry_id && !e.is_deleted())
+            .ok_or(keynest_bridge::BridgeError::InvalidRequest("条目不存在"))?;
+
+        // 二次校验：请求里声明的 origin 必须与条目真实 origin 一致，
+        // 否则就是跨站填充
+        let entry_origin = crate::bridge::origin::normalize(&e.url).ok_or(
+            keynest_bridge::BridgeError::InvalidRequest("条目没有有效网址"),
+        )?;
+        if entry_origin != want {
+            return Err(keynest_bridge::BridgeError::InvalidRequest(
+                "origin 与条目不匹配",
+            ));
+        }
+
+        // Zeroizing 保证：这份明文离开本函数即被擦除，
+        // 而不是留在某个 String 里等着被 core dump 捞走
+        Ok(Zeroizing::new(e.password.clone()))
+    }
+
+    fn bridge_save(
+        &mut self,
+        payload: keynest_bridge::protocol::SavePayload,
+    ) -> Result<String, keynest_bridge::BridgeError> {
+        let AppState::Unlocked { .. } = &self.state else {
+            return Err(keynest_bridge::BridgeError::VaultLocked);
+        };
+        // 写入路径在阶段 3（自动保存）实现；现在明确拒绝，避免半成品埋数据
+        let _ = payload;
+        Err(keynest_bridge::BridgeError::InvalidRequest(
+            "保存功能尚未启用（阶段 3）",
+        ))
     }
 
     fn set_toast(&mut self, msg: impl Into<String>) {
@@ -1572,6 +1721,10 @@ impl App {
 impl eframe::App for App {
     /// 每帧在 `ui` 之前调用：处理输入活跃度、后台任务、自动锁定、过期清理。
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 浏览器桥：把后台线程积压的请求在 UI 线程里执行。
+        // 放在最前面，保证每次请求都读取"当前这一帧"的解锁状态与条目内容。
+        self.pump_bridge();
+
         // 窗口关闭：先锁库
         if ctx.input(|i| i.viewport().close_requested()) {
             self.lock_now();

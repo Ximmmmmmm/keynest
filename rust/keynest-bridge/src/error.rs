@@ -29,6 +29,8 @@ pub enum BridgeError {
     Replay,
     /// 触发限流。
     RateLimited,
+    /// 请求或握手超时。
+    Timeout,
     /// 密码库处于锁定状态，拒绝敏感操作。
     VaultLocked,
     /// 该平台不支持命名管道。
@@ -53,6 +55,7 @@ impl BridgeError {
             BridgeError::NoSession => "NO_SESSION",
             BridgeError::Replay => "REPLAY",
             BridgeError::RateLimited => "RATE_LIMITED",
+            BridgeError::Timeout => "TIMEOUT",
             BridgeError::VaultLocked => "VAULT_LOCKED",
             BridgeError::Unsupported => "UNSUPPORTED",
             BridgeError::Io(_) => "IO",
@@ -80,6 +83,7 @@ impl fmt::Display for BridgeError {
             BridgeError::NoSession => write!(f, "会话未建立或已失效"),
             BridgeError::Replay => write!(f, "检测到重放"),
             BridgeError::RateLimited => write!(f, "请求过于频繁"),
+            BridgeError::Timeout => write!(f, "请求超时"),
             BridgeError::VaultLocked => write!(f, "密码库已锁定"),
             BridgeError::Unsupported => write!(f, "当前平台不支持"),
             BridgeError::Io(what) => write!(f, "I/O 错误：{what}"),
