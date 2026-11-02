@@ -20,7 +20,7 @@
 // content script 也没有权限伪造这类消息。
 
 import { PanelHost } from './panel-host.js';
-import { createAdblockPanel, createFillPanel } from './panels.js';
+import { createAdblockPanel, createFillPanel, createReaderPanel } from './panels.js';
 
 /** 发消息给 SW，并把异常统一成 {ok:false, error}。 */
 async function send(type, msg) {
@@ -68,7 +68,9 @@ async function init() {
     setError,
   });
 
-  host.register(createFillPanel({ getTabId: () => (currentTab ? currentTab.id : null) }));
+  const getTabId = () => (currentTab ? currentTab.id : null);
+  host.register(createFillPanel({ getTabId }));
+  host.register(createReaderPanel({ getTabId }));
   host.register(createAdblockPanel({ getTabUrl: () => (currentTab ? currentTab.url : null) }));
 
   await refreshStatus();

@@ -42,6 +42,38 @@ function pageOther() {
 }
 
 /**
+ * 文章页：阅读模式的验收页面。
+ *
+ * 刻意做成"像真实文章页"的结构——导航 + 正文 + 侧栏 + 页脚。
+ * 如果只给一段正文，测不出提取算法会不会被导航/侧栏误导。
+ */
+function pageArticle() {
+  const paras = [
+    '钥巢是一个本地优先的密码管理器。它不联网、不注册账号，所有数据加密后保存在本机。主密码通过 Argon2id 派生密钥，再以 XChaCha20-Poly1305 加密整个仓库。',
+    '这个页面存在的目的是给阅读模式提供一份可提取的正文。它包含导航栏、侧栏推荐位和页脚，这些是真实文章页的常见结构，也是正文提取算法最容易误判的地方。',
+    '阅读模式的实现刻意保守：提不出正文时什么都不做。这个取舍的理由是，把页面改坏比不做功能糟糕得多——用户会立刻卸载，而且不再尝试第二次。',
+    '正文容器不会被移动，只被克隆。所以退出阅读模式时只需要移除克隆出来的容器和一条样式规则，原始文档结构完全没有被动过，必定可以还原。',
+    '广告过滤与阅读模式共用同一套模块骨架：声明能力、声明配置、声明消息类型，其余交给宿主。加一个模块不需要改宿主代码。',
+  ];
+  return PAGE(
+    'Site A Article',
+    `<nav id="site-nav">
+       <a href="/">首页</a> <a href="/other">归档</a> <a href="/about">关于</a>
+       <a href="/rss">订阅</a> <a href="/login">登录</a>
+     </nav>
+     <div id="article-body">
+       <h1>钥巢的设计取舍</h1>
+       ${paras.map((t) => `<p>${t}</p>`).join('')}
+     </div>
+     <aside id="sidebar">
+       <a href="/p1">推荐文章一</a> <a href="/p2">推荐文章二</a>
+       <a href="/p3">推荐文章三</a> <a href="/p4">推荐文章四</a>
+     </aside>
+     <footer id="site-footer">版权所有</footer>`
+  );
+}
+
+/**
  * 启动两个 HTTPS 实例。
  * @param {{certDir:string, portA:number, portB:number}} opts
  * @returns {Promise<{close:()=>Promise<void>}>}
@@ -69,6 +101,10 @@ export async function startSites({ certDir, portA, portB }) {
     }
     if (p === '/spa') {
       res.end(pageA());
+      return;
+    }
+    if (p === '/article') {
+      res.end(pageArticle());
       return;
     }
     res.end(pageA());

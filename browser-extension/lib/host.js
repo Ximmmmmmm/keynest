@@ -24,6 +24,7 @@ import { pickStore } from './storage.js';
 import { createVaultModule, HOST_NAME, PROTOCOL_VERSION } from './modules/vault.js';
 import { createModulesModule } from './modules/registry.js';
 import { createAdblockModule } from './modules/adblock.js';
+import { createReaderModule } from './modules/reader.js';
 import { classifySender } from './sender.js';
 
 /**
@@ -193,6 +194,19 @@ export async function createHost(chromeImpl, opts = {}) {
     registry.register(adblock);
   }
 
+  // 阅读模式需要 scripting。没有该 API 时（权限被拒/老版本）不注册，
+  // 而不是让它运行时报错——"模块列表里没有"比"能点但总失败"诚实。
+  let reader = null;
+  if (chromeImpl.scripting) {
+    reader = createReaderModule({
+      scripting: chromeImpl.scripting,
+      // permissions 可能不存在（受限环境）；模块内部会退化处理
+      permissions: chromeImpl.permissions,
+      webNavigation: chromeImpl.webNavigation,
+    });
+    registry.register(reader);
+  }
+
   for (const m of opts.extraModules || []) registry.register(m);
 
   // 断连 → 清授权（模块自己登记的回调已经在 lifecycle.disconnected 里）
@@ -265,6 +279,7 @@ export async function createHost(chromeImpl, opts = {}) {
     vault,
     modulesAdmin,
     adblock,
+    reader,
     /** 核心模块清单：设置页不允许关闭它们。 */
     CORE_MODULES,
     /** 配置是否持久化（false = 内存后端，SW 重启会丢）。 */
@@ -300,4 +315,7 @@ export const KIND_REQUIREMENT = Object.freeze({
   'adblock.allow': 'popup',
   'adblock.disallow': 'popup',
   'adblock.check': 'popup',
+  // 阅读模式：只有扩展页面能触发注入（网页自己不能要求被"阅读"）
+  'reader.toggle': 'popup',
+  'reader.query': 'popup',
 });

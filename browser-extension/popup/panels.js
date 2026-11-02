@@ -255,3 +255,88 @@ export function createAdblockPanel(deps) {
   };
   return panel;
 }
+
+/* ------------------------------------------------------------------ */
+/* 阅读模式                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @param {object} deps
+ * @param {() => number|null} deps.getTabId
+ */
+export function createReaderPanel(deps) {
+  const panel = {
+    id: 'reader',
+    moduleId: 'reader',
+    order: 15, // 排在密码填充之后、广告之前
+
+    /**
+     * 注入只能在真实网页里做。popup 作为标签页打开时活动标签页是它自己
+     * （chrome-extension://），`executeScript` 会直接失败。
+     *
+     * 预览里看不出区别，所以这里主动排掉——而不是让用户点一下看报错。
+     */
+    available: () => Number.isInteger(deps.getTabId()),
+
+    async render(host) {
+      const tabId = deps.getTabId();
+      if (!Number.isInteger(tabId)) return;
+
+      const state = await host.send('reader.query', { tabId });
+      const active = !!(state && state.ok && state.active);
+
+      const head = document.createElement('div');
+      head.className = 'panel-head';
+      const title = document.createElement('span');
+      title.className = 'panel-title';
+      title.textContent = '阅读模式';
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = active ? '已开启' : '未开启';
+      if (active) badge.className = 'badge ok';
+      head.append(title, badge);
+      host.section.append(head);
+
+      host.el(
+        'p',
+        'panel-host',
+        active ? '当前页面处于阅读模式' : '把文章页收敛成正文单列'
+      );
+
+      const btn = document.createElement('button');
+      btn.className = 'ghost wide';
+      btn.textContent = active ? '退出阅读模式' : '进入阅读模式';
+      host.section.append(btn);
+
+      const note = document.createElement('p');
+      note.className = 'panel-note hidden';
+      host.section.append(note);
+
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        const res = await host.send('reader.toggle', {
+          tabId,
+          action: active ? 'uninstall' : 'install',
+        });
+        btn.disabled = false;
+
+        if (!res || !res.ok) {
+          // NO_CONTENT 是最常见的一种：这个页面看起来不像文章。
+          // 给它单独一句话，而不是甩错误码。
+          host.error(
+            res && res.error === 'NO_CONTENT'
+              ? '这个页面没有找到可提取的正文'
+              : `操作失败：${(res && res.error) || '未知错误'}`
+          );
+          return;
+        }
+
+        host.error(null);
+        // 重渲这一块（不是整个 popup：那会打断别的面板）
+        host.section.replaceChildren();
+        await panel.render(host);
+      });
+    },
+  };
+  return panel;
+}

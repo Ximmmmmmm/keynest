@@ -194,8 +194,18 @@ async function main() {
     // ---------- GUI 解锁 ----------
     startGui(dirs);
     await sleep(3000);
-    const unlock = unlockGui(dirs, MASTER);
-    const keyed = await waitFile(path.join(dirs.data, 'bridge.key'), 15000);
+
+    // 真实输入自动化有时序抖动（egui 首帧布局、前台锁竞争）。
+    // 重试一次比让整轮验收作废更合适——但也只重试一次：
+    // 连续两次失败说明是真的问题，不该用重试掩盖。
+    let unlock = unlockGui(dirs, MASTER);
+    let keyed = await waitFile(path.join(dirs.data, 'bridge.key'), 15000);
+    if (!keyed) {
+      process.stdout.write(`  （首次解锁未成功：${unlock.out}，重试一次）${NL}`);
+      await sleep(800);
+      unlock = unlockGui(dirs, MASTER);
+      keyed = await waitFile(path.join(dirs.data, 'bridge.key'), 20000);
+    }
     if (
       !record(
         'T0',
@@ -787,6 +797,140 @@ async function main() {
     // 复原：清掉豁免与规则
     await options.call(`chrome.runtime.sendMessage({ type: 'adblock.disallow', domain: 'persist.test' })`);
     await options.call(`chrome.runtime.sendMessage({ type: 'adblock.apply', mode: 'off' })`);
+
+    // ---------- T15 阅读模式：真实注入到真实页面 ----------
+    // 前置：授予 host 权限。
+    //
+    // `https://*/*` 在 manifest 里是 **optional** 的（安装时不弹窗），
+    // 所以 executeScript 前必须先 request 一次——这正是阅读模式模块里的
+    // ensureHostPermission 在做的事。这里模拟那次授权。
+    const grant = await options.call(
+      `chrome.permissions.request({ origins: ['https://*/*'] })`
+    );
+    record(
+      'T15pre',
+      '授予 host 权限（optional 权限需要用户动作触发）',
+      grant === true ? 'PASS' : 'FAIL',
+      `granted=${JSON.stringify(grant)}`
+    );
+
+
+    // 这是骨架里第一次真正调用 chrome.scripting.executeScript。
+    // 之前 scripting 权限声明着但从未被使用——权限清单查不出这种"声明了没代码用"，
+    // 只能靠一条真实用例把它压出来。
+    await options.call(
+      `chrome.runtime.sendMessage({ type: 'modules.set-enabled', id: 'reader', enabled: true })`
+    );
+
+    // 站 A 的页面是登录表单，不是文章——先验"提不出正文时什么都不做"
+    const noContent = await options.call(
+      `chrome.runtime.sendMessage({ type: 'reader.toggle', tabId: ${knTabB.id}, action: 'install' })`
+    );
+    const bStillNormal = await pageB.call(
+      `({ readerClass: document.body.classList.contains('keynest-reader'),
+          hasContainer: !!document.getElementById('keynest-reader-content') })`
+    );
+    record(
+      'T15a',
+      '非文章页：提不出正文时返回 NO_CONTENT 且页面完全未改',
+      noContent && noContent.ok === false && noContent.error === 'NO_CONTENT' &&
+        bStillNormal && bStillNormal.readerClass === false && bStillNormal.hasContainer === false
+        ? 'PASS'
+        : 'FAIL',
+      `res=${JSON.stringify(noContent)} dom=${JSON.stringify(bStillNormal)}`
+    );
+
+    // 造一个文章页：同源下用 data URL 不行（executeScript 需要真实页面），
+    // 所以直接用站点 A 的 /article 路由
+    const { targetId: tabArt } = await cdp.send('Target.createTarget', {
+      url: `https://127.0.0.1:${PORT_A}/article`,
+    });
+    const pageArt = await attach(cdp, tabArt);
+    await waitFor(async () => (await pageArt.call('document.readyState')) === 'complete', {
+      label: 'article page load',
+    });
+    await sleep(600);
+
+    const artTab = await popup.call(`(async () => {
+      const ids = await chrome.tabs.query({});
+      for (const t of ids) {
+        const f = await chrome.webNavigation.getFrame({ tabId: t.id, frameId: 0 }).catch(() => null);
+        if (f && f.url && f.url.endsWith('/article')) return { id: t.id, url: f.url };
+      }
+      return null;
+    })()`);
+    record(
+      'T15b',
+      '定位到文章页 tab',
+      artTab && Number.isInteger(artTab.id) ? 'PASS' : 'FAIL',
+      JSON.stringify(artTab)
+    );
+
+    let installRes = null;
+    let articleState = null;
+    if (artTab) {
+      installRes = await options.call(
+        `chrome.runtime.sendMessage({ type: 'reader.toggle', tabId: ${artTab.id}, action: 'install' })`
+      );
+      articleState = await pageArt.call(
+        `({ readerClass: document.body.classList.contains('keynest-reader'),
+            hasContainer: !!document.getElementById('keynest-reader-content'),
+            hasStyle: !!document.getElementById('keynest-reader-content-style'),
+            text: (document.getElementById('keynest-reader-content') || {}).textContent || '' })`
+      );
+    }
+    record(
+      'T15',
+      '文章页：注入成功，body 加 class，正文容器与样式都在',
+      installRes && installRes.ok &&
+        articleState && articleState.readerClass && articleState.hasContainer && articleState.hasStyle
+        ? 'PASS'
+        : 'FAIL',
+      `res=${JSON.stringify(installRes)} dom=${JSON.stringify({ ...(articleState||{}), text: (articleState&&articleState.text||'').slice(0,40) })}`
+    );
+
+    // ---------- T15c 原始 DOM 未被移动 ----------
+    const originIntact = await pageArt.call(
+      `(() => {
+         const orig = document.getElementById('article-body');
+         return { exists: !!orig, paragraphs: orig ? orig.querySelectorAll('p').length : -1 };
+       })()`
+    );
+    record(
+      'T15c',
+      '原始正文节点仍在原位（克隆而非移动，所以退出必定可逆）',
+      originIntact && originIntact.exists && originIntact.paragraphs >= 3 ? 'PASS' : 'FAIL',
+      JSON.stringify(originIntact)
+    );
+
+    // ---------- T15d 退出后完全还原 ----------
+    const before = await pageArt.call(
+      `(() => { const b = document.body;
+                return { children: b.children.length, cls: b.className }; })()`
+    ).catch(() => null);
+    let uninstallRes = null;
+    let afterState = null;
+    if (artTab) {
+      uninstallRes = await options.call(
+        `chrome.runtime.sendMessage({ type: 'reader.toggle', tabId: ${artTab.id}, action: 'uninstall' })`
+      );
+      afterState = await pageArt.call(
+        `({ readerClass: document.body.classList.contains('keynest-reader'),
+            hasContainer: !!document.getElementById('keynest-reader-content'),
+            hasStyle: !!document.getElementById('keynest-reader-content-style') })`
+      );
+    }
+    record(
+      'T15d',
+      '退出阅读模式：容器、样式、body class 全部清除',
+      uninstallRes && uninstallRes.ok &&
+        afterState && !afterState.readerClass && !afterState.hasContainer && !afterState.hasStyle
+        ? 'PASS'
+        : 'FAIL',
+      `res=${JSON.stringify(uninstallRes)} dom=${JSON.stringify(afterState)}`
+    );
+
+    await cdp.send('Target.closeTarget', { targetId: tabArt }).catch(() => {});
 
     // ---------- T14 popup 面板系统 ----------
     // popup.html 现在只有一个 #panels 容器，具体内容由 panel-host 渲染。
