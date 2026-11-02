@@ -1284,13 +1284,29 @@ impl App {
         let AppState::Unlocked { data, .. } = &self.state else {
             return Err(VaultError::Locked);
         };
+
+        // **只导出活跃条目**，回收站里的不进明文文件。
+        //
+        // 用户把一条记录删进回收站，心里认为它已经"删掉了"。
+        // 导出时若把它一并写进 CSV，就等于把他以为删掉的东西
+        // 明文摊在磁盘上——那是实打实的数据外泄，而且他不会察觉。
+        //
+        // 想连回收站一起带走，应当用「导出加密备份」（那是整库副本，
+        // 语义明确），而不是明文导出。
+        let active: Vec<keynest_core::vault::Entry> = data
+            .entries
+            .iter()
+            .filter(|e| !e.is_deleted())
+            .cloned()
+            .collect();
+
         // 导出结果里是明文密码，`Zeroizing` 保证写盘后缓冲区被清零。
         let text = match kind {
-            ExportKind::Csv => portable::export_csv(&data.entries)?,
-            ExportKind::Json => portable::export_json(&data.entries)?,
+            ExportKind::Csv => portable::export_csv(&active)?,
+            ExportKind::Json => portable::export_json(&active)?,
         };
         let bytes = portable::write_plaintext_export(path, text.as_str())?;
-        Ok((data.entries.len(), bytes))
+        Ok((active.len(), bytes))
     }
 
     fn do_plaintext_export(&mut self, kind: ExportKind) {

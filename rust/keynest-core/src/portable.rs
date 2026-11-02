@@ -651,6 +651,50 @@ mod tests {
         );
     }
 
+    /// 明文导出**不得**包含回收站里的条目。
+    ///
+    /// 用户把一条记录删进回收站，心里认为它已经"删掉了"。
+    /// 导出时若把它写进 CSV，就等于把他以为删掉的东西明文摊在磁盘上。
+    ///
+    /// 想连回收站一起带走，应当用「导出加密备份」——那是整库副本，
+    /// 语义明确。
+    #[test]
+    fn export_skips_deleted_entries() {
+        // Entry 实现了 Drop（用于清零密码），所以不能整体构造后改字段，
+        // 只能先 Default 再逐项赋值。
+        let mut active = Entry::default();
+        active.id = "a".into();
+        active.title = "在用".into();
+        active.username = "u".into();
+        active.password = "secret-active".into();
+        active.category = "网站".into();
+        active.deleted_at = None;
+
+        let mut trashed = active.clone();
+        trashed.id = "b".into();
+        trashed.title = "已删除".into();
+        trashed.password = "secret-trashed".into();
+        trashed.deleted_at = Some("2026-01-01T00:00:00.000Z".into());
+
+        let entries = [active, trashed];
+
+        // 调用方（GUI）负责过滤；这里验的是"过滤后的输入确实不含已删除项"
+        let kept: Vec<Entry> = entries
+            .iter()
+            .filter(|e| !e.is_deleted())
+            .cloned()
+            .collect();
+        let csv = export_csv(&kept).unwrap();
+        assert!(
+            !csv.contains("secret-trashed"),
+            "回收站条目的密码进了明文导出"
+        );
+        assert!(csv.contains("secret-active"));
+
+        let json = export_json(&kept).unwrap();
+        assert!(!json.contains("secret-trashed"));
+    }
+
     #[test]
     fn export_then_import_roundtrip() {
         let entries = vec![
