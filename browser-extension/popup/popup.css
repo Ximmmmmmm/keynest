@@ -98,35 +98,58 @@ footer {
 
 .hidden { display: none; }
 
-/* ---------------- 广告过滤：按站点暂停 ---------------- */
+/* ---------------- 面板系统 ---------------- */
 
-.block {
-  margin-top: 10px;
+/* 每个面板是一块独立的卡片。加新功能只注册面板，不用改这里。 */
+.panel {
+  margin-bottom: 10px;
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
 }
 
-.block-head {
+.panel:last-child {
+  margin-bottom: 0;
+}
+
+.panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 
-.block-title { font-weight: 600; font-size: 12px; }
+.panel-title {
+  font-weight: 600;
+  font-size: 12px;
+}
 
-.block-host {
+.panel-host {
   margin: 4px 0 8px;
   color: var(--muted);
   font-size: 11px;
   word-break: break-all;
 }
 
-.block-note {
+.panel-note {
   margin: 6px 0 0;
   color: var(--muted);
   font-size: 11px;
+}
+
+/* 单个面板渲染失败时的占位。不显示异常细节——那只会让用户困惑。 */
+.panel-error {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: italic;
+}
+
+/* 面板里的条目列表 */
+ul.entries {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 button.wide {

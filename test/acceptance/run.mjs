@@ -788,6 +788,52 @@ async function main() {
     await options.call(`chrome.runtime.sendMessage({ type: 'adblock.disallow', domain: 'persist.test' })`);
     await options.call(`chrome.runtime.sendMessage({ type: 'adblock.apply', mode: 'off' })`);
 
+    // ---------- T14 popup 面板系统 ----------
+    // popup.html 现在只有一个 #panels 容器，具体内容由 panel-host 渲染。
+    // 这里验的是「面板真的被渲染出来」，而不是「popup.js 里有这段代码」。
+    await options.call(
+      `chrome.runtime.sendMessage({ type: 'modules.set-enabled', id: 'adblock', enabled: true })`
+    );
+    await options.call(`chrome.runtime.sendMessage({ type: 'adblock.apply', mode: 'basic' })`);
+
+    const { targetId: popupTab } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${extensionId}/popup/popup.html`,
+    });
+    const popupUi = await attach(cdp, popupTab);
+    await waitFor(async () => (await popupUi.call('document.readyState')) === 'complete', {
+      label: 'popup load',
+    });
+
+    const panels = await waitFor(
+      async () =>
+        popupUi.call(`(() => {
+          const root = document.getElementById('panels');
+          if (!root) return null;
+          const ids = Array.from(root.querySelectorAll('section.panel')).map(s => s.dataset.panel);
+          return { ids, count: ids.length, hasError: !!document.querySelector('.panel-error') };
+        })()`).catch(() => null).then((v) => (v && v.count >= 1 ? v : null)),
+      { label: 'popup panels rendered', timeoutMs: 12000 }
+    );
+    record(
+      'T14',
+      'popup 通过面板系统渲染（fill 面板存在，无渲染错误）',
+      panels && panels.ids.includes('fill') && panels.hasError === false ? 'PASS' : 'FAIL',
+      JSON.stringify(panels)
+    );
+
+    // 广告面板依赖 tab.url；popup 作为标签页打开时活动标签页是它自己，
+    // 所以 host 解析失败、整块跳过 —— 这本身是正确行为，单独记一条。
+    record(
+      'T14b',
+      'adblock 面板在拿不到站点域名时整块跳过（不显示不可用按钮）',
+      panels && !panels.ids.includes('adblock') ? 'PASS' : 'FAIL',
+      `ids=${JSON.stringify(panels && panels.ids)}`
+    );
+
+    // 复原
+    await options.call(`chrome.runtime.sendMessage({ type: 'adblock.apply', mode: 'off' })`);
+    await cdp.send('Target.closeTarget', { targetId: popupTab }).catch(() => {});
+
     // ---------- T8c 错误 entryId ----------
     const badAuth = await popup.call(
       `chrome.runtime.sendMessage({ type: 'authorize-fill', tabId: ${knTabB.id}, entryId: 'nonexistent-entry' })`
