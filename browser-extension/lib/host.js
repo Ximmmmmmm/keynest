@@ -21,6 +21,7 @@
 import { ConfigCenter } from './config.js';
 import { ModuleRegistry } from './modules.js';
 import { pickStore } from './storage.js';
+import { applyAuto } from './auto-apply.js';
 import { createVaultModule, HOST_NAME, PROTOCOL_VERSION } from './modules/vault.js';
 import { createModulesModule } from './modules/registry.js';
 import { createAdblockModule } from './modules/adblock.js';
@@ -246,6 +247,24 @@ export async function createHost(chromeImpl, opts = {}) {
     for (const fn of lifecycle.committed) fn(details);
   });
 
+  /**
+   * 处理内容脚本的 `auto.apply`。
+   *
+   * `tabId` **只来自 `sender.tab.id`**，不接受消息体里的值——
+   * 否则网页可以声称自己是别的标签页，从而触发对别人的注入。
+   */
+  async function handleAutoApply(msg, sender) {
+    const tabId = sender && sender.tab ? sender.tab.id : null;
+    if (!Number.isInteger(tabId)) return { ok: false, error: 'NO_TAB' };
+    // 只处理主 frame：iframe 里的页面不该被同一个动作改两次
+    if (Number.isInteger(sender.frameId) && sender.frameId !== 0) {
+      return { ok: false, error: 'NOT_TOP_FRAME' };
+    }
+    const host = await hostOfTab(tabId);
+    if (!host) return { ok: false, error: 'NO_HOST' };
+    return runAutoApply(tabId, host);
+  }
+
   /** 分类消息来源。 */
   function classify(sender) {
     return classifySender(sender, {
@@ -276,6 +295,13 @@ export async function createHost(chromeImpl, opts = {}) {
     }
 
     const ctx = { sender, kind };
+    if (msg.type === 'auto.apply') {
+      handleAutoApply(msg, sender)
+        .then(sendResponse)
+        .catch((e) => sendResponse({ ok: false, error: String((e && e.code) || 'AUTO_FAILED') }));
+      return true;
+    }
+
     registry
       .dispatch(msg.type, msg, ctx)
       .then(sendResponse)
@@ -283,11 +309,51 @@ export async function createHost(chromeImpl, opts = {}) {
     return true;
   }
 
+  /**
+   * tab 主 frame 的 host（自动应用要用）。
+   *
+   * 只用 `webNavigation.getFrame`：真实 Chrome 无 host 权限时
+   * `tabs.get(tabId).url` 是 undefined，用它必然拿不到 host。
+   */
+  async function hostOfTab(tabId) {
+    try {
+      const frame = await chromeImpl.webNavigation.getFrame({ tabId, frameId: 0 });
+      if (!frame || typeof frame.url !== 'string') return null;
+      const u = new URL(frame.url);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+      return u.hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 页面加载后的自动应用入口。
+   *
+   * 由内容脚本在 `document_idle` 时发起。**没有用户手势**，
+   * 所以整条链路上都不请求权限（见 lib/auto-apply.js 的说明）。
+   */
+  async function runAutoApply(tabId, host) {
+    const injectDeps = {
+      scripting: chromeImpl.scripting,
+      permissions: chromeImpl.permissions,
+      webNavigation: chromeImpl.webNavigation,
+    };
+    return applyAuto(
+      { registry, injectDeps },
+      tabId,
+      host,
+      { configFor: (id) => registry.configOf(id) }
+    );
+  }
+
   return {
     registry,
     native,
     onMessage,
     classify,
+    hostOfTab,
+    runAutoApply,
     vault,
     modulesAdmin,
     adblock,
@@ -317,6 +383,8 @@ export const KIND_REQUIREMENT = Object.freeze({
   'content-ready': 'content',
   // status 谁都能问（不含任何密码），opener 也允许
   status: 'any',
+  // 页面加载后的自动应用：只接受内容脚本（网页自己不能要求被注入样式）
+  'auto.apply': 'content',
   // 设置页自己读模块清单（不含任何密码或密钥）
   'modules.list': 'popup',
   'modules.set-enabled': 'popup',
@@ -334,4 +402,6 @@ export const KIND_REQUIREMENT = Object.freeze({
   // 夜间模式：同样只有扩展页面能触发
   'dark.toggle': 'popup',
   'dark.query': 'popup',
+  'dark.should-apply': 'popup',
+  'dark.sites': 'popup',
 });

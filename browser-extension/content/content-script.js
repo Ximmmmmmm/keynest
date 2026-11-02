@@ -166,9 +166,61 @@
     return false;
   });
 
+  /* ------------------------------------------------------------------ */
+  /* 页面加载后的自动应用                                                */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * 通知 SW："这个页面加载完了，看看有没有该自动打开的功能"。
+   *
+   * # 为什么由内容脚本发起，而不是 SW 自己听 onCommitted
+   *
+   * SW 监听 `webNavigation.onCommitted` 也有，但那个事件在 DOM 还没就绪时
+   * 就会触发——注入的样式可能立刻被页面的后续渲染覆盖。
+   *
+   * 内容脚本本来就跑在 `document_idle`，那时 DOM 已稳定，是更合适的时机。
+   *
+   * # 为什么内容脚本不自己套样式
+   *
+   * 那样要把 `darkToggle` / `readerToggle` 复制进内容脚本——MV3 的内容脚本
+   * 不支持 ES module，复制会导致**两份实现**，分叉风险与阅读模式那次相同。
+   *
+   * 所以这里只**发起请求**，注入仍由 SW 用 `executeScript` 完成。
+   * 代价是多一次消息往返（几毫秒），换来的是注入函数始终只有一份。
+   *
+   * # 失败必须静默
+   *
+   * 自动应用失败（没权限、页面不是文章）是**正常情况**，不该打扰用户：
+   * 不开任何 UI、不写 console、不弹提示。用户想用就自己去点。
+   */
+  function requestAutoApply() {
+    const host = location.hostname ? location.hostname.toLowerCase() : '';
+    if (!host) return;
+    try {
+      chrome.runtime
+        .sendMessage({ type: 'auto.apply', host })
+        .catch(() => {
+          /* 扩展重载 / SW 未就绪：忽略，这是常态 */
+        });
+    } catch {
+      /* 同上 */
+    }
+  }
+
   try {
     chrome.runtime.sendMessage({ type: 'content-ready' }).catch(() => {});
   } catch (e) {
     /* 扩展重载时可能失败，忽略 */
+  }
+
+  // 延后一点：给页面自己的首屏脚本一点时间，避免我们的滤镜被它覆盖
+  try {
+    if (document.readyState === 'complete') {
+      setTimeout(requestAutoApply, 0);
+    } else {
+      window.addEventListener('load', () => setTimeout(requestAutoApply, 0), { once: true });
+    }
+  } catch {
+    /* 环境异常时放弃自动应用，不影响手动填充 */
   }
 })();

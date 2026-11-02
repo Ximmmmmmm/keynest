@@ -233,9 +233,14 @@ content script 永远拿不到端口。这条一破，网页就能直接和本�
 
 | 层 | 命令 | 覆盖 |
 | --- | --- | --- |
-| 单元 | `node --test tests/*.test.js` | 纯逻辑：配置、注册表、来源分类、授权状态机、兑换 |
+| 装配自检 | `node scripts/selfcheck.mjs` | 14 项：模块注册、权限一致、门禁完整性、无 import、版本同步 |
+| 单元 | `node --test tests/*.test.js` | 纯逻辑：配置、注册表、来源分类、授权状态机、兑换、注入、自动应用 |
 | 集成（假 chrome） | 同上，`tests/host.test.js` | Native 端口生命周期、来源门禁、生命周期接线 |
-| 真实 Chrome | `node test/acceptance/run.mjs` | 19 项端到端，见 `test/acceptance/README.md` |
+| 真实 Chrome | `node test/acceptance/run.mjs` | 46 项端到端，见 `test/acceptance/README.md` |
+
+`selfcheck` 只查装配，不查运行时行为。它能抓到"模块没注册""权限对不上"
+"消息类型没门禁""门禁表有重复键"这类问题，但抓不到 Chrome 的字段名差异、
+权限时序、真实 DOM 行为——那些只有真实浏览器能暴露。
 
 单元/集成层用假 `chrome.*`，真实层用真 Chrome。**两层都不能省**：
 阶段 2.6 的 8 个缺陷全部是手写 Win32/生命周期踩的坑，单元测试一个都没抓到。
@@ -254,7 +259,36 @@ content script 永远拿不到端口。这条一破，网页就能直接和本�
 
 ---
 
-## 10. 下一步
+## 10. 自动应用协议
+
+任何"页面加载时该自动打开"的模块，实现一个 `autoApply`：
+
+```js
+autoApply: {
+  shouldApply(host, ctx) { return /* 该不该在这个站点自动开 */; },
+  async apply(tabId, ctx) { /* 内部走 injectInto(..., { requestPermission: false }) */ },
+}
+```
+
+宿主（`lib/auto-apply.js`）统一驱动，逐层过滤：没实现 → 跳过；
+被禁用 → 跳过；`shouldApply` 为 false → 跳过；`apply` 抛错 → 记录并继续。
+
+### 一条硬约束：绝不请求权限
+
+页面加载时**没有用户手势**。`permissions.request` 要么被静默拒绝，
+要么弹一个用户根本没预期到的确认框——后者更糟，用户会以为浏览器坏了。
+
+所以自动应用的注入一律 `requestPermission: false`：只查不请。
+用户想用这个功能，得先在 popup 里主动点一次（那有手势）。
+
+### 为什么内容脚本不自己注入
+
+那样要把注入函数复制进内容脚本（MV3 内容脚本不支持 ES module），
+产生两份实现。分叉风险是长期的，而多一次消息往返只是几毫秒。
+
+**代价**：多一次往返。**收益**：注入函数在整个项目里始终只有一份。
+
+## 11. 下一步
 
 骨架已立，接下来按路线图加模块。每加一个模块：
 

@@ -28,6 +28,20 @@
 // 注入函数无法 import。与其假装可以共享，不如把约束写明并加一致性测试。
 
 import { injectInto } from '../inject.js';
+import { createSiteMemory } from '../site-memory.js';
+
+/** 从 tab 的 URL 取 host。取不到就返回 null（不是错误）。 */
+async function hostOfTab(deps, tabId) {
+  try {
+    const frame = await deps.webNavigation.getFrame({ tabId, frameId: 0 });
+    if (!frame || typeof frame.url !== 'string') return null;
+    const u = new URL(frame.url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
 
 /** 阅读模式可用的宽度范围（与设置页一致）。 */
 export const WIDTH_MIN = 480;
@@ -201,7 +215,33 @@ export function createReaderModule(deps) {
     config: {
       width: { type: 'number', default: 680, min: WIDTH_MIN, max: WIDTH_MAX, integer: true },
       theme: { type: 'enum', values: ['auto', 'light', 'dark'], default: 'auto' },
+      // 按站点记忆：在这份名单里的站点，页面加载时自动进入阅读模式
+      readerSites: { type: 'string', default: '[]', maxLength: 8192 },
+      remember: { type: 'boolean', default: true },
     },
+    /**
+     * 自动应用（页面加载时）。
+     *
+     * 与夜间模式的差别：阅读模式**改变了 DOM 结构**，所以只在
+     * "这个站点在名单里且正文确实提得出来"时才会真的生效。
+     * 提不出来就安静失败——不该在每次打开一个非文章页时都留个错。
+     */
+    autoApply: {
+      shouldApply(host, ctx) {
+        return createSiteMemory(ctx.config, 'reader').has(host);
+      },
+      async apply(tabId, ctx) {
+        const out = await injectInto(deps, tabId, readerToggle, [
+          { action: 'install', width: ctx.config.get('width'), theme: ctx.config.get('theme') },
+        ], {
+          needPermission: true,
+          requestPermission: false, // 页面加载时没有用户手势
+        });
+        if (!out.ok) return out;
+        return { ok: true, ...out.result };
+      },
+    },
+
     handlers: [
       {
         type: 'reader.toggle',
@@ -214,7 +254,7 @@ export function createReaderModule(deps) {
           // 权限申请与注入细节由 lib/inject.js 统一处理——
           // 每个注入类模块都要走"查权限 → 按需申请 → 才注入"，
           // 各写一遍只会让某个模块忘了先查、于是每次弹框。
-          return run(
+          const out = await run(
             tabId,
             {
               action,
@@ -224,6 +264,20 @@ export function createReaderModule(deps) {
             // 卸载不需要权限：样式本来就是我们自己加的
             action === 'install'
           );
+          if (!out.ok) return out;
+
+          // 按站点记忆：只有注入成功才写名单。
+          // 注入失败还记成"已开启"，下次加载会自动尝试、又失败——用户看到开关自己跳。
+          if (ctx.config.get('remember')) {
+            const host = await hostOfTab(deps, tabId);
+            if (host) {
+              const mem = createSiteMemory(ctx.config, 'reader');
+              if (action === 'install') await mem.enable(host);
+              else await mem.disable(host);
+            }
+          }
+
+          return out;
         },
       },
       {

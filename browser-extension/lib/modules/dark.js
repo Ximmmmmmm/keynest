@@ -166,6 +166,29 @@ export function createDarkModule(deps) {
       // 是否启用"按站点记忆"。关掉时只影响当前页面，不写名单。
       remember: { type: 'boolean', default: true },
     },
+    /**
+     * 自动应用（页面加载时）。
+     *
+     * 由 `lib/auto-apply.js` 统一驱动，宿主在收到内容脚本的 `auto.apply` 后调用。
+     *
+     * **绝不请求权限**：页面加载时没有用户手势，`permissions.request` 会被拒
+     * 或弹一个用户没预期到的框。已授权就注入，没授权就安静跳过。
+     */
+    autoApply: {
+      shouldApply(host, ctx) {
+        if (!ctx.config.get('remember')) return false;
+        return createSiteMemory(ctx.config, 'dark').has(host);
+      },
+      async apply(tabId, ctx) {
+        const out = await injectInto(deps, tabId, darkToggle, [argsFrom(ctx, 'install')], {
+          needPermission: true,
+          requestPermission: false, // 关键：只说"查"，不说"请"
+        });
+        if (!out.ok) return out;
+        return { ok: true, ...out.result };
+      },
+    },
+
     handlers: [
       {
         type: 'dark.toggle',

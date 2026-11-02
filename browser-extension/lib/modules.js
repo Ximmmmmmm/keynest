@@ -188,6 +188,36 @@ export class ModuleRegistry {
   }
 
   /**
+   * 遍历已注册模块的**内部条目**（含 `raw`，即模块定义原对象）。
+   *
+   * 为什么需要它：`list()` 只返回给 UI 看的干净数据（无 handler、无内部方法）。
+   * 而自动应用这类宿主级能力需要访问模块定义上的 `autoApply`。
+   *
+   * 返回的是内部对象的浅拷贝数组，顺序与注册顺序一致——
+   * 自动应用按这个顺序跑，结果顺序才稳定可对照。
+   */
+  entries() {
+    return [...this.modules.values()].map((m) => ({
+      id: m.id,
+      requires: m.requires,
+      raw: m.raw,
+      configView: m.configView,
+    }));
+  }
+
+  /**
+   * 取某个模块的配置视图（读写当前值）。
+   *
+   * 供宿主级逻辑（自动应用）使用：它需要在模块之外读配置，
+   * 而 `dispatch` 里的 ctx 只在 handler 内部存在。
+   */
+  configOf(moduleId) {
+    const m = this.modules.get(moduleId);
+    if (!m) throw new ModuleError('UNKNOWN_MODULE', `未注册的模块: ${moduleId}`);
+    return m.configView;
+  }
+
+  /**
    * 某个模块的配置 schema（形状：`{ key: { type, values?, min?, max?, ... } }`）。
    *
    * 不含 `default`——默认值已经体现在 `list().config` 的当前值里，

@@ -22,6 +22,26 @@ import {
 } from '../lib/reader/core.js';
 import { buildDocument } from './helpers/minidom.js';
 
+/**
+ * 带读写的假配置视图。
+ *
+ * 阅读模式现在会写「按站点记忆」的名单，所以假配置必须支持 set——
+ * 只给 get 会让 handler 在写名单时抛 TypeError，
+ * 而那会掩盖真正想测的行为。
+ */
+function ctxWith(initial = {}) {
+  const store = { width: 680, theme: 'auto', readerSites: '[]', remember: true, ...initial };
+  return {
+    store,
+    config: {
+      get: (k) => store[k],
+      set: async (k, v) => {
+        store[k] = v;
+      },
+    },
+  };
+}
+
 /* ============================ 注入环境 ============================ */
 
 /**
@@ -82,7 +102,7 @@ test('FAIL-SAFE: 缺 host 权限时不发起注入（返回 HOST_PERMISSION_DENI
     webNavigation: { getFrame: async () => ({ url: 'https://example.test/a' }) },
   });
   const h = m.handlers.find((x) => x.type === 'reader.toggle');
-  const res = await h.handle({ tabId: 1, action: 'install' }, { config: { get: () => 680 } });
+  const res = await h.handle({ tabId: 1, action: 'install' }, ctxWith());
   assert.deepEqual(res, { ok: false, error: 'HOST_PERMISSION_DENIED' });
   assert.equal(scripting.calls.length, 0, '被拒后不该发起注入');
 });
@@ -101,7 +121,7 @@ test('PASS: 已持有权限时不重复请求（不反复弹确认框）', async
     webNavigation: { getFrame: async () => ({ url: 'https://example.test/a' }) },
   });
   const h = m.handlers.find((x) => x.type === 'reader.toggle');
-  await h.handle({ tabId: 1, action: 'install' }, { config: { get: () => 680 } });
+  await h.handle({ tabId: 1, action: 'install' }, ctxWith());
   assert.equal(requested, 0, '已有权限还请求会每次弹框');
 });
 
@@ -112,7 +132,7 @@ test('FAIL-SAFE: 非 http(s) 页面返回 NO_ORIGIN', async () => {
     webNavigation: { getFrame: async () => ({ url: 'chrome://settings' }) },
   });
   const h = m.handlers.find((x) => x.type === 'reader.toggle');
-  const res = await h.handle({ tabId: 1, action: 'install' }, { config: { get: () => 680 } });
+  const res = await h.handle({ tabId: 1, action: 'install' }, ctxWith());
   assert.deepEqual(res, { ok: false, error: 'NO_ORIGIN' });
 });
 
@@ -340,7 +360,7 @@ test('PASS: reader.toggle 只注入主 frame', async () => {
   });
   const h = m.handlers.find((x) => x.type === 'reader.toggle');
 
-  await h.handle({ tabId: 7, action: 'install' }, { config: { get: (k) => (k === 'width' ? 680 : 'auto') } });
+  await h.handle({ tabId: 7, action: 'install' }, ctxWith());
 
   assert.equal(scripting.calls.length, 1);
   assert.deepEqual(scripting.calls[0].target, { tabId: 7, frameIds: [0] });
@@ -352,7 +372,7 @@ test('FAIL-SAFE: reader.toggle 拒绝非整数 tabId', async () => {
   const h = m.handlers.find((x) => x.type === 'reader.toggle');
 
   for (const tabId of [null, '7', 7.5, undefined]) {
-    const res = await h.handle({ tabId }, { config: { get: () => 680 } });
+    const res = await h.handle({ tabId }, ctxWith());
     assert.deepEqual(res, { ok: false, error: 'BAD_ARGS' }, String(tabId));
   }
   assert.equal(scripting.calls.length, 0, '非法参数不该发起注入');
@@ -366,7 +386,7 @@ test('PASS: 默认动作是 install，只有显式 uninstall 才卸载', async (
     webNavigation: { getFrame: async () => ({ url: 'https://example.test/a' }) },
   });
   const h = m.handlers.find((x) => x.type === 'reader.toggle');
-  const ctx = { config: { get: () => 680 } };
+  const ctx = ctxWith();
 
   await h.handle({ tabId: 1 }, ctx);
   assert.equal(scripting.calls[0].args[0].action, 'install');
@@ -388,7 +408,7 @@ test('FAIL-SAFE: executeScript 抛"无权限"时返回 HOST_PERMISSION_DENIED', 
     webNavigation: { getFrame: async () => ({ url: 'https://example.test/a' }) },
   });
   const h = m.handlers.find((x) => x.type === 'reader.toggle');
-  const res = await h.handle({ tabId: 1 }, { config: { get: () => 680 } });
+  const res = await h.handle({ tabId: 1 }, ctxWith());
   // 注入层的错误要变成结构化返回（不是抛出去）：
   // 抛出去会被 dispatch 变成 HANDLER_FAILED，用户就看不到"该重新授权"。
   assert.equal(res.ok, false);
@@ -406,7 +426,7 @@ test('FAIL-SAFE: executeScript 抛其它错误时返回 INJECT_FAILED', async ()
     webNavigation: { getFrame: async () => ({ url: 'https://example.test/a' }) },
   });
   const h = m.handlers.find((x) => x.type === 'reader.toggle');
-  const res = await h.handle({ tabId: 1 }, { config: { get: () => 680 } });
+  const res = await h.handle({ tabId: 1 }, ctxWith());
   assert.equal(res.ok, false);
   assert.equal(res.error, 'INJECT_FAILED');
 });
@@ -418,7 +438,7 @@ test('PASS: executeScript 返回空结果时给 NO_RESULT', async () => {
     webNavigation: { getFrame: async () => ({ url: 'https://example.test/a' }) },
   });
   const h = m.handlers.find((x) => x.type === 'reader.toggle');
-  const res = await h.handle({ tabId: 1 }, { config: { get: () => 680 } });
+  const res = await h.handle({ tabId: 1 }, ctxWith());
   assert.deepEqual(res, { ok: false, error: 'NO_RESULT' });
 });
 

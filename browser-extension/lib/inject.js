@@ -70,6 +70,29 @@ export async function ensureHostPermission(permissions, origin) {
 }
 
 /**
+ * 只查是否已持有权限，**不请求**。
+ *
+ * 用于页面加载时的自动应用：那时没有用户手势，
+ * `permissions.request` 要么被静默拒绝，要么弹一个用户没预期到的框。
+ *
+ * 没有 `permissions` API 时返回 `true`（与 `ensureHostPermission` 一致），
+ * 让 `executeScript` 自己报它该报的错。
+ *
+ * @param {object|undefined} permissions
+ * @param {string} origin
+ * @returns {Promise<boolean>}
+ */
+export async function hasHostPermission(permissions, origin) {
+  if (!permissions) return true;
+  if (!origin) return false;
+  try {
+    return Boolean(await permissions.contains({ origins: [origin] }));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 把自包含函数注入指定 tab 的主 frame，并取出它的返回值。
  *
  * 三件事在这里一次做对：
@@ -122,6 +145,14 @@ export async function runInFrame(scripting, tabId, func, args = []) {
  *
  * 这是注入类模块最常用的组合，抽成一步以免每个模块重复四行样板。
  *
+ * # `requestPermission: false` —— 自动应用必须用这个模式
+ *
+ * 页面加载时**没有用户手势**。此时调 `permissions.request` 的结果是：
+ * 要么被静默拒绝，要么弹一个用户根本没预期到的确认框。后者更糟。
+ *
+ * 所以自动应用的路径只**查**不请：已授权就注入，没授权就安静地什么都不做。
+ * 用户想用这个功能，得先在 popup 里主动点一次（那一次有手势，能弹框）。
+ *
  * @param {{scripting:object, permissions?:object, webNavigation:object}} deps
  * @param {number} tabId
  * @param {Function} func
@@ -131,12 +162,18 @@ export async function runInFrame(scripting, tabId, func, args = []) {
  */
 export async function injectInto(deps, tabId, func, args = [], opts = {}) {
   const needPermission = opts.needPermission !== false;
+  // 默认允许请求——用户主动触发的路径（点按钮）应该有这个能力。
+  // 自动应用必须传 false：页面加载时没有用户手势，
+  // 请求要么被静默拒绝，要么弹一个用户根本没预期到的确认框。
+  const requestPermission = opts.requestPermission !== false;
 
-  let origin = null;
   if (needPermission) {
-    origin = await originPatternOf(deps.webNavigation, tabId);
+    const origin = await originPatternOf(deps.webNavigation, tabId);
     if (!origin) return { ok: false, error: 'NO_ORIGIN' };
-    const granted = await ensureHostPermission(deps.permissions, origin);
+
+    const granted = requestPermission
+      ? await ensureHostPermission(deps.permissions, origin)
+      : await hasHostPermission(deps.permissions, origin);
     if (!granted) return { ok: false, error: 'HOST_PERMISSION_DENIED' };
   }
 
