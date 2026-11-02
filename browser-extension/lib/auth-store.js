@@ -60,15 +60,53 @@ export class AuthStore {
 
   /** 清理过期项，返回清理数量。 */
   sweep() {
-    const t = this.now();
     let n = 0;
     for (const [k, r] of this.records) {
-      if (r.expiresAt <= t) {
+      if (this._isExpired(r)) {
         this.records.delete(k);
         n += 1;
       }
     }
     return n;
+  }
+
+  /**
+   * 计算截止时刻。时钟异常时抛错，**绝不**返回 NaN。
+   *
+   * 这是"安全失败"的唯一入口：宁可签不出授权（用户重试一次），
+   * 也不能签出一个永不过期的授权。
+   */
+  _deadline() {
+    let t;
+    try {
+      t = this.now();
+    } catch (e) {
+      throw new Error('clock unavailable');
+    }
+    if (!Number.isFinite(t)) {
+      throw new Error('clock unavailable');
+    }
+    return t + this.ttlMs;
+  }
+
+  /**
+   * 判断是否已过期。
+   *
+   * 时钟异常时**视为已过期**（保守方向），而不是"不过期"。
+   * 注意 `NaN <= x` 恒为 false，所以必须显式判 NaN，不能只写比较。
+   */
+  _isExpired(record) {
+    let t;
+    try {
+      t = this.now();
+    } catch (e) {
+      // 时钟抛异常 → 保守视为已过期（不能放行）
+      return true;
+    }
+    if (!Number.isFinite(t) || !Number.isFinite(record.expiresAt)) {
+      return true;
+    }
+    return record.expiresAt <= t;
   }
 
   /**
@@ -90,7 +128,9 @@ export class AuthStore {
       origin: fields.origin,
       entryId: fields.entryId,
       username: fields.username || '',
-      expiresAt: this.now() + this.ttlMs,
+      // 时钟异常（NaN）时 **拒绝签发**：否则 expiresAt 也是 NaN，
+      // 而 `NaN <= NaN` 恒为 false → 过期检查永久失效。
+      expiresAt: this._deadline(),
     });
     return this.records.get(nonce);
   }
@@ -123,7 +163,7 @@ export class AuthStore {
       // 后续请求拿不到任何东西。
       return null;
     }
-    if (r.expiresAt <= this.now()) {
+    if (this._isExpired(r)) {
       this.records.delete(nonce);
       return null;
     }
@@ -152,7 +192,7 @@ export class AuthStore {
   confirm(nonce) {
     const r = this.records.get(nonce);
     if (!r || r.state !== 'validating') return null;
-    if (r.expiresAt <= this.now()) {
+    if (this._isExpired(r)) {
       this.records.delete(nonce);
       return null;
     }

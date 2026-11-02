@@ -40,7 +40,41 @@ let seq = 0;
  * 而 SW 依赖 chrome.* API 无法在 node 里直接跑。
  * SW 引用的是**同一份**状态机代码，不是复制品。
  */
-const auths = new AuthStore(() => Date.now(), AUTH_TTL_MS);
+/**
+ * 授权 TTL 的时间源：**单调时钟**。
+ *
+ * # 为什么不用 Date.now()
+ *
+ * `Date.now()` 是墙上时钟，会随系统时间调整而跳变：
+ *
+ * - 用户把时间**往前拨**（如 10 分钟）→ `now` 变小 → 已到期的授权
+ *   反而"还没到期"，**有效期被非法延长**；
+ * - NTP 校时回拨、时区/夏令时切换同样会造成跳变。
+ *
+ * `performance.now()` 返回相对上下文启动的毫秒数，**单调递增**，
+ * 不受系统时间调整影响——它天生就是用来量"时间间隔"的。
+ *
+ * # 为什么 SW 重启后归零也没问题
+ *
+ * `performance.now()` 在 Service Worker 重启后从 0 重新计。
+ * 但 SW 重启时 `auths` 本来就是空的（内存 Map，且有显式 clear），
+ * 旧授权不可能被恢复——所以两者语义天然一致，不需要额外处理。
+ *
+ * # 异常时安全失败
+ *
+ * 若 `performance` 不可用或 `now()` 返回非有限数，**直接拒绝**（返回 NaN
+ * 让比较失败），**绝不回退到 `Date.now()`**——回退会重新引入本缺陷。
+ */
+function monotonicNow() {
+  try {
+    const t = performance.now();
+    return Number.isFinite(t) ? t : Number.NaN;
+  } catch (e) {
+    return Number.NaN;
+  }
+}
+
+const auths = new AuthStore(monotonicNow, AUTH_TTL_MS);
 
 function nextId() {
   seq += 1;
