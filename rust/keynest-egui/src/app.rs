@@ -2001,7 +2001,12 @@ impl eframe::App for App {
                 self.edit = Some(EditState::new_entry(cat));
             }
             if lock {
-                self.lock_now();
+                // Ctrl+L 与点「锁定」按钮同属用户主动操作，
+                // 同样要照顾编辑框里的未保存内容。
+                self.request_lock();
+                if !self.pending_lock_confirm {
+                    self.set_toast("已锁定");
+                }
                 return;
             }
         }
