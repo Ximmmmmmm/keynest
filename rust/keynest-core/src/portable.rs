@@ -68,7 +68,13 @@ impl ImportReport {
     pub fn summary(&self) -> String {
         let mut s = format!("导入 {} 条", self.added);
         if self.skipped_existing > 0 {
-            s.push_str(&format!("，跳过 {} 条已存在", self.skipped_existing));
+            // 说清楚"跳过"意味着**密码没有被更新**。
+            // 只写"跳过 N 条已存在"时，用户容易以为导入把旧密码换成了新的，
+            // 而实际上库里仍是原来那份——这是导入功能最危险的误解。
+            s.push_str(&format!(
+                "，{} 条因「标题+账号」已存在而跳过（库里原有密码保持不变，未被覆盖）",
+                self.skipped_existing
+            ));
         }
         if self.skipped_invalid > 0 {
             s.push_str(&format!("，忽略 {} 条无效记录", self.skipped_invalid));
@@ -555,6 +561,39 @@ mod tests {
         .unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "权限过宽: {:o}", mode & 0o777);
+    }
+
+    /// 导入摘要必须明确说明「跳过的条目没有被覆盖」。
+    ///
+    /// 只写"跳过 N 条已存在"时，用户很容易以为导入把旧密码换成了新的，
+    /// 而库里其实仍是原来那份。这是导入功能最危险的误解——
+    /// 他可能因此删掉源文件，以为密码已经迁移过来了。
+    #[test]
+    fn skip_summary_states_passwords_are_not_overwritten() {
+        let r = ImportReport {
+            parsed: 10,
+            added: 4,
+            skipped_existing: 6,
+            skipped_invalid: 0,
+            skipped_limit: 0,
+        };
+        let s = r.summary();
+        assert!(s.contains("未"), "摘要未说明密码没被覆盖: {s}");
+        assert!(
+            s.contains("保持不变") || s.contains("未被覆盖"),
+            "摘要: {s}"
+        );
+    }
+
+    /// 没有跳过项时摘要保持简洁（不出现无意义的括号说明）。
+    #[test]
+    fn summary_without_skips_stays_short() {
+        let r = ImportReport {
+            parsed: 3,
+            added: 3,
+            ..Default::default()
+        };
+        assert_eq!(r.summary(), "导入 3 条");
     }
 
     /// 导出内容必须逐字节可读回（权限改动不能影响写入）。
