@@ -9,7 +9,7 @@
 import { normalize, isFillable } from '../lib/origin.js';
 import { AuthStore } from '../lib/auth-store.js';
 import { classifySender as classify } from '../lib/sender.js';
-import { redeemFill } from '../lib/redeem.js';
+import { redeemFill, resolveFrame } from '../lib/redeem.js';
 
 const HOST_NAME = 'com.keynest.bridge';
 const PROTOCOL_VERSION = 1;
@@ -136,9 +136,17 @@ function classifySender(sender) {
  * 创建授权。**不取密码**——密码要等到 redeem 通过校验后才取。
  * @returns {{nonce: string}}
  */
-function issueAuth({ tabId, frameId, origin, entryId, username }) {
+function issueAuth({ tabId, frameId, origin, entryId, username, documentId, topDocumentId }) {
   const nonce = cryptoNonce();
-  auths.issue(nonce, { tabId, frameId, origin, entryId, username });
+  auths.issue(nonce, {
+    tabId,
+    frameId,
+    origin,
+    entryId,
+    username,
+    documentId,
+    topDocumentId,
+  });
   return { nonce };
 }
 
@@ -148,11 +156,16 @@ function issueAuth({ tabId, frameId, origin, entryId, username }) {
  * 真正的并发安全与 frame 校验逻辑都在 lib/redeem.js 里，
  * 那样才能在 node 里跑 100 并发测试。这里不做任何逻辑判断。
  */
+/** 把 chrome.* 的真实实现打包成 redeem.js 需要的依赖形状。 */
+function chromeDeps() {
+  return { getFrame: (d) => chrome.webNavigation.getFrame(d) };
+}
+
 function redeemFillWithChrome(nonce, claimed) {
   return redeemFill(
     auths,
     {
-      getTab: (tabId) => chrome.tabs.get(tabId),
+      // 只用 getFrame：真实 Chrome 无 host 权限时 tabs.get 不返回 url
       getFrame: (d) => chrome.webNavigation.getFrame(d),
       fill: (req) => request('vault.fill', req),
     },
@@ -250,9 +263,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 /* ------------------------------------------------------------------ */
 
 async function handleQuery(tabId) {
-  const tab = await chrome.tabs.get(tabId);
-  const origin = normalize(tab.url || '');
-  if (!origin) return { ok: false, error: 'NO_ORIGIN' };
+  // origin 的唯一可信来源是 getFrame：真实 Chrome 无 host 权限时
+  // tabs.get(tabId).url 是 undefined，用它必然 NO_ORIGIN。
+  const frame = await resolveFrame(chromeDeps(), tabId, 0);
+  if (!frame) return { ok: false, error: 'NO_ORIGIN' };
+  const origin = frame.origin;
   if (!isFillable(origin)) return { ok: false, error: 'HTTP_NOT_ALLOWED' };
 
   const list = await request('vault.query', { origin });
@@ -265,10 +280,17 @@ async function handleAuthorize(msg) {
   const entryId = String(msg.entryId || '');
   if (!Number.isInteger(tabId) || !entryId) return { ok: false, error: 'BAD_ARGS' };
 
-  const tab = await chrome.tabs.get(tabId);
-  const origin = normalize(tab.url || '');
-  if (!origin) return { ok: false, error: 'NO_ORIGIN' };
+  // 目标 frame（当前只授权主框架 frameId=0）
+  const targetFrame = await resolveFrame(chromeDeps(), tabId, 0);
+  if (!targetFrame) return { ok: false, error: 'NO_ORIGIN' };
+  const origin = targetFrame.origin;
   if (!isFillable(origin)) return { ok: false, error: 'HTTP_NOT_ALLOWED' };
+
+  // 顶层文档身份（当前与目标相同，仍单独取一次以便将来支持 iframe）
+  const topFrame = await resolveFrame(chromeDeps(), tabId, 0);
+  if (!topFrame || !topFrame.documentId) {
+    return { ok: false, error: 'NO_ORIGIN' };
+  }
 
   // 先向 KeyNest 复查条目是否属于该 origin（不取密码，只查元数据）
   const list = await request('vault.query', { origin });
@@ -278,7 +300,15 @@ async function handleAuthorize(msg) {
 
   const frameId = 0;
   const username = typeof msg.username === 'string' ? msg.username.slice(0, 320) : '';
-  const { nonce } = issueAuth({ tabId, frameId, origin, entryId, username });
+  const { nonce } = issueAuth({
+    tabId,
+    frameId,
+    origin,
+    entryId,
+    username,
+    documentId: targetFrame.documentId,
+    topDocumentId: topFrame.documentId,
+  });
 
   try {
     await chrome.tabs.sendMessage(

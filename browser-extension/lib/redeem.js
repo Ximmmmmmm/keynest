@@ -2,27 +2,65 @@
 //
 // Service Worker 里只负责把 chrome.* 的真实实现注入进来；
 // 这里的逻辑是**实际运行的那份**，不是测试用的仿制品。
+//
+// # 为什么依赖 getFrame 而不是 tabs.get
+//
+// 真实 Chrome（无 host 权限）里 `chrome.tabs.get(tabId)` **不返回 url 字段**，
+// 只有 `{id, status}`。用它取 origin 必然拿到 undefined → NO_ORIGIN。
+// `chrome.webNavigation.getFrame()` 则在同样条件下**返回真实 url 与 documentId**。
+// 所以 origin 的唯一可信来源是 getFrame，tabs.get 不再参与 origin 判断。
 
 import { normalize } from './origin.js';
 
 /**
  * @typedef {object} Deps
- * @property {(tabId:number) => Promise<{url?:string}>} getTab
- * @property {(d:{tabId:number, frameId:number}) => Promise<{url?:string}>} getFrame
+ * @property {(d:{tabId:number, frameId:number}) => Promise<{url?:string, documentId?:string}>} getFrame
  * @property {(req:object) => Promise<{password?:string}>} fill
  */
+
+/**
+ * 取某个 frame 的真实 origin 与文档身份。
+ *
+ * 返回 null 表示无法确认身份——调用方必须拒绝，**不得退回只校验 frameId**。
+ *
+ * @param {Deps} deps
+ * @param {number} tabId
+ * @param {number} frameId
+ * @returns {Promise<{origin:string, documentId:string} | null>}
+ */
+export async function resolveFrame(deps, tabId, frameId) {
+  let info;
+  try {
+    info = await deps.getFrame({ tabId, frameId });
+  } catch (e) {
+    return null; // getFrame 抛异常（frame 已销毁等）
+  }
+  if (!info || typeof info !== 'object') return null;
+  if (typeof info.url !== 'string' || !info.url) return null;
+  if (typeof info.documentId !== 'string' || !info.documentId) return null;
+
+  const origin = normalize(info.url);
+  if (!origin) return null; // 非 http/https 或无法规范化
+
+  return { origin, documentId: info.documentId };
+}
 
 /**
  * 兑换并取密码。
  *
  * 并发安全的核心：`auths.claim()` 同步执行，**在任何 await 之前**。
  * 100 个并发调用里只有第一个能通过 claim，其余立即返回 null，
- * 不会触发任何 getFrame / getTab / fill 调用。
+ * 不会触发任何 getFrame / fill 调用。
+ *
+ * 身份校验（全部在 claim 之后、fill 之前）：
+ *   1. 目标 frame 的 origin 与 documentId
+ *   2. 顶层 frame 的 origin 与 documentId
+ *   3. 两项 documentId 必须与授权时记录的完全一致（同 origin 导航也能失效）
  *
  * @param {import('./auth-store.js').AuthStore} auths
  * @param {Deps} deps
  * @param {string} nonce
- * @param {{tabId:number, frameId:number, origin:string, entryId:string}} claimed
+ * @param {{tabId:number, frameId:number, origin:string, entryId:string, documentId?:string, topDocumentId?:string}} claimed
  * @returns {Promise<{ok:true, username:string, password:string} | {ok:false, error:string}>}
  */
 export async function redeemFill(auths, deps, nonce, claimed) {
@@ -30,47 +68,35 @@ export async function redeemFill(auths, deps, nonce, claimed) {
   const rec = auths.claim(nonce, claimed);
   if (!rec) return { ok: false, error: 'AUTH_REJECTED' };
 
-  // ---- 取该 frame 的真实 URL（浏览器可信数据）----
-  let frameInfo;
-  try {
-    frameInfo = await deps.getFrame({ tabId: rec.tabId, frameId: rec.frameId });
-  } catch (e) {
+  // ---- 目标 frame 身份 ----
+  const target = await resolveFrame(deps, rec.tabId, rec.frameId);
+  if (!target) {
     auths.invalidate(nonce);
     return { ok: false, error: 'FRAME_GONE' };
   }
-  if (!frameInfo || typeof frameInfo.url !== 'string') {
-    auths.invalidate(nonce);
-    return { ok: false, error: 'FRAME_GONE' };
-  }
-
-  const frameOrigin = normalize(frameInfo.url);
-  if (!frameOrigin || frameOrigin !== rec.origin) {
-    // iframe 的真实 origin 与授权不符 → 拒绝。这条是 iframe 安全的关键。
+  if (target.origin !== rec.origin) {
     auths.invalidate(nonce);
     return { ok: false, error: 'FRAME_ORIGIN_MISMATCH' };
   }
-
-  // ---- 顶层 tab 必须仍存在，且顶层 origin 也要校验 ----
-  let tab;
-  try {
-    tab = await deps.getTab(rec.tabId);
-  } catch (e) {
+  if (target.documentId !== rec.documentId) {
+    // 同 origin 但换了文档（导航）→ 旧授权必须失效
     auths.invalidate(nonce);
-    return { ok: false, error: 'TAB_GONE' };
-  }
-  if (!tab || typeof tab.url !== 'string') {
-    auths.invalidate(nonce);
-    return { ok: false, error: 'TAB_GONE' };
+    return { ok: false, error: 'DOCUMENT_CHANGED' };
   }
 
-  // 顶层 origin 必须等于授权 origin。
-  //
-  // 当前只授权 frameId === 0（主框架），所以顶层与目标 frame 是同一个文档。
-  // 如果将来支持 iframe 填充，这里必须改成：顶层可以是任意 origin，
-  // 但 frameOrigin 必须等于授权 origin，且需要在 UI 上明确告知用户
-  // "将填充到跨站 iframe"。**在那之前，放宽这条等于打开跨站填充的缺口。**
-  const topOrigin = normalize(tab.url);
-  if (!topOrigin || topOrigin !== rec.origin) {
+  // ---- 顶层 frame 身份 ----
+  const top = await resolveFrame(deps, rec.tabId, 0);
+  if (!top) {
+    auths.invalidate(nonce);
+    return { ok: false, error: 'TOP_FRAME_GONE' };
+  }
+  if (top.documentId !== rec.topDocumentId) {
+    auths.invalidate(nonce);
+    return { ok: false, error: 'TOP_DOCUMENT_CHANGED' };
+  }
+  // 当前只授权 frameId === 0，所以顶层与目标是同一文档；
+  // 将来支持 iframe 填充时必须重新审视这条（见架构文档）。
+  if (top.origin !== rec.origin) {
     auths.invalidate(nonce);
     return { ok: false, error: 'TOP_ORIGIN_MISMATCH' };
   }

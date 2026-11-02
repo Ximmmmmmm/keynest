@@ -38,6 +38,8 @@
  * @property {'issued'|'validating'|'consuming'} state
  * @property {number} tabId
  * @property {number} frameId
+ * @property {string} documentId
+ * @property {string} topDocumentId
  * @property {string} origin
  * @property {string} entryId
  * @property {string} username
@@ -81,6 +83,10 @@ export class AuthStore {
       state: 'issued',
       tabId: fields.tabId,
       frameId: fields.frameId,
+      // 文档身份：frameId 在同 frame 多次导航间保持不变，documentId 每次导航都换。
+      // 只绑 frameId 无法识别"同 origin 但已换文档"，所以必须绑 documentId。
+      documentId: fields.documentId,
+      topDocumentId: fields.topDocumentId,
       origin: fields.origin,
       entryId: fields.entryId,
       username: fields.username || '',
@@ -121,6 +127,8 @@ export class AuthStore {
       this.records.delete(nonce);
       return null;
     }
+    // 绑定值比对。documentId 由授权时记录，兑换时由 redeem.js 用 getFrame
+    // 重新取得后比对；这里只比对调用方能提供的字段。
     if (
       r.tabId !== claimed.tabId ||
       r.frameId !== claimed.frameId ||

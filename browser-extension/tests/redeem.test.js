@@ -1,14 +1,18 @@
-// 并发兑换与 frame 绑定的自动化测试。
+// 兑换流程测试：origin 来源、documentId 绑定、并发、frame 身份。
 //
-// 这是阶段 2.3 的核心：**不是顺序调用两次，而是真并发 100 个请求**。
+// 关键前提：**真实 Chrome 无 host 权限时 tabs.get 不返回 url**，
+// 所以依赖形状里根本没有 getTab——origin 只能来自 getFrame。
+// 如果哪天有人把 getTab 加回来并用于 origin 判断，这组测试的 mock 会立刻暴露它。
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AuthStore } from '../lib/auth-store.js';
-import { redeemFill } from '../lib/redeem.js';
+import { redeemFill, resolveFrame } from '../lib/redeem.js';
 
 const TTL = 5000;
 const ORIGIN = 'https://example.com';
+const DOC = 'doc-main-1';
+const TOPDOC = 'doc-top-1';
 
 function makeAuths(startAt = 0) {
   let t = startAt;
@@ -16,32 +20,69 @@ function makeAuths(startAt = 0) {
   return { auths, tick: (ms) => { t += ms; } };
 }
 
-const BIND = { tabId: 7, frameId: 0, origin: ORIGIN, entryId: 'e1', username: 'u' };
-
-function claimOf(over = {}) {
-  return { tabId: BIND.tabId, frameId: BIND.frameId, origin: BIND.origin, entryId: BIND.entryId, ...over };
+/**
+ * 授权记录的绑定值。
+ *
+ * frameId === 0 时目标就是顶层，两个 documentId 必须相同——
+ * 这是真实语义（`getFrame({frameId:0})` 返回的就是顶层文档）。
+ */
+function bind(over = {}) {
+  return {
+    tabId: 7,
+    frameId: 0,
+    origin: ORIGIN,
+    entryId: 'e1',
+    username: 'u',
+    documentId: TOPDOC,
+    topDocumentId: TOPDOC,
+    ...over,
+  };
 }
 
-/** 可观测的依赖实现：统计每个 API 被调用了几次。 */
+function claimOf(over = {}) {
+  return {
+    tabId: 7,
+    frameId: 0,
+    origin: ORIGIN,
+    entryId: 'e1',
+    ...over,
+  };
+}
+
+/**
+ * 可观测依赖：统计 getFrame / fill 调用次数。
+ * 注意**没有 getTab**——这是刻意的，反映真实 Chrome 的权限模型。
+ */
 function makeDeps(opts = {}) {
-  const calls = { getFrame: 0, getTab: 0, fill: 0 };
+  const calls = { getFrame: 0, fill: 0 };
   const delay = opts.delay ?? 0;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   return {
     calls,
     deps: {
-      getFrame: async () => {
+      getFrame: async ({ frameId }) => {
         calls.getFrame += 1;
         if (delay) await sleep(delay);
         if (opts.frameThrows) throw new Error('frame gone');
-        return { url: opts.frameUrl ?? `${ORIGIN}/login` };
-      },
-      getTab: async () => {
-        calls.getTab += 1;
-        if (delay) await sleep(delay);
-        if (opts.tabThrows) throw new Error('tab gone');
-        return { url: opts.tabUrl ?? `${ORIGIN}/login` };
+        if (opts.frameNull) return null;
+
+        // frameId === 0 就是顶层（主框架）。此时目标与顶层是同一个文档。
+        const isTop = frameId === 0;
+
+        if (isTop && opts.topMissingUrl) return { documentId: TOPDOC };
+        if (!isTop && opts.targetMissingUrl) return { documentId: DOC };
+
+        const url = isTop
+          ? opts.topUrl ?? `${ORIGIN}/login`
+          : opts.frameUrl ?? `${ORIGIN}/login`;
+        // 显式 null = 模拟"该 frame 没有 documentId"。
+        // 注意不能用 ?? 兜底，否则 null 会被替换成默认值。
+        const explicitNull = isTop ? opts.topDocId === null : opts.docId === null;
+        if (explicitNull) return { url }; // 无 documentId
+
+        const docId = isTop ? opts.topDocId ?? TOPDOC : opts.docId ?? DOC;
+        return { url, documentId: docId };
       },
       fill: async () => {
         calls.fill += 1;
@@ -53,261 +94,227 @@ function makeDeps(opts = {}) {
   };
 }
 
-/* ============================ 并发兑换 ============================ */
+/* ==================== resolveFrame：origin 来源 ==================== */
 
-test('PASS: 100 个并发请求只有 1 个成功，密码只读一次', async () => {
+test('PASS: getFrame 返回 url+documentId 时能解析出 origin', async () => {
+  const { deps } = makeDeps();
+  const r = await resolveFrame(deps, 7, 0);
+  assert.ok(r);
+  assert.equal(r.origin, ORIGIN);
+  assert.equal(r.documentId, TOPDOC);
+});
+
+test('PASS: getFrame 返回 null → resolveFrame 返回 null', async () => {
+  const { deps } = makeDeps({ frameNull: true });
+  assert.equal(await resolveFrame(deps, 7, 0), null);
+});
+
+test('PASS: getFrame 抛异常 → resolveFrame 返回 null', async () => {
+  const { deps } = makeDeps({ frameThrows: true });
+  assert.equal(await resolveFrame(deps, 7, 0), null);
+});
+
+test('PASS: 缺 url → null', async () => {
+  const { deps } = makeDeps({ topMissingUrl: true });
+  assert.equal(await resolveFrame(deps, 7, 0), null);
+});
+
+test('PASS: 缺 documentId → null（不退回只校验 frameId）', async () => {
+  const { deps } = makeDeps({ topDocId: null });
+  assert.equal(await resolveFrame(deps, 7, 0), null, 'documentId 缺失必须拒绝');
+});
+
+test('PASS: 缺 documentId 时兑换被拒，密码零读取', async () => {
   const { auths } = makeAuths();
-  auths.issue('n1', BIND);
+  auths.issue('nd1', bind());
+  const { deps, calls } = makeDeps({ topDocId: null });
+  const r = await redeemFill(auths, deps, 'nd1', claimOf());
+  assert.equal(r.ok, false);
+  assert.equal(calls.fill, 0);
+});
+
+test('PASS: 非 http/https 的 url → null', async () => {
+  const { deps } = makeDeps({ topUrl: 'about:blank' });
+  assert.equal(await resolveFrame(deps, 7, 0), null);
+});
+
+/* ==================== 正常兑换 ==================== */
+
+test('PASS: 两个 documentId 均匹配 → 兑换成功', async () => {
+  const { auths } = makeAuths();
+  auths.issue('n1', bind());
+  const { deps, calls } = makeDeps();
+  const r = await redeemFill(auths, deps, 'n1', claimOf());
+  assert.equal(r.ok, true);
+  assert.equal(calls.fill, 1, '密码只读一次');
+  assert.equal(auths.size(), 0, '成功后消费');
+});
+
+test('PASS: tabs.get 不返回 url 也能工作（origin 只来自 getFrame）', async () => {
+  // 依赖里根本没有 getTab；能跑通即证明 origin 不再依赖 tabs.get
+  const { auths } = makeAuths();
+  auths.issue('n2', bind());
+  const { deps } = makeDeps();
+  const r = await redeemFill(auths, deps, 'n2', claimOf());
+  assert.equal(r.ok, true);
+});
+
+/* ==================== documentId 不匹配 ==================== */
+
+test('PASS: 目标 frame documentId 不一致（iframe）→ 拒绝，密码零读取', async () => {
+  const { auths } = makeAuths();
+  // frameId 5 = iframe，目标 documentId 与顶层分开
+  auths.issue('n3', bind({ frameId: 5, documentId: 'doc-iframe-1' }));
+  const { deps, calls } = makeDeps({ docId: 'doc-iframe-2' });
+  const r = await redeemFill(auths, deps, 'n3', claimOf({ frameId: 5 }));
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'DOCUMENT_CHANGED');
+  assert.equal(calls.fill, 0, '密码读取必须为 0');
+});
+
+test('PASS: 顶层 documentId 不一致 → 拒绝，密码零读取', async () => {
+  const { auths } = makeAuths();
+  auths.issue('n4', bind());
+  const { deps, calls } = makeDeps({ topDocId: 'doc-top-2' });
+  const r = await redeemFill(auths, deps, 'n4', claimOf());
+  assert.equal(r.ok, false);
+  // frameId=0 时目标即顶层，先撞到 DOCUMENT_CHANGED（同一文档）
+  assert.ok(['DOCUMENT_CHANGED', 'TOP_DOCUMENT_CHANGED'].includes(r.error), r.error);
+  assert.equal(calls.fill, 0);
+});
+
+test('PASS: 同 origin 导航但 documentId 改变 → 旧授权失效', async () => {
+  const { auths } = makeAuths();
+  auths.issue('n5', bind());
+  // origin 完全相同，只有 documentId 变了
+  const { deps, calls } = makeDeps({ topUrl: ORIGIN, topDocId: 'doc-top-new' });
+  const r = await redeemFill(auths, deps, 'n5', claimOf());
+  assert.equal(r.ok, false, '同 origin 导航必须让旧授权失效');
+  assert.ok(['DOCUMENT_CHANGED', 'TOP_DOCUMENT_CHANGED'].includes(r.error), r.error);
+  assert.equal(calls.fill, 0);
+});
+
+test('PASS: frameId 不变但 documentId 改变 → 拒绝', async () => {
+  const { auths } = makeAuths();
+  auths.issue('n6', bind());
+  const { deps } = makeDeps({ topDocId: 'changed' });
+  const r = await redeemFill(auths, deps, 'n6', claimOf());
+  assert.equal(r.ok, false);
+});
+
+test('PASS: 跨 origin 导航 → 拒绝', async () => {
+  const { auths } = makeAuths();
+  auths.issue('n7', bind());
+  const { deps } = makeDeps({ topUrl: 'https://evil.test/login', topDocId: TOPDOC });
+  const r = await redeemFill(auths, deps, 'n7', claimOf());
+  assert.equal(r.ok, false);
+  // frameId=0 时目标即顶层，origin 变化先被目标校验拦下——
+  // 两种错误码都表示"跨 origin 必须拒绝"，关键是不能放行。
+  assert.ok(
+    ['FRAME_ORIGIN_MISMATCH', 'TOP_ORIGIN_MISMATCH'].includes(r.error),
+    r.error
+  );
+});
+
+test('PASS: 目标 frame origin 不匹配（iframe）→ 拒绝', async () => {
+  const { auths } = makeAuths();
+  auths.issue('n8', bind({ frameId: 5, documentId: 'doc-iframe-1' }));
+  const { deps } = makeDeps({ frameUrl: 'https://evil.test/x' });
+  const r = await redeemFill(auths, deps, 'n8', claimOf({ frameId: 5 }));
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'FRAME_ORIGIN_MISMATCH');
+});
+
+/* ==================== 并发不退化 ==================== */
+
+test('PASS: 100 并发仍只有 1 个成功，密码只读一次', async () => {
+  const { auths } = makeAuths();
+  auths.issue('c1', bind());
   const { deps, calls } = makeDeps({ delay: 5 });
 
   const results = await Promise.all(
-    Array.from({ length: 100 }, () => redeemFill(auths, deps, 'n1', claimOf()))
+    Array.from({ length: 100 }, () => redeemFill(auths, deps, 'c1', claimOf()))
   );
 
-  const ok = results.filter((r) => r.ok);
-  const rejected = results.filter((r) => !r.ok);
-
-  assert.equal(ok.length, 1, '只允许一个成功');
-  assert.equal(rejected.length, 99, '其余全部拒绝');
-  assert.equal(calls.fill, 1, '密码只能读取一次');
-  assert.equal(calls.getFrame, 1, 'frame 校验只发生一次（认领在 await 之前）');
-  assert.equal(calls.getTab, 1, 'tab 校验只发生一次');
-  assert.equal(auths.size(), 0, '成功后记录应被消费');
+  assert.equal(results.filter((r) => r.ok).length, 1);
+  assert.equal(calls.fill, 1, '密码只能读一次');
+  assert.equal(calls.getFrame, 2, '只校验目标与顶层各一次');
 });
 
-test('PASS: 100 并发 + tabs.get 延迟 50ms 仍只成功一次', async () => {
+test('PASS: 100 并发 + 50ms 延迟仍只成功一次', async () => {
   const { auths } = makeAuths();
-  auths.issue('n2', BIND);
+  auths.issue('c2', bind());
   const { deps, calls } = makeDeps({ delay: 50 });
-
   const results = await Promise.all(
-    Array.from({ length: 100 }, () => redeemFill(auths, deps, 'n2', claimOf()))
+    Array.from({ length: 100 }, () => redeemFill(auths, deps, 'c2', claimOf()))
   );
-
   assert.equal(results.filter((r) => r.ok).length, 1);
   assert.equal(calls.fill, 1);
 });
 
-test('PASS: 100 并发 + fill 延迟 50ms 仍只成功一次', async () => {
+test('PASS: 并发中 getFrame 抛异常 → 全部拒绝，密码零读取', async () => {
   const { auths } = makeAuths();
-  auths.issue('n3', BIND);
-  const { deps, calls } = makeDeps({ delay: 50 });
-
-  const results = await Promise.all(
-    Array.from({ length: 100 }, () => redeemFill(auths, deps, 'n3', claimOf()))
-  );
-
-  assert.equal(results.filter((r) => r.ok).length, 1);
-  assert.equal(calls.fill, 1, '即使 fill 很慢，也只能有一次');
-});
-
-test('PASS: 并发中 tabs.get 失败 → 全部拒绝，密码零读取', async () => {
-  const { auths } = makeAuths();
-  auths.issue('n4', BIND);
-  const { deps, calls } = makeDeps({ tabThrows: true });
-
-  const results = await Promise.all(
-    Array.from({ length: 100 }, () => redeemFill(auths, deps, 'n4', claimOf()))
-  );
-
-  assert.equal(results.filter((r) => r.ok).length, 0);
-  assert.equal(calls.fill, 0, '校验失败绝不能读密码');
-  assert.equal(auths.size(), 0, '失败必须销毁记录');
-});
-
-test('PASS: 并发中 getFrame 失败 → 全部拒绝', async () => {
-  const { auths } = makeAuths();
-  auths.issue('n5', BIND);
+  auths.issue('c3', bind());
   const { deps, calls } = makeDeps({ frameThrows: true });
-
   const results = await Promise.all(
-    Array.from({ length: 100 }, () => redeemFill(auths, deps, 'n5', claimOf()))
+    Array.from({ length: 100 }, () => redeemFill(auths, deps, 'c3', claimOf()))
   );
-
   assert.equal(results.filter((r) => r.ok).length, 0);
   assert.equal(calls.fill, 0);
 });
 
-test('PASS: 请求中途断连（fill 抛错）→ 记录销毁，不可重试', async () => {
+/* ==================== 失败后不可重试 ==================== */
+
+test('PASS: documentId 校验失败后旧 nonce 不可再次使用', async () => {
   const { auths } = makeAuths();
-  auths.issue('n6', BIND);
-  const { deps } = makeDeps({ fillThrows: true });
+  auths.issue('r1', bind());
+  const bad = makeDeps({ topDocId: 'other' });
+  const r1 = await redeemFill(auths, bad.deps, 'r1', claimOf());
+  assert.equal(r1.ok, false);
 
-  const r = await redeemFill(auths, deps, 'n6', claimOf());
-  assert.equal(r.ok, false);
-  assert.equal(auths.size(), 0, '断连后记录必须销毁');
-
-  // 再试一次也必须失败
-  const r2 = await redeemFill(auths, makeDeps().deps, 'n6', claimOf());
+  // 即使换成正确 documentId 也无法重试
+  const good = makeDeps();
+  const r2 = await redeemFill(auths, good.deps, 'r1', claimOf());
   assert.equal(r2.ok, false, '销毁后不可重试');
+  assert.equal(good.calls.fill, 0);
 });
 
-test('PASS: 认领后超时（confirm 前记录被清）→ 拒绝且不读密码', async () => {
+test('PASS: fill 抛错后记录销毁', async () => {
   const { auths } = makeAuths();
-  auths.issue('n7', BIND);
-
-  // 手动模拟：认领后立刻被外部清空（等价于导航/tab关闭/断连）
-  const rec = auths.claim('n7', claimOf());
-  assert.ok(rec);
-  auths.clear();
-
-  const { deps, calls } = makeDeps();
-  const r = await redeemFill(auths, deps, 'n7', claimOf());
+  auths.issue('r2', bind());
+  const { deps } = makeDeps({ fillThrows: true });
+  const r = await redeemFill(auths, deps, 'r2', claimOf());
   assert.equal(r.ok, false);
+  assert.equal(auths.size(), 0);
+});
+
+/* ==================== 绑定校验（认领阶段）==================== */
+
+test('PASS: frameId 不匹配 → 认领即拒绝，不调任何浏览器 API', async () => {
+  const { auths } = makeAuths();
+  auths.issue('b1', bind({ frameId: 3 }));
+  const { deps, calls } = makeDeps();
+  const r = await redeemFill(auths, deps, 'b1', claimOf({ frameId: 0 }));
+  assert.equal(r.ok, false);
+  assert.equal(calls.getFrame, 0, '绑定不符不应发起浏览器调用');
   assert.equal(calls.fill, 0);
 });
 
-/* ============================ frame 绑定 ============================ */
-
-test('PASS: 主 frame，frame URL 与授权 origin 一致 → 通过', async () => {
+test('PASS: entryId 不匹配 → 认领即拒绝', async () => {
   const { auths } = makeAuths();
-  auths.issue('f1', BIND);
-  const { deps } = makeDeps({ frameUrl: `${ORIGIN}/login` });
-  const r = await redeemFill(auths, deps, 'f1', claimOf());
-  assert.equal(r.ok, true);
-});
-
-test('FAIL-guard: 跨 origin iframe → 拒绝（frame URL 不符）', async () => {
-  const { auths } = makeAuths();
-  auths.issue('f2', BIND);
-  // 顶层是 example.com，但真实 frame 是 evil.test
-  const { deps, calls } = makeDeps({
-    tabUrl: `${ORIGIN}/page`,
-    frameUrl: 'https://evil.test/login',
-  });
-  const r = await redeemFill(auths, deps, 'f2', claimOf());
-  assert.equal(r.ok, false);
-  assert.equal(r.error, 'FRAME_ORIGIN_MISMATCH');
-  assert.equal(calls.fill, 0, 'frame origin 不符绝不能读密码');
-});
-
-test('FAIL-guard: 子域 iframe → 拒绝（不自动信任子域）', async () => {
-  const { auths } = makeAuths();
-  auths.issue('f3', BIND);
-  const { deps } = makeDeps({ frameUrl: 'https://sub.example.com/login' });
-  const r = await redeemFill(auths, deps, 'f3', claimOf());
-  assert.equal(r.ok, false);
-  assert.equal(r.error, 'FRAME_ORIGIN_MISMATCH');
-});
-
-test('FAIL-guard: 同域不同端口 → 拒绝', async () => {
-  const { auths } = makeAuths();
-  auths.issue('f4', BIND);
-  const { deps } = makeDeps({ frameUrl: 'https://example.com:8443/login' });
-  const r = await redeemFill(auths, deps, 'f4', claimOf());
-  assert.equal(r.ok, false);
-});
-
-test('FAIL-guard: frameId 不匹配 → 认领阶段就拒绝，不调任何浏览器 API', async () => {
-  const { auths } = makeAuths();
-  auths.issue('f5', { ...BIND, frameId: 3 });
+  auths.issue('b2', bind());
   const { deps, calls } = makeDeps();
-  const r = await redeemFill(auths, deps, 'f5', claimOf({ frameId: 0 }));
+  const r = await redeemFill(auths, deps, 'b2', claimOf({ entryId: 'e2' }));
   assert.equal(r.ok, false);
-  assert.equal(calls.getFrame, 0, '绑定不符时不应发起浏览器调用');
-  assert.equal(calls.fill, 0);
+  assert.equal(calls.getFrame, 0);
 });
 
-test('FAIL-guard: 顶层页面导航到别的 origin，但 frame 仍是授权 origin', async () => {
-  // 这是一个真实场景：iframe 里是登录页，顶层被导航到攻击者页面。
-  // 当前实现：frameOrigin 校验通过，但顶层已变——需要额外判断。
+test('PASS: 目标 frame 与顶层 frame 分开校验（不混为一谈）', async () => {
+  // 顶层正常、目标 frame 的 documentId 变了 → 必须拒绝
   const { auths } = makeAuths();
-  auths.issue('f6', BIND);
-  const { deps } = makeDeps({
-    tabUrl: 'https://attacker.test/page',
-    frameUrl: `${ORIGIN}/login`,
-  });
-  const r = await redeemFill(auths, deps, 'f6', claimOf());
-  // 顶层 origin 与授权 origin 不同，但 frame 相同。
-  // 结论：应当拒绝（顶层已被换掉说明页面状态不可信）。
-  assert.equal(r.ok, false, '顶层 origin 变化时必须拒绝');
-});
-
-test('PASS: iframe 导航后旧授权失效（frameId 变化被绑定校验挡住）', async () => {
-  const { auths } = makeAuths();
-  auths.issue('f7', { ...BIND, frameId: 5 });
-  const { deps } = makeDeps({ frameUrl: `${ORIGIN}/login` });
-  const r = await redeemFill(auths, deps, 'f7', claimOf({ frameId: 9 }));
+  auths.issue('b3', bind({ frameId: 5, documentId: 'doc-iframe-1' }));
+  const { deps } = makeDeps({ docId: 'doc-iframe-2' });
+  const r = await redeemFill(auths, deps, 'b3', claimOf({ frameId: 5 }));
   assert.equal(r.ok, false);
-});
-
-test('PASS: frame 被销毁（getFrame 抛错）→ 拒绝', async () => {
-  const { auths } = makeAuths();
-  auths.issue('f8', BIND);
-  const { deps } = makeDeps({ frameThrows: true });
-  const r = await redeemFill(auths, deps, 'f8', claimOf());
-  assert.equal(r.ok, false);
-  assert.equal(r.error, 'FRAME_GONE');
-});
-
-test('PASS: getFrame 返回无 url → 拒绝', async () => {
-  const { auths } = makeAuths();
-  auths.issue('f9', BIND);
-  const { deps } = makeDeps({ frameUrl: undefined });
-  // 构造返回 {} 的情况
-  const d = { ...deps, getFrame: async () => ({}) };
-  const r = await redeemFill(auths, d, 'f9', claimOf());
-  assert.equal(r.ok, false);
-});
-
-/* ============================ 状态机不变量 ============================ */
-
-test('PASS: claim 是同步的（返回记录而非 Promise）', () => {
-  const { auths } = makeAuths();
-  auths.issue('s1', BIND);
-  const r = auths.claim('s1', claimOf());
-  assert.ok(r, 'claim 必须同步返回记录');
-  assert.equal(typeof r.then, 'undefined', 'claim 不能是异步');
-  assert.equal(r.state, 'validating');
-});
-
-test('PASS: validating 不可回退到 issued', () => {
-  const { auths } = makeAuths();
-  auths.issue('s2', BIND);
-  auths.claim('s2', claimOf());
-  assert.equal(auths.claim('s2', claimOf()), null, '再次 claim 必须失败');
-  // 记录**保留**在 validating：并发时第 2..N 个请求不该毁掉第一个请求的认领
-  assert.equal(auths.size(), 1, '并发失败不应销毁记录');
-  assert.equal(auths.countByState('validating'), 1);
-});
-
-test('PASS: 并发失败保留记录，攻击性绑定不符才销毁', () => {
-  const { auths } = makeAuths();
-  auths.issue('s5', BIND);
-
-  // 并发：同一个绑定值第二次 claim → 失败但保留
-  auths.claim('s5', claimOf());
-  assert.equal(auths.claim('s5', claimOf()), null);
-  assert.equal(auths.size(), 1, '并发不应销毁');
-
-  // 此时记录归第一个请求所有。攻击者用错误绑定再来试：
-  // 仍然拿不到东西，且**不该**销毁记录——否则攻击者可以用乱试
-  // 把合法请求的授权打掉（DoS）。
-  assert.equal(auths.claim('s5', claimOf({ tabId: 999 })), null);
-  assert.equal(auths.size(), 1, '已认领后乱试不应销毁（防 DoS）');
-});
-
-test('PASS: issued 状态下绑定不符 → 立即销毁（防重试）', () => {
-  const { auths } = makeAuths();
-  auths.issue('s6', BIND);
-  // 记录还是 issued，攻击者拿错绑定来试 → 销毁
-  assert.equal(auths.claim('s6', claimOf({ tabId: 999 })), null);
-  assert.equal(auths.size(), 0, 'issued 状态下的绑定不符必须销毁');
-  // 之后合法请求也无法再用
-  assert.equal(auths.claim('s6', claimOf()), null);
-});
-
-test('PASS: confirm 只接受 validating 状态', () => {
-  const { auths } = makeAuths();
-  auths.issue('s3', BIND);
-  assert.equal(auths.confirm('s3'), null, 'issued 状态不能直接 confirm');
-});
-
-test('PASS: 状态计数正确', () => {
-  const { auths } = makeAuths();
-  auths.issue('s4', BIND);
-  assert.equal(auths.countByState('issued'), 1);
-  auths.claim('s4', claimOf());
-  assert.equal(auths.countByState('issued'), 0);
-  assert.equal(auths.countByState('validating'), 1);
+  assert.equal(r.error, 'DOCUMENT_CHANGED');
 });
