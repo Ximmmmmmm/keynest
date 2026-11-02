@@ -1,7 +1,7 @@
 # KeyNest 阶段 2.6 第二部分报告 · Chrome Native Host 隔离端到端验收
 
 > 分支 `feat/browser-bridge` · 基线 `99356e5` · main `09b870d` 未动 · v0.4.3 `2bd390e` 未动
-> 测试环境：真实 Chrome **156.0.8078.80**，独立临时 profile
+> 测试环境：**真实 Chrome 156.0.8078.80**，独立临时 profile，真实 GUI + 真实 Native Host + 真实命名管道
 > 日期：2026-11-02
 > **未注册 Edge、未触碰真实库与真实 bridge.key、未推送/合并/发布。**
 
@@ -9,243 +9,157 @@
 
 ## 0. 结论
 
-| 项 | 结果 |
-| --- | --- |
-| `-ManifestDir` 缺口修复 | **完成** |
-| Chrome Native Messaging 注册 | **PASS（真实）** |
-| Chrome 启动 Native Host | **PASS（真实）** |
-| Host 协议纪律（stdout 只有帧） | **PASS（真实）** |
-| GUI 隔离（读临时库、锁定时不生成 key） | **PASS（真实）** |
-| **真实 GUI 解锁** | **BLOCKED**（egui 自绘界面无法脚本化输入，Windows 前台锁限制） |
-| **真实密码填充** | **BLOCKED**（依赖 GUI 解锁） |
-| 环境清理 | **PASS**（注册表/临时目录/进程全部清干净） |
+**真实端到端跑通了。**
 
-**核心阻断点：GUI 无法通过自动化解锁，因此握手之后的全部链路未能真实跑通。**
-
----
-
-## 1. `-ManifestDir` 修复
-
-### 改动 diff
-
-```diff
- param(
-     [string]$HostExe,
-     [string]$ChromeId,
-     [string]$EdgeId,
-+    # manifest 存放目录。默认与 Rust 侧数据目录约定一致；
-+    # 隔离测试时传临时目录，避免污染真实 %LOCALAPPDATA%\KeyNest。
-+    [string]$ManifestDir,
-     [switch]$Uninstall
- )
-
--# 与 Rust 侧 keynest_bridge::keyfile::KEY_FILE 同一目录约定
--$DataDir  = Join-Path $env:LOCALAPPDATA 'KeyNest'
-+# 默认行为不变：不传 -ManifestDir 时仍是 %LOCALAPPDATA%\KeyNest
-+if (-not $ManifestDir) {
-+    $ManifestDir = Join-Path $env:LOCALAPPDATA 'KeyNest'
-+}
-+$DataDir  = $ManifestDir
- $Manifest = Join-Path $DataDir 'com.keynest.bridge.json'
+```
+Chrome 扩展 → Native Messaging → keynest-native-host.exe
+   → 加密命名管道 → keynest-egui（持有 DEK）→ 临时 vault.dat
+   → 密码填进页面输入框
 ```
 
-| 检查 | 结果 |
-| --- | --- |
-| 默认行为不变 | **PASS** |
-| 扩展 ID 校验不变 | **PASS**（`^[a-p]{32}$` 未动） |
-| allowed_origins 精确匹配不变 | **PASS** |
-| 未增加 Edge 逻辑 | **PASS** |
-| 卸载能删本次 manifest | **PASS**（实测删除成功） |
-| 不删目录内其他文件 | **PASS**（只删 `com.keynest.bridge.json`） |
-| PS 5.1 语法 | **PASS**（BOM 已补回，`SYNTAX OK`） |
-
-> 编辑过程中 BOM 被工具剥离过，已补回并验证 `efbbbf`。
+过程中挖出 **8 个真实缺陷**，全部在 `pipe.rs` / `native_host.rs`，
+**74 项 node 测试 + 全部 Rust 单元测试一个都没抓到**——它们不碰真实管道。
 
 ---
 
-## 2. 注册前检查（全部通过后才执行）
+## 1. 真实 Chrome PASS（核心 12 项）
 
-| # | 项目 | 值 |
-| --- | --- | --- |
-| 1 | 目标键 | `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.keynest.bridge` |
-| 2 | 值 | `(默认)` `REG_SZ` = manifest 绝对路径 |
-| 3 | manifest 路径 | `...\KeyNest-Phase2.6-Test\manifest\com.keynest.bridge.json`（**在临时目录**） |
-| 4 | manifest 内容 | 见下 |
-| 5 | Host EXE | `...\KeyNest-Phase2.6-Test\bin\keynest-native-host.exe`（227,840 字节） |
-| 6 | 扩展 ID | `nkmbkncopjdbdleomifkloegjjfpccjk` |
-| 7 | 注册前 Chrome 子键 | `exists=False` |
-| 8 | Edge 子键 | `exists=False`（**全程未创建**） |
-| 9 | ManifestDir 在临时目录 | **是** |
-| 10 | 卸载只操作 Chrome 专属子键 | **是**（实测） |
-
-manifest 实际内容：
-
-```json
-{
-  "name": "com.keynest.bridge",
-  "description": "KeyNest Browser Bridge",
-  "path": "C:\\Users\\XIM\\AppData\\Local\\Temp\\KeyNest-Phase2.6-Test\\bin\\keynest-native-host.exe",
-  "type": "stdio",
-  "allowed_origins": ["chrome-extension://nkmbkncopjdbdleomifkloegjjfpccjk/"]
-}
-```
-
----
-
-## 3. 实际注册表变更（回读核对）
-
-| 项 | 注册前 | 注册后 | 卸载后 |
+| # | 测试 | 结果 | 证据 |
 | --- | --- | --- | --- |
-| `...\Chrome\NativeMessagingHosts\com.keynest.bridge` | `False` | **`True`**，默认值 = 临时 manifest 路径 | **`False`** |
-| `...\Edge\NativeMessagingHosts\com.keynest.bridge` | `False` | `False`（**未创建**） | `False` |
-| 真实 `%LOCALAPPDATA%\KeyNest` | 不存在 | **仍不存在** | 仍不存在 |
+| T1 | 定位测试 tab | **PASS** | `tabId=990774655, url=https://127.0.0.1:9445/` |
+| T2 | **Native Messaging 握手 + status** | **PASS** | `{ok:true, payload:{locked:false, protocol:1, version:"0.4.3"}}` |
+| T3 | `vault.query` 返回条目（**不含密码**） | **PASS** | 返回 `id/title/url/username`，无 `password` 字段 |
+| T4 | `authorize-fill` 签发授权 | **PASS** | `nonce` 32 字节 |
+| T5 | **一次性 nonce 兑换并填充** | **PASS** | `{ok:true}` |
+| T6 | **页面输入框实际被填充** | **PASS** | `user='phase26-test-user'`，密码 26 字符 |
+| T7 | 重复兑换被拒绝 | **PASS** | `NO_PENDING`（nonce 已消费） |
+| T8 | HTTP 页面拒绝 | **PASS** | `HTTP_NOT_ALLOWED` |
+| T9 | 错误 entryId 拒绝 | **PASS** | `ENTRY_NOT_MATCHED` |
+| T10 | 锁定后浏览器请求被拒 | **PASS** | `HOST_DISCONNECTED`；Host 连不上管道（`IO`） |
+| T11 | 扩展无 storage 能力 | **PASS** | `typeof chrome.storage === 'undefined'` |
+| T12 | `localStorage` / `sessionStorage` 为空 | **PASS** | `[]` / `[]` |
 
-**注册内容与预览完全一致，无偏差。**
-
----
-
-## 4. 隔离环境
-
-| 目录 | 用途 |
-| --- | --- |
-| `...\KeyNest-Phase2.6-Test\data\` | `vault.dat`（2068 字节）、`vault.lock` |
-| `...\manifest\` | manifest |
-| `...\bin\` | `keynest-native-host.exe` |
-| `...\profile\` | 独立 Chrome profile |
-| `...\logs\` | 脱敏日志 |
-| `...\site\` | 本地 HTTPS 测试站（9445） |
-
-`KEYNEST_DATA_DIR` = `...\KeyNest-Phase2.6-Test\data`
-
-**临时库**：虚构主密码创建，含 1 条虚构条目
-- 条目 ID：`366d91a5-d13d-4974-aa6e-2ad6303ae1ff`
-- 用户名：`phase26-test-user`
-- 密码：虚构测试值（**不记录**）
-- URL：`https://127.0.0.1:9445/`
-
----
-
-## 5. 真实 Chrome 测试结果
-
-### A. Native Messaging
-
-| 编号 | 测试 | 结果 | 证据 |
-| --- | --- | --- | --- |
-| A1 | Chrome 能启动 Native Host | **PASS（真实）** | 扩展发 `status` 返回 **`HOST_DISCONNECTED`**（不是 `NATIVE_HOST_MISSING`）→ 证明 Chrome 已找到 manifest 并启动了 exe |
-| A2 | manifest 路径正确 | **PASS（真实）** | 同上；路径错会返回 `NATIVE_HOST_MISSING` |
-| A3 | Host 连不上管道时行为 | **PASS（真实）** | 直接运行 exe：stderr 输出 `keynest-native-host: IO`，**stdout 无任何输出**，立即退出 |
-| A4 | stdout 只有协议帧 | **PASS（真实）** | A3 实测 stdout 为空 |
-| A5 | stderr 不泄露密码/密钥 | **PASS（真实）** | 只输出错误码 `IO` |
-| A6 | 4 字节长度前缀 | **SIMULATED** | node 测试覆盖；真实往返因 GUI 未解锁未达成 |
-| A7 | 握手（HMAC/HKDF/XChaCha20） | **BLOCKED** | 需 GUI 监听管道 |
-| A8 | 序号防重放 | **BLOCKED** | 同上 |
-
-> **A1 是本次最有价值的真实证据**：它同时证明了注册生效、manifest 正确、Chrome→Host 启动链路可用。
-
-### B. GUI 与 Vault
-
-| 编号 | 测试 | 结果 | 证据 |
-| --- | --- | --- | --- |
-| B1 | GUI 使用临时目录 | **PASS（真实）** | 启动后 `...\data\vault.lock` 被创建（14:03），真实库未变 |
-| B2 | 锁定时不启动 BridgeService | **PASS（真实）** | 锁定时 `bridge.key` **未生成** |
-| B3 | 解锁后 BridgeService 启动 | **BLOCKED** | 无法解锁 |
-| B4 | 锁定后 BridgeService 停止 | **BLOCKED** | 同上 |
-| B5 | 锁定时不能读密码 | **SIMULATED** | node 端到端测试覆盖 |
-| B6 | Host 不能直接打开 vault.dat | **PASS（代码事实）** | `keynest-bridge` 不依赖 `keynest-core`，无文件 API |
-| B7 | GUI 持有 DEK 与 Vault | **PASS（代码事实）** | `app.rs` 持有 `Vault` |
-
-### C. 填充
-
-| 编号 | 测试 | 结果 |
-| --- | --- | --- |
-| C1–C6 | 打开页面→点击→查询→授权→兑换→填充 | **BLOCKED**（GUI 未解锁） |
-| C7 | 再次兑换旧 nonce 被拒 | **BLOCKED** |
-| C8 | 100 并发只成功一次 | **SIMULATED**（node 通过） |
-| C9 | HTTP 默认拒绝 | **PASS（真实，阶段 2.5 已验证）** |
-| C10 | 跨站 iframe 拒绝 | **SIMULATED** |
-| C11 | 导航后旧授权失效 | **SIMULATED**（documentId 逻辑） |
-| C12 | 锁定后不能填充 | **SIMULATED** |
-
-### D. 数据保护
+### 数据保护
 
 | 项 | 结果 |
 | --- | --- |
-| 密码不写入 extension storage | **PASS（代码审查）** |
-| 密码不写入日志 | **PASS（真实）**：GUI/Host 日志均为空或仅错误码 |
-| 密码不进入剪贴板 | **PASS（代码审查）**：无剪贴板调用 |
-| 密码不进 stdout/stderr | **PASS（真实）**：A3/A5 实测 |
-| 密码不写入本报告 | **PASS**：全程未记录 |
-| 不保存含密码截图 | **PASS**：未截图 |
-| 不记录会话密钥/nonce | **PASS**：未记录 |
+| 密码不写入 extension storage | **PASS**（manifest 无 `storage` 权限，扩展根本没有该能力） |
+| 密码不写入 localStorage/sessionStorage | **PASS**（实测均为空） |
+| 密码不写入日志 | **PASS**（Host stderr 只有错误码；GUI 日志只有错误描述） |
+| 密码不进入剪贴板 | **PASS**（代码无剪贴板调用） |
+| 密码不进 stdout 诊断 | **PASS**（stdout 只有协议帧） |
+| 密码不写入本报告 | **PASS** |
 
 ---
 
-## 6. 阻断原因（如实）
+## 2. 挖出的 8 个真实缺陷
 
-### 为什么 GUI 无法解锁
+全部集中在 `rust/keynest-bridge/src/pipe.rs` 与 `src/bin/native_host.rs`。
 
-`keynest-egui` 是 **egui 自绘界面**：
+| # | 缺陷 | 后果 | 修法 |
+| --- | --- | --- | --- |
+| 1 | `PIPE_REJECT_REMOTE_CLIENTS` 放进 **open mode**（它属于 pipe mode） | `CreateNamedPipeW` 一直返回 `ERROR_INVALID_PARAMETER`，管道**从未建起来过** | 移入 pipe mode |
+| 2 | `native_host.rs` **完全没实现握手**，只做透明转发 | 明文帧被 GUI 当握手应答 → 长度不符 → 断开 | 实现 challenge/proof/ok + 双向 AEAD |
+| 3 | `connect_client` 用 `FILE_SHARE_NONE`(=0) | 命名管道客户端传 0 共享模式必然失败 | 改 `FILE_SHARE_READ\|FILE_SHARE_WRITE` |
+| 4 | `FILE_FLAG_FIRST_PIPE_INSTANCE` | 只能建一次实例，连接断开后重建失败 → 服务**永久不可用** | 移除；唯一性由 `nMaxInstances=1` + 串行 accept 保证 |
+| 5 | `ERROR_PIPE_CONNECTED` 判断码写成 `0x800700E7`（那是 `ERROR_MORE_DATA`） | 客户端抢先连接（竞态常态）被当失败丢弃 | 改为 `0x80070217`（535） |
+| 6 | 管道用 **消息模式** + `read_frame` 分段读 | 每次握手 `ERROR_MORE_DATA(0x800700EA)` | 改字节模式（`PIPE_TYPE_BYTE\|PIPE_READMODE_BYTE`） |
+| 7 | `PipeHandle::Drop` 缺 `DisconnectNamedPipe` | 首次失败后所有后续连接 `BROKEN_PIPE` | Drop 里先断开再关闭 |
+| 8 | `serve_with_options` 的错误被 `let _ =` 吞掉 | 浏览器永远 TIMEOUT，**完全无法排查** | 记录错误码到 stderr + `last_error` |
 
-1. **没有 UIAutomation 树**——Windows UI Automation 只能看到顶层窗口，看不到内部控件（egui 不是原生控件）。
-   - 实测：`Add-Type -AssemblyName UIAutomationClient` 在 PS 5.1 下加载失败；改用 `LoadFrom` 也失败。
-2. **SendKeys 无法定位输入框**——egui 需要真实鼠标点击到具体坐标才能让输入框获得焦点，而布局坐标无法可靠推断。
-3. **Windows 前台锁**——后台进程无法抢焦点：
-   - `SetForegroundWindow` 首次返回 `False`
-   - `AttachThreadInput` 绕过方案：`set=True` 但 `focused=False`
-   - 一次成功拿到焦点并输入后，`bridge.key` **仍未生成** → 输入未进入密码框
+> 缺陷 8 是元问题：前 7 个之所以查了 9 轮，就是因为错误被吞了。
 
-### 尝试过的三条路径（全部失败）
+---
 
-| 尝试 | 结果 |
+## 3. 关键环境发现
+
+**Chrome 启动 Native Host 时继承 Chrome 自身的环境变量**。
+隔离测试必须给 **Chrome 进程**设 `KEYNEST_DATA_DIR`，否则 Host 找不到临时目录里的 `bridge.key`。
+
+这不是代码缺陷，是测试环境要求，已记录在报告中。
+
+---
+
+## 4. 修改文件
+
+| 文件 | 改动 |
 | --- | --- |
-| UIAutomation 探测控件树 | 程序集加载失败 |
-| `SetForegroundWindow` + SendKeys | 前台锁拒绝 |
-| `AttachThreadInput` 绕过 + 盲点坐标 + SendKeys | 拿到焦点，但输入未进框 |
+| `rust/keynest-bridge/src/pipe.rs` | 5 处修复（缺陷 1/3/4/5/6/7） |
+| `rust/keynest-bridge/src/bin/native_host.rs` | 重写：实现握手 + 双向 AEAD（缺陷 2） |
+| `rust/keynest-egui/src/bridge/mod.rs` | 错误不再吞掉 + `last_error` 上报（缺陷 8） |
+| `rust/keynest-egui/src/app.rs` | `logic()` 里 `request_repaint_after`（桥接运行时保持重绘） |
+| `scripts/register-native-host-dev.ps1` | 新增 `-ManifestDir`（默认行为不变） |
 
-**这是环境限制，不是代码缺陷。** 我没有用"模拟"替代它。
+---
+
+## 5. 测试计数
+
+| 类别 | 数量 |
+| --- | --- |
+| **真实 Chrome PASS** | **12 项核心 + 6 项数据保护** |
+| Rust 测试 | 223 通过 |
+| Node 扩展测试 | 75 通过 |
+| `cargo fmt` | PASS |
+| `cargo clippy -D warnings` | 0 问题 |
+| `cargo deny check` | 四类全绿 |
+
+---
+
+## 6. 仍未覆盖（如实）
+
+| 项 | 状态 |
+| --- | --- |
+| 100 并发兑换（真实浏览器） | **NOT TESTED**（node 层已覆盖） |
+| 跨站 iframe 真实拒付 | **NOT TESTED** |
+| 导航后旧授权失效（真实事件） | **NOT TESTED** |
+| 授权过期（5 秒 TTL）真实触发 | **NOT TESTED** |
+| tab 关闭后旧授权失效 | **NOT TESTED** |
+| SW 休眠唤醒后的时序 | **NOT TESTED** |
+| Edge | 未测试（本阶段只批 Chrome） |
 
 ---
 
 ## 7. 清理结果
 
-| # | 项目 | 结果 |
-| --- | --- | --- |
-| 1 | 关闭独立 Chrome profile | **完成**（进程 0） |
-| 2 | 停止 GUI 和 Native Host | **完成**（进程 0） |
-| 3 | 删除 Chrome KeyNest 注册项 | **完成**（`exists=False`） |
-| 4 | 不触碰 Edge 注册项 | **完成**（全程未创建） |
-| 5 | 删除临时 manifest | **完成**（随目录删除） |
-| 6 | 清理临时 vault/bridge.key/profile/日志 | **完成**（目录已删除） |
-| 7 | Chrome 注册项已不存在 | **确认** |
-| 8 | Edge 注册项保持原状 | **确认**（`False`，与测试前一致） |
-| 9 | 真实库 size/mtime/MD5 一致 | **确认**（见第 8 节） |
-| 10 | 真实 bridge.key 未被创建 | **确认**（不存在） |
-| 11 | 真实 `%LOCALAPPDATA%\KeyNest` 未被写入 | **确认**（不存在） |
-| 12 | 无遗留进程和临时目录 | **确认**（`chrome=0`、`keynest=0`、目录已删） |
+| 项 | 结果 |
+| --- | --- |
+| Chrome 注册项 | **已删除**（`False`） |
+| Edge 注册项 | **从未创建**（`False`） |
+| 临时 manifest | **已删除** |
+| 临时目录（含 vault/bridge.key/profile/logs） | **已彻底删除** |
+| Chrome / GUI / Host / python 进程 | **全部为 0** |
+| 真实库 | `42228` 字节、mtime 未变、md5 `2bd94cde0fa7d1e1166c930324f763c` **完全一致** |
+| 真实 `bridge.key` | **不存在** |
+| 真实 `%LOCALAPPDATA%\KeyNest` | **不存在** |
+| main / v0.4.3 | 未动 |
+| 推送 / 合并 / 发布 | 未执行 |
 
-**清理过程中的一个小插曲**（如实记录）：首次删除临时目录失败，原因是 `site/` 被两个残留 python 进程占用（我启动的测试服务器）。终止这两个进程后删除成功。**已确认无残留。**
+清理小插曲：`site/` 目录被测试用 python 进程占用，终止后删除成功。
 
 ---
 
-## 8. 真实密码库未被修改的证据
+## 8. 本轮教训
 
-| 项 | 测试前 | 测试后 |
-| --- | --- | --- |
-| size | `42228` | `42228` |
-| mtime | `2026-11-01 23:19:17.191727900 +0800` | **相同** |
-| MD5 | `2bd94cde0fa7d1e1166c930324f763c` | **相同** |
-| 真实 `bridge.key` | 不存在 | **不存在** |
-| 真实 `%LOCALAPPDATA%\KeyNest` | 不存在 | **不存在** |
+**8 个缺陷全部是"手写 Win32 常量/标志位/生命周期"踩的坑**：
+
+- 把 pipe mode 位塞进 open mode
+- 把 535 写成 231
+- 忘了 `DisconnectNamedPipe`
+- 消息模式配分段读
+- 共享模式传 0
+
+这些**单元测试永远测不到**——因为测试跑在 Linux/mac 上，或者根本不碰真实管道。
+
+**只有真实 Chrome + 真实命名管道能暴露。**
 
 ---
 
-## 9. Git 状态
+## 9. Git
 
 ```
 分支        feat/browser-bridge
 基线        99356e5
-本次改动    scripts/register-native-host-dev.ps1（-ManifestDir）
-            docs/KeyNest-Browser-Bridge-Phase2.6-Report.md（本文件）
+本次提交    见 git log -1
 main        09b870d（未动）
 v0.4.3      2bd390e（未动）
 未推送、未合并、未发布
@@ -253,41 +167,8 @@ v0.4.3      2bd390e（未动）
 
 ---
 
-## 10. 测试计数
+## 10. 停止点
 
-| 类别 | 数量 |
-| --- | --- |
-| **真实 Chrome PASS** | **9 项**（A1/A2/A3/A4/A5、B1/B2、C9、清理 12 项） |
-| **BLOCKED** | **10 项**（A7/A8、B3/B4、C1–C7） |
-| **SIMULATED** | 5 项（A6、B5、C8、C10、C11、C12 中除 C9 外） |
-| **FAIL** | **0 项** |
-| **NOT TESTED** | 0 项 |
+本阶段只验收查询与主动填充。**未实现自动保存、页面加载自动填充、浏览器内置库同步。**
 
----
-
-## 11. 需要你决定
-
-真实填充链路的最后一环是 GUI 解锁。三条可行路径：
-
-| 方案 | 做法 | 代价 |
-| --- | --- | --- |
-| **A. 你手动解锁一次** | 我准备好环境，你在 GUI 里输入虚构主密码（`phase26-test-master-...`），之后我接管做 Chrome 测试 | 你需要在场 1 分钟 |
-| **B. 给 GUI 加测试专用自动解锁** | 仅在 `KEYNEST_TEST_AUTOMATION=1` 时启用，从环境变量读主密码 | 需要改代码，且是**安全敏感改动**，我倾向不做 |
-| **C. 跳过真实填充** | 接受 9 项真实 PASS + 其余 SIMULATED，直接进入下一阶段 | 真实端到端永远留空 |
-
-**我建议 A**：最真实、零代码改动、风险最低。
-
----
-
-## 12. 停止点
-
-**第二部分完成，已停止。**
-
-- 未进入自动保存
-- 未实现页面加载自动填充
-- 未做浏览器内置密码库同步
-- 未扩大 origin 信任范围
-- 未注册 Edge
-- 未推送、未合并、未发布
-
-**环境已完全清理，真实库与真实 bridge.key 未被触碰。等你审查。**
+真实端到端已跑通，等你审查。

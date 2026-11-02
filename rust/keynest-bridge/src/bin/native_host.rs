@@ -1,21 +1,29 @@
 //! `keynest-native-host`：浏览器与 KeyNest 之间的中继进程。
 //!
-//! 它做的事情很少，刻意如此：
-//!
 //! ```text
-//! stdin  ──读帧──► 校验长度 ──► 加密管道 ──► GUI
-//! stdout ◄─写帧──  原样转发   ◄── 加密管道 ◄── GUI
+//! stdin  ──明文帧──► 加密 ──► 管道 ──► GUI
+//! stdout ◄─明文帧──  解密 ◄──管道 ◄── GUI
 //! ```
 //!
-//! **它不解析命令、不解密密码库、不认主密码。** 命令校验与锁定门禁都在
-//! GUI 侧（`server::serve`）完成，这样即使这个进程被替换，
-//! 攻击者拿到的也只是一条"需要 GUI 已解锁且要过认证"的通道。
+//! # 它做什么 / 不做什么
 //!
-//! 唯一属于它的判断是：帧长度上限 + 连接失败就退出。
+//! **做**：与 GUI 完成认证握手（HMAC-SHA256），派生会话密钥（HKDF），
+//! 然后对**两个方向**做 XChaCha20-Poly1305 加解密。
+//!
+//! **不做**：不解析命令、不解密密码库、不认主密码。
+//!
+//! # 为什么必须参与加密
+//!
+//! GUI 侧 `serve` 期待的是「challenge → proof → ok → 加密帧」。
+//! 如果 Host 只做透明转发，GUI 会把明文的浏览器帧当成握手应答解析，
+//! 长度不符 → HandshakeFailed → 连接断开 → 浏览器拿到 TIMEOUT。
+//! 这是阶段 1 遗留的架构缺口，真实 Chrome 测试才暴露出来。
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use keynest_bridge::auth::{client_proof, derive_session_key, SessionCipher, SharedSecret};
 use keynest_bridge::framing::{read_frame, write_frame};
 use keynest_bridge::pipe::connect_client;
 use keynest_bridge::BridgeError;
@@ -25,18 +33,78 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(BridgeError::Closed) => ExitCode::SUCCESS,
         Err(e) => {
-            // 只写错误码与描述，绝不写消息内容
+            // 只写错误码，绝不写消息内容
             let _ = writeln!(io::stderr(), "keynest-native-host: {}", e.code());
             ExitCode::FAILURE
         }
     }
 }
 
-fn run() -> Result<(), BridgeError> {
-    // 先连 GUI：连不上立刻退出，让浏览器显示"扩展未连接"，
-    // 而不是挂在那里等一个永远不会来的响应。
-    let mut pipe = connect_client()?;
+/// 定位共享密钥所在目录。
+///
+/// 必须与 GUI 的 `resolve_data_dir()` 规则一致，否则两端算出不同路径、
+/// 读不到同一把密钥，握手永远失败。
+///
+/// `KEYNEST_DATA_DIR` > `%APPDATA%\KeyNest`（若已有库）> `%LOCALAPPDATA%\KeyNest`
+fn data_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("KEYNEST_DATA_DIR") {
+        return PathBuf::from(d);
+    }
+    let roaming = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("KeyNest");
+    if roaming.join("vault.dat").exists() {
+        return roaming;
+    }
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("KeyNest")
+}
 
+fn load_secret() -> Result<SharedSecret, BridgeError> {
+    let dir = data_dir();
+    match keynest_bridge::keyfile::load(&dir)? {
+        Some(s) => Ok(s),
+        None => Err(BridgeError::HandshakeFailed(
+            "找不到 bridge.key（GUI 未解锁过？）",
+        )),
+    }
+}
+
+fn run() -> Result<(), BridgeError> {
+    // 先连 GUI：连不上立刻退出，让浏览器显示"扩展未连接"
+    let mut pipe = connect_client()?;
+    let shared = load_secret()?;
+
+    // ---- 握手：challenge → proof → ok ----
+    let challenge_frame = read_frame(&mut pipe)?;
+    let n = keynest_bridge::limits::CHALLENGE_LEN;
+    if challenge_frame.len() != n {
+        return Err(BridgeError::HandshakeFailed("challenge 长度不符"));
+    }
+    let mut challenge = [0u8; keynest_bridge::limits::CHALLENGE_LEN];
+    challenge.copy_from_slice(&challenge_frame);
+
+    let client_nonce = keynest_bridge::auth::random_challenge()?;
+    let proof = client_proof(&shared, &challenge, &client_nonce);
+
+    let mut hello = Vec::with_capacity(client_nonce.len() + proof.len());
+    hello.extend_from_slice(&client_nonce);
+    hello.extend_from_slice(&proof);
+    write_frame(&mut pipe, &hello)?;
+
+    let ack = read_frame(&mut pipe)?;
+    if ack != b"ok" {
+        return Err(BridgeError::HandshakeFailed("GUI 拒绝了握手"));
+    }
+
+    let key = derive_session_key(&shared, &challenge, &client_nonce)?;
+    let mut to_gui = SessionCipher::new(&key);
+    let mut from_gui = SessionCipher::new(&key);
+
+    // ---- 双向转发 ----
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
     let stdout = io::stdout();
@@ -45,26 +113,26 @@ fn run() -> Result<(), BridgeError> {
     loop {
         let from_browser = match read_frame(&mut stdin) {
             Ok(f) => f,
-            Err(BridgeError::Closed) => return Ok(()), // 浏览器关闭了端口
+            Err(BridgeError::Closed) => return Ok(()),
             Err(e) => return Err(e),
         };
 
-        // 原样转给 GUI。长度校验已在 read_frame 里做过。
-        write_frame(&mut pipe, &from_browser)?;
+        // 浏览器 → GUI：加密后送管道
+        let sealed = to_gui.seal(&from_browser)?;
+        write_frame(&mut pipe, &sealed)?;
 
-        let from_gui = read_frame(&mut pipe)?;
-        write_frame(&mut stdout, &from_gui)?;
+        // GUI → 浏览器：读密文、解密、原样写给 stdout
+        let sealed_back = read_frame(&mut pipe)?;
+        let plain = from_gui.open(&sealed_back)?;
+        write_frame(&mut stdout, &plain)?;
     }
 }
 
-/// 供测试引用的占位：确认标准错误里不会出现这些词。
 #[cfg(test)]
 mod tests {
     #[test]
     fn binary_has_no_password_logging() {
         // 静态检查：本文件不得出现把消息内容写进标准输出的调用。
-        // 注意：如果把 "print" + "ln!" 直接写成字面量，测试会匹配到自己，
-        // 所以这里拆开拼。
         let src = include_str!("native_host.rs");
         let needles = [
             format!("print{}", "ln!"),

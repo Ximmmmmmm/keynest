@@ -29,24 +29,17 @@ mod imp {
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
-        FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_NONE, OPEN_EXISTING,
+        FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, NAMED_PIPE_MODE,
-        PIPE_READMODE_MESSAGE, PIPE_TYPE_MESSAGE, PIPE_WAIT,
+        PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
 
     use crate::limits::MAX_MESSAGE_BYTES;
-
-    /// `CreateNamedPipeW` 的 dwOpenMode 位。crate 没导出这个常量，按 Win32 定义写死。
-    const PIPE_ACCESS_DUPLEX: u32 = 0x0000_0003;
-    /// FILE_FLAG_FIRST_PIPE_INSTANCE：保证当前用户只可能有一个桥接实例，
-    /// 防止别的进程抢先占住管道名做假服务端。
-    const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
-    /// 拒绝远程客户端（Windows 7+）。
-    const PIPE_REJECT_REMOTE_CLIENTS: u32 = 0x0000_0008;
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -84,6 +77,10 @@ mod imp {
     impl Drop for PipeHandle {
         fn drop(&mut self) {
             unsafe {
+                // 先断开再关闭：管道实例被复用/重建时，Windows 要求
+                // 先 DisconnectNamedPipe，否则后续客户端会拿到 BROKEN_PIPE。
+                // 实测：缺这一步时第一次握手失败后，所有后续连接都连不上。
+                let _ = DisconnectNamedPipe(self.0);
                 let _ = CloseHandle(self.0);
             }
         }
@@ -119,11 +116,24 @@ mod imp {
         let name = wide(PIPE_NAME);
         let (sd_ptr, sa) = security_attributes()?;
 
-        let open_mode = FILE_FLAGS_AND_ATTRIBUTES(
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | PIPE_REJECT_REMOTE_CLIENTS,
+        // open mode 只能放 PIPE_ACCESS_* 与 FILE_FLAG_* 位。
+        // 注意：PIPE_REJECT_REMOTE_CLIENTS 属于 **pipe mode**，不是 open mode——
+        // 放错位置会让 CreateNamedPipeW 返回 ERROR_INVALID_PARAMETER(0x80070057)。
+        //
+        // **不要用 FILE_FLAG_FIRST_PIPE_INSTANCE**：它只允许创建一次实例，
+        // 连接断开后重建会失败（名字已存在），服务从此永久不可用。
+        // 唯一性由 nMaxInstances=1 + 单线程串行 accept 保证。
+        let open_mode = FILE_FLAGS_AND_ATTRIBUTES(PIPE_ACCESS_DUPLEX.0);
+        // **必须用字节模式（PIPE_TYPE_BYTE / PIPE_READMODE_BYTE）**，不能用消息模式。
+        //
+        // 消息模式下 ReadFile 要求一次读完整个消息，缓冲区偏小就返回
+        // ERROR_MORE_DATA(0x800700EA)——而我们的 read_frame 是先读 4 字节长度
+        // 再读正文，天然是分段读的。实测：消息模式下每次握手都在这一步断掉。
+        //
+        // 消息边界由我们自己的长度前缀协议提供，不需要管道再保证一遍。
+        let pipe_mode = NAMED_PIPE_MODE(
+            PIPE_TYPE_BYTE.0 | PIPE_READMODE_BYTE.0 | PIPE_WAIT.0 | PIPE_REJECT_REMOTE_CLIENTS.0,
         );
-        let pipe_mode =
-            NAMED_PIPE_MODE(PIPE_TYPE_MESSAGE.0 | PIPE_READMODE_MESSAGE.0 | PIPE_WAIT.0);
 
         let handle = unsafe {
             CreateNamedPipeW(
@@ -133,7 +143,9 @@ mod imp {
                 1,
                 MAX_MESSAGE_BYTES as u32,
                 MAX_MESSAGE_BYTES as u32,
-                0,
+                // nDefaultTimeOut 必须 ≥ 1 毫秒。传 0 会被 Win32 判为
+                // ERROR_INVALID_PARAMETER(0x80070057)——真实 Chrome 测试踩到过。
+                1000,
                 Some(&sa),
             )
         };
@@ -154,9 +166,13 @@ mod imp {
         unsafe {
             match ConnectNamedPipe(pipe.0, None) {
                 Ok(()) => {}
-                // ERROR_PIPE_CONNECTED：客户端在 ConnectNamedPipe 之前就连上了，
-                // 这是竞态下的正常结果，不是错误。
-                Err(e) if e.code().0 == 0x8007_00E7u32 as i32 => {}
+                // ERROR_PIPE_CONNECTED：客户端在 ConnectNamedPipe 之前就连上了。
+                // 这是竞态下的**正常结果**，必须放行——否则每次客户端抢先连接，
+                // 服务端都会把这次连接当失败丢掉，浏览器侧只会看到 IO。
+                //
+                // 535 = 0x217，HRESULT 形式是 0x80070217。
+                // （曾误写成 0x800700E7，那是 ERROR_MORE_DATA，永远匹配不上。）
+                Err(e) if e.code().0 == 0x8007_0217u32 as i32 => {}
                 Err(e) => return Err(BridgeError::Io(format!("等待客户端失败: {e}"))),
             }
         }
@@ -170,7 +186,10 @@ mod imp {
             CreateFileW(
                 PCWSTR(name.as_ptr()),
                 (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
-                FILE_SHARE_NONE,
+                // 命名管道客户端**不能**用 FILE_SHARE_NONE（0）——
+                // 传 0 会直接返回 ERROR_INVALID_PARAMETER / 打开失败。
+                // 管道本身是消息端点，共享模式对这里没有意义，给读写即可。
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
                 None,
                 OPEN_EXISTING,
                 FILE_ATTRIBUTE_NORMAL,

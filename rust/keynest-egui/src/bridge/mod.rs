@@ -18,6 +18,7 @@
 
 pub mod origin;
 
+use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -159,14 +160,30 @@ impl BridgeService {
         let stop_thread = Arc::clone(&stop);
         let tx = self.tx.clone();
         let timeout = Duration::from_millis(keynest_bridge::limits::REQUEST_TIMEOUT_MS);
+        // 管道监听失败的原因要能被 UI 读到，否则问题隐形
+        let err_slot = Arc::new(std::sync::Mutex::new(None::<String>));
+        let err_for_thread = Arc::clone(&err_slot);
 
         let join = thread::spawn(move || {
             while !stop_thread.load(std::sync::atomic::Ordering::SeqCst) {
                 // 阻塞等一个客户端；GUI 锁定后 stop 会在下一次循环断言里退出
                 let pipe = match keynest_bridge::pipe::accept_one() {
                     Ok(p) => p,
-                    Err(_) => {
-                        // 管道不可用（或平台不支持）：退避后重试，不要空转
+                    Err(e) => {
+                        // 不再静默吞掉：管道建不起来时用户完全无感，
+                        // 浏览器只会看到 HOST_DISCONNECTED，排查无从下手。
+                        // 记录到 last_error（设置页可见），并退避重试。
+                        let msg = format!("管道监听失败: {} ({})", e, e.code());
+                        if err_for_thread
+                            .lock()
+                            .map(|m| m.as_deref() != Some(&msg))
+                            .unwrap_or(true)
+                        {
+                            let _ = writeln!(io::stderr(), "keynest-bridge: {msg}");
+                            if let Ok(mut slot) = err_for_thread.lock() {
+                                *slot = Some(msg);
+                            }
+                        }
                         thread::sleep(Duration::from_millis(500));
                         continue;
                     }
@@ -180,13 +197,26 @@ impl BridgeService {
                     request_timeout: timeout,
                     ..Default::default()
                 };
-                // 一次连接的生命周期；出错就断开，回到 accept 等待下一个
-                let _ = keynest_bridge::server::serve_with_options(
+                // 一次连接的生命周期；出错就断开，回到 accept 等待下一个。
+                //
+                // **不要把错误吞掉**：握手失败、解密失败这些都不该静默。
+                // 之前 `let _ =` 让"浏览器永远 TIMEOUT"这件事完全无法排查。
+                // 这里只写错误码与描述（不含任何消息内容）。
+                if let Err(e) = keynest_bridge::server::serve_with_options(
                     &mut { pipe },
                     &secret,
                     &mut proxy,
                     opts,
-                );
+                ) {
+                    if !matches!(e, keynest_bridge::BridgeError::Closed) {
+                        let _ = writeln!(
+                            io::stderr(),
+                            "keynest-bridge: serve 结束: {} ({})",
+                            e,
+                            e.code()
+                        );
+                    }
+                }
             }
         });
 

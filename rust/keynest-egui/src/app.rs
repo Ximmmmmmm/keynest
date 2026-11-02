@@ -1723,6 +1723,13 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 浏览器桥：把后台线程积压的请求在 UI 线程里执行。
         // 放在最前面，保证每次请求都读取"当前这一帧"的解锁状态与条目内容。
+        //
+        // **必须主动请求重绘**：egui 空闲时会完全停止重绘，`logic()` 不再被
+        // 调用；而桥接请求是通过通道到达 UI 线程的，没有重绘就没有处理者，
+        // 浏览器那边会一路 TIMEOUT。这条是真实 Chrome 测试暴露的。
+        if self.bridge.is_running() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
         self.pump_bridge();
 
         // 窗口关闭：先锁库
