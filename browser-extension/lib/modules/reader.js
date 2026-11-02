@@ -27,6 +27,8 @@
 // 这看起来像"两份实现"，但它是 `executeScript` 的硬约束——
 // 注入函数无法 import。与其假装可以共享，不如把约束写明并加一致性测试。
 
+import { injectInto } from '../inject.js';
+
 /** 阅读模式可用的宽度范围（与设置页一致）。 */
 export const WIDTH_MIN = 480;
 export const WIDTH_MAX = 1200;
@@ -180,47 +182,12 @@ function readerToggle(args) {
  */
 export function createReaderModule(deps) {
   const scripting = deps.scripting;
-  const permissions = deps.permissions;
 
-  /** 取 tab 主 frame 的 origin（只接受 http/https）。 */
-  async function originOf(tabId) {
-    try {
-      const frame = await deps.webNavigation.getFrame({ tabId, frameId: 0 });
-      if (!frame || typeof frame.url !== 'string') return null;
-      const u = new URL(frame.url);
-      if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-      return `${u.protocol}//${u.hostname}/*`;
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * 确保已持有该 origin 的 host 权限。
-   *
-   * 顺序很关键：**先查再请求**。`permissions.request` 每次都会弹一次确认框，
-   * 而用户已经授权过的站点不该反复弹。
-   */
-  async function ensureHostPermission(origin) {
-    if (!permissions) return true; // 没有 API 时交给 executeScript 自己报错
-    try {
-      if (await permissions.contains({ origins: [origin] })) return true;
-      return await permissions.request({ origins: [origin] });
-    } catch {
-      return false;
-    }
-  }
-
-  /** 在指定 tab 的主 frame 里执行注入函数。 */
-  async function run(tabId, args) {
-    const results = await scripting.executeScript({
-      target: { tabId, frameIds: [0] },
-      func: readerToggle,
-      args: [args],
-    });
-    // executeScript 返回数组（每个 frame 一个）。主 frame 取第一个。
-    const first = Array.isArray(results) ? results[0] : null;
-    return (first && first.result) || { ok: false, error: 'NO_RESULT' };
+  /** 在指定 tab 的主 frame 里执行注入函数（权限申请由 inject.js 统一处理）。 */
+  async function run(tabId, args, needPermission) {
+    const out = await injectInto(deps, tabId, readerToggle, [args], { needPermission });
+    if (!out.ok) return out;
+    return out.result;
   }
 
   return {
@@ -244,24 +211,19 @@ export function createReaderModule(deps) {
 
           const action = msg.action === 'uninstall' ? 'uninstall' : 'install';
 
-          // 注入到某站点需要该站点的 host 权限。manifest 里 `https://*/*` 是
-          // **optional** 的（安装时不弹窗），所以必须在用户动作里显式请求一次。
-          //
-          // 没这一步时 executeScript 会抛
-          // "Cannot access contents of the page. Extension manifest must request
-          //  permission to access the respective host."——用户看到的是"点了没反应"。
-          if (action === 'install') {
-            const origin = await originOf(tabId);
-            if (!origin) return { ok: false, error: 'NO_ORIGIN' };
-            const granted = await ensureHostPermission(origin);
-            if (!granted) return { ok: false, error: 'HOST_PERMISSION_DENIED' };
-          }
-
-          return run(tabId, {
-            action,
-            width: ctx.config.get('width'),
-            theme: ctx.config.get('theme'),
-          });
+          // 权限申请与注入细节由 lib/inject.js 统一处理——
+          // 每个注入类模块都要走"查权限 → 按需申请 → 才注入"，
+          // 各写一遍只会让某个模块忘了先查、于是每次弹框。
+          return run(
+            tabId,
+            {
+              action,
+              width: ctx.config.get('width'),
+              theme: ctx.config.get('theme'),
+            },
+            // 卸载不需要权限：样式本来就是我们自己加的
+            action === 'install'
+          );
         },
       },
       {
@@ -269,7 +231,7 @@ export function createReaderModule(deps) {
         handle: async (msg) => {
           const tabId = msg.tabId;
           if (!Number.isInteger(tabId)) return { ok: false, error: 'BAD_ARGS' };
-          return run(tabId, { action: 'query', width: 0, theme: 'auto' });
+          return run(tabId, { action: 'query', width: 0, theme: 'auto' }, false);
         },
       },
     ],

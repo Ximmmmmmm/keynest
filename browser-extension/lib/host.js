@@ -25,6 +25,7 @@ import { createVaultModule, HOST_NAME, PROTOCOL_VERSION } from './modules/vault.
 import { createModulesModule } from './modules/registry.js';
 import { createAdblockModule } from './modules/adblock.js';
 import { createReaderModule } from './modules/reader.js';
+import { createDarkModule } from './modules/dark.js';
 import { classifySender } from './sender.js';
 
 /**
@@ -207,6 +208,17 @@ export async function createHost(chromeImpl, opts = {}) {
     registry.register(reader);
   }
 
+  // 夜间模式与阅读模式共用注入链路（scripting + 按站点 host 权限）
+  let dark = null;
+  if (chromeImpl.scripting) {
+    dark = createDarkModule({
+      scripting: chromeImpl.scripting,
+      permissions: chromeImpl.permissions,
+      webNavigation: chromeImpl.webNavigation,
+    });
+    registry.register(dark);
+  }
+
   for (const m of opts.extraModules || []) registry.register(m);
 
   // 断连 → 清授权（模块自己登记的回调已经在 lifecycle.disconnected 里）
@@ -280,6 +292,7 @@ export async function createHost(chromeImpl, opts = {}) {
     modulesAdmin,
     adblock,
     reader,
+    dark,
     /** 核心模块清单：设置页不允许关闭它们。 */
     CORE_MODULES,
     /** 配置是否持久化（false = 内存后端，SW 重启会丢）。 */
@@ -318,4 +331,7 @@ export const KIND_REQUIREMENT = Object.freeze({
   // 阅读模式：只有扩展页面能触发注入（网页自己不能要求被"阅读"）
   'reader.toggle': 'popup',
   'reader.query': 'popup',
+  // 夜间模式：同样只有扩展页面能触发
+  'dark.toggle': 'popup',
+  'dark.query': 'popup',
 });

@@ -375,20 +375,40 @@ test('PASS: 默认动作是 install，只有显式 uninstall 才卸载', async (
   assert.equal(scripting.calls[1].args[0].action, 'uninstall');
 });
 
-test('FAIL-SAFE: executeScript 抛错时返回稳定错误码，不冒泡', async () => {
+test('FAIL-SAFE: executeScript 抛"无权限"时返回 HOST_PERMISSION_DENIED', async () => {
   const m = createReaderModule({
     scripting: {
       async executeScript() {
-        throw new Error('Cannot access contents of the page');
+        throw new Error(
+          'Cannot access contents of the page. Extension manifest must request permission'
+        );
       },
     },
     permissions: { contains: async () => true, request: async () => true },
     webNavigation: { getFrame: async () => ({ url: 'https://example.test/a' }) },
   });
   const h = m.handlers.find((x) => x.type === 'reader.toggle');
-  // handler 抛错会被 registry 捕获并转成 HANDLER_FAILED；这里直接调 handler，
-  // 所以会抛——但 dispatch 层会兜住。测的是"不静默成功"。
-  await assert.rejects(() => h.handle({ tabId: 1 }, { config: { get: () => 680 } }));
+  const res = await h.handle({ tabId: 1 }, { config: { get: () => 680 } });
+  // 注入层的错误要变成结构化返回（不是抛出去）：
+  // 抛出去会被 dispatch 变成 HANDLER_FAILED，用户就看不到"该重新授权"。
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'HOST_PERMISSION_DENIED');
+});
+
+test('FAIL-SAFE: executeScript 抛其它错误时返回 INJECT_FAILED', async () => {
+  const m = createReaderModule({
+    scripting: {
+      async executeScript() {
+        throw new Error('Frame was removed');
+      },
+    },
+    permissions: { contains: async () => true, request: async () => true },
+    webNavigation: { getFrame: async () => ({ url: 'https://example.test/a' }) },
+  });
+  const h = m.handlers.find((x) => x.type === 'reader.toggle');
+  const res = await h.handle({ tabId: 1 }, { config: { get: () => 680 } });
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'INJECT_FAILED');
 });
 
 test('PASS: executeScript 返回空结果时给 NO_RESULT', async () => {

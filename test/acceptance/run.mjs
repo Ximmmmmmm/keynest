@@ -932,6 +932,80 @@ async function main() {
 
     await cdp.send('Target.closeTarget', { targetId: tabArt }).catch(() => {});
 
+    // ---------- T16 夜间模式：真实注入 ----------
+    await options.call(
+      `chrome.runtime.sendMessage({ type: 'modules.set-enabled', id: 'dark', enabled: true })`
+    );
+
+    const { targetId: tabDark } = await cdp.send('Target.createTarget', {
+      url: `https://127.0.0.1:${PORT_A}/article`,
+    });
+    const pageDark = await attach(cdp, tabDark);
+    await waitFor(async () => (await pageDark.call('document.readyState')) === 'complete', {
+      label: 'dark target load',
+    });
+    await sleep(600);
+
+    const darkTab = await popup.call(`(async () => {
+      const ids = await chrome.tabs.query({});
+      let last = null;
+      for (const t of ids) {
+        const f = await chrome.webNavigation.getFrame({ tabId: t.id, frameId: 0 }).catch(() => null);
+        if (f && f.url && f.url.endsWith('/article')) last = { id: t.id, url: f.url };
+      }
+      return last;
+    })()`);
+
+    const darkOn = darkTab
+      ? await options.call(
+          `chrome.runtime.sendMessage({ type: 'dark.toggle', tabId: ${darkTab.id}, action: 'install' })`
+        )
+      : null;
+    const darkDom = await pageDark.call(
+      `({ cls: document.documentElement.classList.contains('keynest-dark'),
+          hasStyle: !!document.getElementById('keynest-dark-style') })`
+    );
+    record(
+      'T16',
+      '夜间模式：注入后根元素加 class 且样式存在',
+      darkOn && darkOn.ok && darkDom && darkDom.cls && darkDom.hasStyle ? 'PASS' : 'FAIL',
+      `res=${JSON.stringify(darkOn)} dom=${JSON.stringify(darkDom)}`
+    );
+
+    // ---------- T16b 参数被写进滤镜 ----------
+    const darkCss = await pageDark.call(
+      `(document.getElementById('keynest-dark-style') || {}).textContent || ''`
+    );
+    record(
+      'T16b',
+      '滤镜参数写进样式且不含 NaN/undefined',
+      typeof darkCss === 'string' &&
+        /brightness\(\d+%\)/.test(darkCss) &&
+        !/NaN|undefined/.test(darkCss)
+        ? 'PASS'
+        : 'FAIL',
+      `css=${String(darkCss).slice(0, 120)}`
+    );
+
+    // ---------- T16c 关闭后完全还原 ----------
+    const darkOff = darkTab
+      ? await options.call(
+          `chrome.runtime.sendMessage({ type: 'dark.toggle', tabId: ${darkTab.id}, action: 'uninstall' })`
+        )
+      : null;
+    const darkAfter = await pageDark.call(
+      `({ cls: document.documentElement.classList.contains('keynest-dark'),
+          hasStyle: !!document.getElementById('keynest-dark-style') })`
+    );
+    record(
+      'T16c',
+      '夜间模式关闭：class 与样式全部清除',
+      darkOff && darkOff.ok && darkAfter && !darkAfter.cls && !darkAfter.hasStyle ? 'PASS' : 'FAIL',
+      `res=${JSON.stringify(darkOff)} dom=${JSON.stringify(darkAfter)}`
+    );
+
+    await cdp.send('Target.closeTarget', { targetId: tabDark }).catch(() => {});
+
     // ---------- T14 popup 面板系统 ----------
     // popup.html 现在只有一个 #panels 容器，具体内容由 panel-host 渲染。
     // 这里验的是「面板真的被渲染出来」，而不是「popup.js 里有这段代码」。

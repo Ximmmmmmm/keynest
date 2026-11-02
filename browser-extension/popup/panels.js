@@ -340,3 +340,68 @@ export function createReaderPanel(deps) {
   };
   return panel;
 }
+
+/* ------------------------------------------------------------------ */
+/* 夜间模式                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * @param {object} deps
+ * @param {() => number|null} deps.getTabId
+ */
+export function createDarkPanel(deps) {
+  const panel = {
+    id: 'dark',
+    moduleId: 'dark',
+    order: 16,
+    available: () => Number.isInteger(deps.getTabId()),
+
+    async render(host) {
+      const tabId = deps.getTabId();
+      if (!Number.isInteger(tabId)) return;
+
+      const state = await host.send('dark.query', { tabId });
+      const active = !!(state && state.ok && state.active);
+
+      const head = document.createElement('div');
+      head.className = 'panel-head';
+      const title = document.createElement('span');
+      title.className = 'panel-title';
+      title.textContent = '夜间模式';
+      const badge = document.createElement('span');
+      badge.className = active ? 'badge ok' : 'badge';
+      badge.textContent = active ? '已开启' : '未开启';
+      head.append(title, badge);
+      host.section.append(head);
+
+      host.el('p', 'panel-host', active ? '当前页面已调暗' : '把明亮页面调暗，图片保持原色');
+
+      const btn = document.createElement('button');
+      btn.className = 'ghost wide';
+      btn.textContent = active ? '关闭夜间模式' : '开启夜间模式';
+      host.section.append(btn);
+
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        const res = await host.send('dark.toggle', {
+          tabId,
+          action: active ? 'uninstall' : 'install',
+        });
+        btn.disabled = false;
+
+        if (!res || !res.ok) {
+          host.error(
+            res && res.error === 'HOST_PERMISSION_DENIED'
+              ? '需要本站点的访问权限，请在弹窗中允许后重试'
+              : `操作失败：${(res && res.error) || '未知错误'}`
+          );
+          return;
+        }
+        host.error(null);
+        host.section.replaceChildren();
+        await panel.render(host);
+      });
+    },
+  };
+  return panel;
+}
