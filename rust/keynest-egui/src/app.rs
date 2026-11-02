@@ -224,6 +224,12 @@ pub struct App {
     /// 最后复制的内容，锁定时用于精确清除剪贴板。
     last_copied: Option<Zeroizing<String>>,
 
+    /// 上一次已提示过的「剪贴板清除失败」原因。
+    ///
+    /// 去重用的：`check_clipboard_clear_failure` 每帧都跑，
+    /// 同一个失败只该提示一次，否则每帧都刷一条 toast。
+    reported_clipboard_failure: Option<String>,
+
     /// 界面态
     pub search: String,
     pub filter: Filter,
@@ -301,6 +307,7 @@ impl App {
             create_error: None,
             job: None,
             last_copied: None,
+            reported_clipboard_failure: None,
             search: String::new(),
             filter: Filter::All,
             sort: SortBy::UpdatedDesc,
@@ -802,6 +809,25 @@ impl App {
             last_activity.elapsed(),
             secure::system_idle(),
         )
+    }
+
+    /// 自动清除剪贴板失败时，把这件事告诉用户。
+    ///
+    /// 为什么需要单独一条：清除失败时**密码仍然留在剪贴板里**，
+    /// 而用户以为 20 秒后它已经没了。这是安全属性上的静默失效——
+    /// 比任何功能失败都更该主动提示。
+    ///
+    /// 每帧调一次；同一次失败只提示一次（靠记录上次提示过的文案去重）。
+    fn check_clipboard_clear_failure(&mut self) {
+        let Some(reason) = keynest_core::secure::last_clear_failure() else {
+            self.reported_clipboard_failure = None;
+            return;
+        };
+        if self.reported_clipboard_failure.as_deref() == Some(reason.as_str()) {
+            return; // 已经提示过这一次
+        }
+        self.reported_clipboard_failure = Some(reason);
+        self.set_toast("剪贴板自动清除失败，请手动复制别的内容或清空剪贴板");
     }
 
     fn check_auto_lock(&mut self) {
@@ -1883,6 +1909,7 @@ impl eframe::App for App {
 
         self.poll_job();
         self.check_auto_lock();
+        self.check_clipboard_clear_failure();
         self.expire_transient();
 
         // 有倒计时在动就快刷，否则 500ms 一次足够。
