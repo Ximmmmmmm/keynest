@@ -8,19 +8,34 @@
 //
 // ```text
 //   (无) --issue--> issued
-//   issued --beginRedeem(校验通过)--> consuming
+//   issued --claim(同步校验)--> validating      ← 认领权在此刻被独占
+//   validating --confirm(浏览器侧校验通过)--> consuming
+//   validating --abort(校验失败/异常)--> (删除)
 //   consuming --consume--> (删除)
 //   任意 --invalidate / 过期--> (删除)
 // ```
 //
-// 不变式：
-// - 只有 `issued` 能被 `beginRedeem`；一旦进入 `consuming` 就不可能再兑换
-//   → 重放与并发第二次兑换必然失败
-// - 任何校验失败都立即删除，不留给攻击者重试的机会
+// # 并发安全的关键
+//
+// `claim()` 是**同步**的，且是唯一能把状态从 `issued` 推进出去的入口。
+// JavaScript 是单线程的，所以：
+//
+// ```js
+// const rec = store.claim(nonce, claimed);   // 同步：100 个并发请求里只有 1 个拿到非 null
+// if (!rec) return reject;                   // 其余 99 个在这里就被挡掉
+// const tab = await chrome.tabs.get(...);    // 此时才 await
+// ```
+//
+// 认领发生在任何 `await` **之前**，所以不存在"两个请求都读到 issued"的窗口。
+//
+// # 不可回退
+//
+// `validating` 不能回到 `issued`。校验失败只能 `abort()`（删除），
+// 不存在"恢复成可再次兑换"的路径——这是防重放的根本。
 
 /**
  * @typedef {object} AuthRecord
- * @property {'issued'|'consuming'} state
+ * @property {'issued'|'validating'|'consuming'} state
  * @property {number} tabId
  * @property {number} frameId
  * @property {string} origin
@@ -75,7 +90,10 @@ export class AuthStore {
   }
 
   /**
-   * 校验并推进到 consuming。
+   * **同步认领**：把 issued 独占推进到 validating。
+   *
+   * 这是并发安全的唯一入口。调用方必须在**任何 await 之前**调用它，
+   * 拿到非 null 才算拥有兑换权。
    *
    * 任一项不符 → 删除记录并返回 null（**不留重试机会**）。
    *
@@ -84,13 +102,19 @@ export class AuthStore {
    *   调用方声明的绑定值。origin 必须是已规范化的字符串。
    * @returns {AuthRecord|null}
    */
-  beginRedeem(nonce, claimed) {
+  claim(nonce, claimed) {
     this.sweep();
     const r = this.records.get(nonce);
     if (!r) return null;
     if (r.state !== 'issued') {
-      // 已经在兑换中或已消费：这是重放/并发
-      this.records.delete(nonce);
+      // 已被别的请求认领（validating）或已消费（consuming）。
+      //
+      // **这里绝不能删除记录**：并发场景下，第 2..N 个请求会在第一个请求
+      // 还处于 validating 时到达。如果这里删了记录，第一个请求的 confirm()
+      // 就会失败，结果是"100 个并发全部失败"——那才是真正的功能缺陷。
+      //
+      // 攻击者的重放也无法借此获得好处：记录已归第一个请求所有，
+      // 后续请求拿不到任何东西。
       return null;
     }
     if (r.expiresAt <= this.now()) {
@@ -103,6 +127,24 @@ export class AuthStore {
       r.origin !== claimed.origin ||
       r.entryId !== claimed.entryId
     ) {
+      // 绑定值不符：这是明确的攻击信号（拿别人的 nonce 试），
+      // 直接销毁，不给重试机会。
+      this.records.delete(nonce);
+      return null;
+    }
+    r.state = 'validating';
+    return r;
+  }
+
+  /**
+   * 浏览器侧校验通过：validating → consuming。
+   *
+   * 只接受仍处于 validating 的记录；否则返回 null（已被 abort 或超时）。
+   */
+  confirm(nonce) {
+    const r = this.records.get(nonce);
+    if (!r || r.state !== 'validating') return null;
+    if (r.expiresAt <= this.now()) {
       this.records.delete(nonce);
       return null;
     }
@@ -118,6 +160,16 @@ export class AuthStore {
   /** 校验失败/异常时作废。 */
   invalidate(nonce) {
     this.records.delete(nonce);
+  }
+
+  /**
+   * 兼容旧调用名的薄封装（内部等价于 claim + 立即 confirm）。
+   * 仅供不涉及异步校验的场景使用；生产路径请用 claim/confirm 两段。
+   */
+  beginRedeem(nonce, claimed) {
+    const r = this.claim(nonce, claimed);
+    if (!r) return null;
+    return this.confirm(nonce);
   }
 
   /** 某个 tab 的全部授权作废（tab 关闭）。 */
@@ -151,5 +203,12 @@ export class AuthStore {
 
   peek(nonce) {
     return this.records.get(nonce) || null;
+  }
+
+  /** 当前处于某状态的记录数（测试用）。 */
+  countByState(state) {
+    let n = 0;
+    for (const r of this.records.values()) if (r.state === state) n += 1;
+    return n;
   }
 }

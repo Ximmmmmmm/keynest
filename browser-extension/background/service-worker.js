@@ -9,6 +9,7 @@
 import { normalize, isFillable } from '../lib/origin.js';
 import { AuthStore } from '../lib/auth-store.js';
 import { classifySender as classify } from '../lib/sender.js';
+import { redeemFill } from '../lib/redeem.js';
 
 const HOST_NAME = 'com.keynest.bridge';
 const PROTOCOL_VERSION = 1;
@@ -142,42 +143,22 @@ function issueAuth({ tabId, frameId, origin, entryId, username }) {
 }
 
 /**
- * 兑换授权：校验通过则转为 consuming 并返回授权记录，否则返回 null。
+ * 兑换（薄封装）：把 chrome.* 的真实实现注入 lib/redeem.js。
  *
- * 校验项（顺序固定）：
- *   1. nonce 存在且状态为 issued
- *   2. 未过期
- *   3. 调用方声明的 tab/frame/origin/entry 与授权记录一致
- *   4. tab 仍然存在，且**重新取到的浏览器 URL** 规范化后与授权 origin 精确相等
- *   5. frameId 匹配
- *
- * 任何一项失败都立即删除授权（不留可重试的机会）。
+ * 真正的并发安全与 frame 校验逻辑都在 lib/redeem.js 里，
+ * 那样才能在 node 里跑 100 并发测试。这里不做任何逻辑判断。
  */
-async function redeemAuth(nonce, claimed) {
-  // 先确认记录存在（避免为一个不存在的 nonce 去调 chrome.tabs.get）
-  const rec = auths.peek(nonce);
-  if (!rec) return null;
-
-  // 用浏览器侧的真实 URL 重新校验 origin：不信任消息里传来的任何地址
-  let tab;
-  try {
-    tab = await chrome.tabs.get(rec.tabId);
-  } catch (e) {
-    auths.invalidate(nonce);
-    return null;
-  }
-  const liveOrigin = normalize(tab.url || '');
-  if (!liveOrigin || liveOrigin !== rec.origin) {
-    auths.invalidate(nonce);
-    return null;
-  }
-
-  // 交给状态机做剩余校验（绑定值、过期、重放）并推进状态
-  return auths.beginRedeem(nonce, claimed);
-}
-
-function consumeAuth(nonce) {
-  auths.consume(nonce);
+function redeemFillWithChrome(nonce, claimed) {
+  return redeemFill(
+    auths,
+    {
+      getTab: (tabId) => chrome.tabs.get(tabId),
+      getFrame: (d) => chrome.webNavigation.getFrame(d),
+      fill: (req) => request('vault.fill', req),
+    },
+    nonce,
+    claimed
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -321,34 +302,13 @@ async function handleRedeem(msg, sender) {
   const frameId = Number.isInteger(sender.frameId) ? sender.frameId : 0;
   const senderOrigin = normalize(sender.url || '');
 
-  const a = await redeemAuth(nonce, {
+  const out = await redeemFillWithChrome(nonce, {
     tabId: sender.tab && sender.tab.id,
     frameId,
     origin: senderOrigin,
     entryId: msg.entryId,
   });
-  if (!a) return { ok: false, error: 'AUTH_REJECTED' };
 
-  // 到这里授权已转为 consuming，同一个 nonce 不可能再兑换第二次
-  let res;
-  try {
-    res = await request('vault.fill', {
-      entry_id: a.entryId,
-      origin: a.origin,
-      confirm: nonce, // 把授权 nonce 作为一次性确认串交给 GUI 侧留痕
-    });
-  } catch (e) {
-    auths.invalidate(nonce);
-    return { ok: false, error: String(e.message || 'FILL_FAILED') };
-  }
-
-  const password = res && res.password;
-  if (typeof password !== 'string' || !password) {
-    auths.invalidate(nonce);
-    return { ok: false, error: 'NO_PASSWORD' };
-  }
-
-  // 直接回给发起兑换的 content script（同一个 frame），不入 storage、不写日志
-  consumeAuth(nonce);
-  return { ok: true, username: a.username, password };
+  if (!out.ok) return out;
+  return { ok: true, username: out.username, password: out.password };
 }
