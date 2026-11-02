@@ -16,6 +16,25 @@ pub struct FieldDraft {
     pub secret: bool,
 }
 
+/// 打开对话框那一刻的内容快照，用于判断"用户是否真的改过"。
+///
+/// 为什么需要它：`edit.is_some()` 只能说明对话框开着，
+/// 打开又原样关掉也算。锁定时若据此提示"有未保存的修改"，
+/// 会变成噪音，用户很快就不看提示了。
+#[derive(Clone)]
+pub struct EditOriginal {
+    pub title: String,
+    pub username: String,
+    pub password: String,
+    pub url: String,
+    pub notes: String,
+    pub category: String,
+    pub kind: String,
+    pub favorite: bool,
+    pub totp: String,
+    pub field_values: Vec<String>,
+}
+
 pub struct EditState {
     pub id: Option<String>,
     /// 当前类型对应的默认字段模板（打开对话框时按下拉里的类型查好）。
@@ -39,6 +58,8 @@ pub struct EditState {
     pub gen: GeneratorState,
     /// 正在播放关闭动画
     pub closing: bool,
+    /// 打开时的内容快照（`None` 表示这是新增条目）
+    pub original: Option<EditOriginal>,
 }
 
 impl EditState {
@@ -52,6 +73,47 @@ impl EditState {
                 secret: f.secret,
             })
             .collect()
+    }
+
+    /// 用户是否真的动过内容。
+    ///
+    /// 用途：锁定时判断"要不要提示有未保存的编辑"。
+    /// 不能只看 `edit.is_some()`——打开对话框但一字未改也满足那个条件，
+    /// 提示会变成噪音，用户很快就不看了。
+    ///
+    /// 判据：新增条目时只要有任意非空内容就算脏；编辑既有条目时
+    /// 与打开时记下的原始值比较。
+    pub fn is_dirty(&self) -> bool {
+        let has_content = !self.title.trim().is_empty()
+            || !self.username.trim().is_empty()
+            || !self.password.is_empty()
+            || !self.url.trim().is_empty()
+            || !self.notes.trim().is_empty()
+            || !self.totp.is_empty()
+            || self.fields.iter().any(|f| !f.value.is_empty());
+
+        match &self.original {
+            // 新增条目：有内容就算脏
+            None => has_content,
+            // 编辑既有条目：与原始值逐项比较
+            Some(orig) => {
+                orig.title != self.title
+                    || orig.username != self.username
+                    || orig.password.as_str() != self.password.as_str()
+                    || orig.url != self.url
+                    || orig.notes != self.notes
+                    || orig.favorite != self.favorite
+                    || orig.category != self.category
+                    || orig.kind != self.kind
+                    || orig.totp.as_str() != self.totp.as_str()
+                    || orig.field_values.len() != self.fields.len()
+                    || orig
+                        .field_values
+                        .iter()
+                        .zip(self.fields.iter())
+                        .any(|(a, b)| a != b.value.as_str())
+            }
+        }
     }
 
     /// 切到某个类型时，若还没有任何字段，就按模板预填一份。
@@ -99,6 +161,7 @@ impl EditState {
             generator_open: false,
             gen: GeneratorState::default(),
             closing: false,
+            original: None,
         }
     }
 
@@ -129,6 +192,18 @@ impl EditState {
             generator_open: false,
             gen: GeneratorState::default(),
             closing: false,
+            original: Some(EditOriginal {
+                title: e.title.clone(),
+                username: e.username.clone(),
+                password: e.password.clone(),
+                url: e.url.clone(),
+                notes: e.notes.clone(),
+                category: e.category.clone(),
+                kind: e.kind.clone(),
+                favorite: e.favorite,
+                totp: e.totp.clone().unwrap_or_default(),
+                field_values: e.fields.iter().map(|f| f.value.clone()).collect(),
+            }),
         }
     }
 }
@@ -541,4 +616,116 @@ pub fn show(
         return EditIntent::Closed;
     }
     intent
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keynest_core::vault::Entry;
+
+    fn sample_entry() -> Entry {
+        Entry {
+            id: "id-1".into(),
+            title: "站点".into(),
+            username: "user".into(),
+            password: "pw".into(),
+            url: "https://x.test".into(),
+            category: "网站".into(),
+            notes: "note".into(),
+            favorite: false,
+            kind: kinds::LOGIN.to_string(),
+            fields: Vec::new(),
+            totp: None,
+            password_changed_at: None,
+            deleted_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// 打开编辑框但一字未改 → 不算脏。
+    ///
+    /// 这条最关键：锁定时若据此提示"有未保存的修改"，用户每次锁库都会看到
+    /// 一个没有意义的确认框，很快就养成"闭眼点确定"的习惯——
+    /// 那等于把这道防线废掉。
+    #[test]
+    fn untouched_edit_is_not_dirty() {
+        let st = EditState::from_entry(&sample_entry());
+        assert!(!st.is_dirty());
+    }
+
+    #[test]
+    fn changed_title_is_dirty() {
+        let mut st = EditState::from_entry(&sample_entry());
+        st.title = "改过的标题".into();
+        assert!(st.is_dirty());
+    }
+
+    #[test]
+    fn changed_password_is_dirty() {
+        let mut st = EditState::from_entry(&sample_entry());
+        st.password = Zeroizing::new("another".to_string());
+        assert!(st.is_dirty());
+    }
+
+    #[test]
+    fn changed_note_is_dirty() {
+        let mut st = EditState::from_entry(&sample_entry());
+        st.notes.push_str(" 补充");
+        assert!(st.is_dirty());
+    }
+
+    #[test]
+    fn toggled_favorite_is_dirty() {
+        let mut st = EditState::from_entry(&sample_entry());
+        st.favorite = true;
+        assert!(st.is_dirty());
+    }
+
+    /// 改了又改回原值 → 不算脏（比较快照而不是"有没有动过"）。
+    #[test]
+    fn reverted_change_is_not_dirty() {
+        let mut st = EditState::from_entry(&sample_entry());
+        st.title = "临时改的".into();
+        st.title = "站点".into();
+        assert!(!st.is_dirty());
+    }
+
+    /// 新增条目：空表单不算脏，填了内容就算。
+    #[test]
+    fn new_entry_dirty_only_after_input() {
+        let st = EditState::new_entry("网站".into());
+        assert!(!st.is_dirty(), "刚打开的空新增表单不该算脏");
+
+        let mut st = EditState::new_entry("网站".into());
+        st.title = "新站点".into();
+        assert!(st.is_dirty());
+    }
+
+    /// 自定义字段的值变化也要算脏——否则用户改了卡号却收不到提示。
+    #[test]
+    fn changed_custom_field_is_dirty() {
+        let mut e = sample_entry();
+        e.fields = vec![keynest_core::vault::Field {
+            label: "卡号".into(),
+            value: "6222".into(),
+            secret: true,
+        }];
+        let mut st = EditState::from_entry(&e);
+        assert!(!st.is_dirty());
+        st.fields[0].value = Zeroizing::new("6223".to_string());
+        assert!(st.is_dirty());
+    }
+
+    /// 字段数量变化（增/删一行）也要算脏。
+    #[test]
+    fn added_field_row_is_dirty() {
+        let mut st = EditState::from_entry(&sample_entry());
+        st.fields.push(FieldDraft {
+            label: "新字段".into(),
+            value: Zeroizing::new("v".to_string()),
+            secret: false,
+        });
+        assert!(st.is_dirty());
+    }
 }

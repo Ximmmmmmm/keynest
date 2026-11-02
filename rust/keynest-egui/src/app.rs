@@ -224,6 +224,9 @@ pub struct App {
     /// 最后复制的内容，锁定时用于精确清除剪贴板。
     last_copied: Option<Zeroizing<String>>,
 
+    /// 手动锁定时，若编辑框里有未保存的改动，先弹确认。
+    pending_lock_confirm: bool,
+
     /// 上一次已提示过的「剪贴板清除失败」原因。
     ///
     /// 去重用的：`check_clipboard_clear_failure` 每帧都跑，
@@ -307,6 +310,7 @@ impl App {
             create_error: None,
             job: None,
             last_copied: None,
+            pending_lock_confirm: false,
             reported_clipboard_failure: None,
             search: String::new(),
             filter: Filter::All,
@@ -530,8 +534,29 @@ impl App {
         self.spawn(JobKind::Unlock, pw);
     }
 
+    /// 用户主动点「锁定」时走这里：编辑框里有未保存的改动就先问一句。
+    ///
+    /// 为什么不直接锁：用户可能只是顺手点了锁定，而编辑框里刚填了半条记录。
+    /// 静默丢掉之后他不会知道东西去哪了——那是最让人恼火的一类数据丢失。
+    ///
+    /// 只对**手动**锁定这么做。自动锁定、关窗口、退出都必须无条件立即锁：
+    /// 那些时刻弹确认框会让库一直处于未锁定状态，比丢编辑严重得多。
+    pub fn request_lock(&mut self) {
+        if !matches!(self.state, AppState::Unlocked { .. }) {
+            return;
+        }
+        if self.edit.as_ref().map(|e| e.is_dirty()).unwrap_or(false) {
+            self.pending_lock_confirm = true;
+            return;
+        }
+        self.lock_now();
+    }
+
     /// 锁定：清密钥、丢数据、清剪贴板。
+    ///
+    /// **不询问**：用于自动锁定、窗口关闭、退出这些必须马上锁的路径。
     pub fn lock_now(&mut self) {
+        self.pending_lock_confirm = false;
         if !matches!(self.state, AppState::Unlocked { .. }) {
             return;
         }
@@ -1347,8 +1372,11 @@ impl App {
         match intent {
             MainIntent::None => {}
             MainIntent::Lock => {
-                self.lock_now();
-                self.set_toast("已锁定");
+                // 可能被拦下（编辑框有未保存内容），此时不提示"已锁定"
+                self.request_lock();
+                if !self.pending_lock_confirm {
+                    self.set_toast("已锁定");
+                }
             }
             MainIntent::OpenSettings => {
                 if let AppState::Unlocked { vault, data, .. } = &self.state {
@@ -1787,6 +1815,101 @@ impl App {
         }
     }
 
+    /// 「编辑框里有未保存的改动，确定要锁定吗？」
+    ///
+    /// 三个选项而不是两个：用户常常只是想先把内容存下来再锁，
+    /// 逼他在"丢"和"不锁"之间二选一不合理。
+    fn draw_confirm_lock(&mut self, ctx: &egui::Context) {
+        if !self.pending_lock_confirm {
+            return;
+        }
+
+        #[allow(deprecated)]
+        let resp = egui::Modal::new(egui::Id::new("confirm-lock")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.label(egui::RichText::new("还有未保存的修改").size(16.0).strong());
+            ui.add_space(8.0);
+            ui.label("正在编辑的这条记录还没保存。锁定之后这些内容会丢失。");
+            ui.add_space(12.0);
+
+            let mut action = 0u8; // 0=不动 1=先保存再锁 2=丢弃并锁定 3=取消
+            ui.horizontal(|ui| {
+                if ui.button("保存后锁定").clicked() {
+                    action = 1;
+                }
+                if ui
+                    .button(
+                        egui::RichText::new("丢弃并锁定")
+                            .color(egui::Color32::from_rgb(190, 60, 60)),
+                    )
+                    .clicked()
+                {
+                    action = 2;
+                }
+                if ui.button("取消").clicked() {
+                    action = 3;
+                }
+            });
+            action
+        });
+
+        // 点遮罩也算取消：用户没明确选择时不该丢掉任何东西
+        let action = if resp.inner != 0 {
+            resp.inner
+        } else if resp.should_close() {
+            3
+        } else {
+            0
+        };
+
+        match action {
+            1 => {
+                // 先走正常的保存流程；保存成功与否由 upsert 的错误处理决定。
+                // 无论成败都不在这里强行锁定——保存失败时锁掉会丢内容。
+                self.save_edit_and_lock();
+            }
+            2 => {
+                self.pending_lock_confirm = false;
+                self.edit = None;
+                self.lock_now();
+                self.set_toast("已锁定");
+            }
+            3 => {
+                self.pending_lock_confirm = false;
+            }
+            _ => {}
+        }
+    }
+
+    /// 保存当前编辑内容，成功后再锁定。
+    ///
+    /// `save_edit` 没有返回值，所以这里用「保存后编辑框里是否出现 error」
+    /// 判断成败：失败时它会把错误写回 `st.error` 并取消关闭，
+    /// 那时**不能锁**——锁掉就等于把用户刚填的内容丢了。
+    fn save_edit_and_lock(&mut self) {
+        self.pending_lock_confirm = false;
+        self.save_edit();
+
+        let failed = self
+            .edit
+            .as_ref()
+            .map(|st| st.error.is_some())
+            .unwrap_or(false);
+        if failed {
+            // 错误已经回填在对话框里，用户能看见；这次锁定作废
+            return;
+        }
+
+        // 保存成功：走正常的退场动画，然后立即锁定。
+        // 顺序不能反——先锁会把 `edit` 一起丢掉。
+        if let Some(st) = self.edit.as_mut() {
+            st.closing = true;
+        }
+        self.edit = None;
+        self.lock_now();
+        self.set_toast("已保存并锁定");
+    }
+
     fn draw_confirm_delete(&mut self, ctx: &egui::Context) {
         let Some(id) = self.confirm_delete.clone() else {
             return;
@@ -2057,6 +2180,7 @@ impl eframe::App for App {
         self.apply_main_intent(main_intent);
         self.apply_settings_intent(settings_intent);
         self.apply_edit_intent(edit_intent);
+        self.draw_confirm_lock(ui.ctx());
         self.draw_confirm_delete(ui.ctx());
         self.draw_export_confirm(ui.ctx());
         self.draw_confirm_empty_trash(ui.ctx());
