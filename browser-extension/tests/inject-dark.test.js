@@ -119,6 +119,21 @@ test('PASS: 只注入主 frame', async () => {
   assert.deepEqual(scripting.calls[0].target, { tabId: 7, frameIds: [0] });
 });
 
+test('FAIL-SAFE: 注入函数自己返回 ok:false 时不被当成功（三层失败分开）', async () => {
+  // executeScript 成功了，函数也跑完了，但它返回 {ok:false, error:'NO_CONTENT'}。
+  // 从浏览器角度这是完全成功的调用——不检查这个字段的话，
+  // 上层会把失败当成功，于是"注入失败却记成已开启"，用户看到开关自己跳。
+  const scripting = fakeScripting(async () => [{ result: { ok: false, error: 'NO_CONTENT' } }]);
+  const r = await runInFrame(scripting, 7, () => 1);
+  assert.deepEqual(r, { ok: false, error: 'NO_CONTENT' });
+});
+
+test('FAIL-SAFE: 注入函数返回 ok:false 但没有 error 时给 INJECTED_FAILED', async () => {
+  const scripting = fakeScripting(async () => [{ result: { ok: false } }]);
+  const r = await runInFrame(scripting, 7, () => 1);
+  assert.equal(r.error, 'INJECTED_FAILED');
+});
+
 test('FAIL-SAFE: 空结果返回 NO_RESULT（不是静默成功）', async () => {
   const scripting = fakeScripting(async () => []);
   const r = await runInFrame(scripting, 7, () => 1);
@@ -376,4 +391,114 @@ test('FAIL-SAFE: 无权限时 install 返回 HOST_PERMISSION_DENIED', async () =
   const h = m.handlers.find((x) => x.type === 'dark.toggle');
   const res = await h.handle({ tabId: 3, action: 'install' }, { config: { get: () => 90 } });
   assert.equal(res.error, 'HOST_PERMISSION_DENIED');
+});
+
+/* ============================ 按站点记忆 ============================ */
+
+/** 带记忆配置的 ctx。注入结果可控，用来验"失败不写名单"。 */
+function memCtx(initial = {}, injection = { ok: true }) {
+  const store = { darkSites: '[]', remember: true, brightness: 90, contrast: 100, sepia: 0, ...initial };
+  const ctx = {
+    store,
+    config: {
+      get: (k) => store[k],
+      set: async (k, v) => {
+        store[k] = v;
+      },
+    },
+  };
+  return { ctx, store, injection };
+}
+
+function memDeps(injection = {}) {
+  return {
+    scripting: {
+      async executeScript() {
+        return [{ result: injection }];
+      },
+    },
+    permissions: { contains: async () => true, request: async () => true },
+    webNavigation: { getFrame: async () => ({ url: 'https://a.test/page' }) },
+  };
+}
+
+test('PASS: 开启后把站点写进名单', async () => {
+  const { ctx, store } = memCtx();
+  const m = createDarkModule(memDeps({ ok: true, brightness: 90 }));
+  const h = m.handlers.find((x) => x.type === 'dark.toggle');
+
+  await h.handle({ tabId: 1, action: 'install', host: 'a.test' }, ctx);
+  assert.deepEqual(JSON.parse(store.darkSites), ['a.test']);
+});
+
+test('PASS: 关闭后从名单移除', async () => {
+  const { ctx, store } = memCtx({ darkSites: '["a.test"]' });
+  const m = createDarkModule(memDeps({ ok: true, removed: true }));
+  const h = m.handlers.find((x) => x.type === 'dark.toggle');
+
+  await h.handle({ tabId: 1, action: 'uninstall', host: 'a.test' }, ctx);
+  assert.deepEqual(JSON.parse(store.darkSites), []);
+});
+
+test('FAIL-SAFE: 注入失败时不写名单（否则开关会自己跳）', async () => {
+  // 注入失败还记成"已开启"，下次页面加载会自动尝试、又失败，
+  // 用户看到的是"开关自己跳"。
+  const { ctx, store } = memCtx();
+  const m = createDarkModule(memDeps({ ok: false, error: 'NO_CONTENT' }));
+  const h = m.handlers.find((x) => x.type === 'dark.toggle');
+
+  await h.handle({ tabId: 1, action: 'install', host: 'a.test' }, ctx);
+  assert.deepEqual(JSON.parse(store.darkSites), [], '失败却写了名单');
+});
+
+test('FAIL-SAFE: remember:false 时不写名单（只想影响当前页面）', async () => {
+  const { ctx, store } = memCtx({ remember: false });
+  const m = createDarkModule(memDeps({ ok: true, brightness: 90 }));
+  const h = m.handlers.find((x) => x.type === 'dark.toggle');
+
+  await h.handle({ tabId: 1, action: 'install', host: 'a.test' }, ctx);
+  assert.deepEqual(JSON.parse(store.darkSites), []);
+});
+
+test('PASS: 没传 host 时从 tab URL 推断', async () => {
+  const { ctx, store } = memCtx();
+  const m = createDarkModule(memDeps({ ok: true, brightness: 90 }));
+  const h = m.handlers.find((x) => x.type === 'dark.toggle');
+
+  await h.handle({ tabId: 1, action: 'install' }, ctx);
+  assert.deepEqual(JSON.parse(store.darkSites), ['a.test'], '没从 tab 推断出 host');
+});
+
+test('FAIL-SAFE: 传了非法 host 时退回 tab 推断（不是直接失败）', async () => {
+  const { ctx, store } = memCtx();
+  const m = createDarkModule(memDeps({ ok: true, brightness: 90 }));
+  const h = m.handlers.find((x) => x.type === 'dark.toggle');
+
+  await h.handle({ tabId: 1, action: 'install', host: 'https://x.test/a' }, ctx);
+  assert.deepEqual(JSON.parse(store.darkSites), ['a.test']);
+});
+
+test('PASS: dark.should-apply 告诉页面该不该自动开', async () => {
+  const { ctx } = memCtx({ darkSites: '["a.test"]' });
+  const m = createDarkModule(memDeps());
+  const h = m.handlers.find((x) => x.type === 'dark.should-apply');
+
+  assert.deepEqual(await h.handle({ host: 'www.a.test' }, ctx), { ok: true, apply: true });
+  assert.deepEqual(await h.handle({ host: 'b.test' }, ctx), { ok: true, apply: false });
+});
+
+test('FAIL-SAFE: dark.should-apply 缺 host 被拒', async () => {
+  const { ctx } = memCtx();
+  const m = createDarkModule(memDeps());
+  const h = m.handlers.find((x) => x.type === 'dark.should-apply');
+  for (const host of ['', null, 123]) {
+    assert.deepEqual(await h.handle({ host }, ctx), { ok: false, error: 'BAD_ARGS' });
+  }
+});
+
+test('PASS: dark.sites 返回当前名单', async () => {
+  const { ctx } = memCtx({ darkSites: '["b.test","a.test"]' });
+  const m = createDarkModule(memDeps());
+  const h = m.handlers.find((x) => x.type === 'dark.sites');
+  assert.deepEqual((await h.handle({}, ctx)).list, ['b.test', 'a.test']);
 });

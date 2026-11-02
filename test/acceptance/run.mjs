@@ -1006,6 +1006,88 @@ async function main() {
 
     await cdp.send('Target.closeTarget', { targetId: tabDark }).catch(() => {});
 
+    // ---------- T17 按站点记忆 ----------
+    // 用户开了夜间模式、翻一页就没了——这是 3.4 最大的实用性问题。
+    // 这里验的是名单真的写进存储、且 should-apply 能按域名归属回答。
+    const { targetId: tabMem } = await cdp.send('Target.createTarget', {
+      url: `https://127.0.0.1:${PORT_A}/article`,
+    });
+    const pageMem = await attach(cdp, tabMem);
+    await waitFor(async () => (await pageMem.call('document.readyState')) === 'complete', {
+      label: 'memory target load',
+    });
+    await sleep(500);
+
+    const memTab = await popup.call(`(async () => {
+      const ids = await chrome.tabs.query({});
+      let found = null;
+      for (const t of ids) {
+        const f = await chrome.webNavigation.getFrame({ tabId: t.id, frameId: 0 }).catch(() => null);
+        if (f && f.url && f.url.endsWith('/article')) found = { id: t.id, url: f.url };
+      }
+      return found;
+    })()`);
+
+    const memOn = memTab
+      ? await options.call(
+          `chrome.runtime.sendMessage({ type: 'dark.toggle', tabId: ${memTab.id}, action: 'install', host: '127.0.0.1' })`
+        )
+      : null;
+    const memStored = await popup.call(
+      `chrome.storage.local.get('keynest.cfg.dark').then(g => {
+         const v = g['keynest.cfg.dark'];
+         return v ? v.darkSites : null;
+       })`
+    );
+    record(
+      'T17',
+      '按站点记忆：开启后站点写进持久存储',
+      memOn && memOn.ok &&
+        typeof memStored === 'string' &&
+        JSON.parse(memStored).includes('127.0.0.1')
+        ? 'PASS'
+        : 'FAIL',
+      `res=${JSON.stringify(memOn)} stored=${JSON.stringify(memStored)}`
+    );
+
+    // ---------- T17b should-apply 按域名归属回答 ----------
+    const shouldYes = await popup.call(
+      `chrome.runtime.sendMessage({ type: 'dark.should-apply', host: '127.0.0.1' })`
+    );
+    const shouldNo = await popup.call(
+      `chrome.runtime.sendMessage({ type: 'dark.should-apply', host: 'example.invalid' })`
+    );
+    record(
+      'T17b',
+      'should-apply 对已记忆站点返回 true，对其它返回 false',
+      shouldYes && shouldYes.ok && shouldYes.apply === true &&
+        shouldNo && shouldNo.ok && shouldNo.apply === false
+        ? 'PASS'
+        : 'FAIL',
+      `yes=${JSON.stringify(shouldYes)} no=${JSON.stringify(shouldNo)}`
+    );
+
+    // ---------- T17c 关闭后从名单移除 ----------
+    const memOff = memTab
+      ? await options.call(
+          `chrome.runtime.sendMessage({ type: 'dark.toggle', tabId: ${memTab.id}, action: 'uninstall', host: '127.0.0.1' })`
+        )
+      : null;
+    const memAfter = await popup.call(
+      `chrome.runtime.sendMessage({ type: 'dark.sites' })`
+    );
+    record(
+      'T17c',
+      '关闭后从名单移除',
+      memOff && memOff.ok && memAfter && memAfter.ok &&
+        Array.isArray(memAfter.list) && !memAfter.list.includes('127.0.0.1')
+        ? 'PASS'
+        : 'FAIL',
+      `res=${JSON.stringify(memOff)} list=${JSON.stringify(memAfter && memAfter.list)}`
+    );
+
+    await cdp.send('Target.closeTarget', { targetId: tabMem }).catch(() => {});
+
     // ---------- T14 popup 面板系统 ----------
     // popup.html 现在只有一个 #panels 容器，具体内容由 panel-host 渲染。
     // 这里验的是「面板真的被渲染出来」，而不是「popup.js 里有这段代码」。

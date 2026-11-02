@@ -75,7 +75,11 @@ export async function ensureHostPermission(permissions, origin) {
  * 三件事在这里一次做对：
  *   - 只注入主 frame（`frameIds: [0]`）：iframe 里的页面不该被同一个动作改两次
  *   - 取第一个结果（`executeScript` 按 frame 返回数组）
- *   - 把"结果为空"与"注入失败"分开表达
+ *   - 把三层失败分开表达：注入本身失败 / 结果为空 / **注入函数自己返回了失败**
+ *
+ * 第三层最容易被漏：注入成功、函数跑完、返回 `{ok:false, error:'NO_CONTENT'}`——
+ * 从 `executeScript` 的角度这是**完全成功**的调用。不检查这个字段的话，
+ * 上层会把失败当成功，于是"注入失败却记成已开启"，用户看到开关自己跳。
  *
  * @param {object} scripting `chrome.scripting`
  * @param {number} tabId
@@ -93,7 +97,15 @@ export async function runInFrame(scripting, tabId, func, args = []) {
     });
     const first = Array.isArray(results) ? results[0] : null;
     if (!first || first.result === undefined) return { ok: false, error: 'NO_RESULT' };
-    return { ok: true, result: first.result };
+
+    const result = first.result;
+    // 注入函数自己报告失败（例如"提不出正文"）：这是**业务失败**，
+    // 与"注入技术失败"必须区分——上层对两者的处理完全不同。
+    if (result && typeof result === 'object' && result.ok === false) {
+      return { ok: false, error: typeof result.error === 'string' ? result.error : 'INJECTED_FAILED' };
+    }
+
+    return { ok: true, result };
   } catch (e) {
     // 只回稳定错误码，不回 e.message：后者含 Chrome 的长句与内部细节。
     // 但要把"没权限"和其它失败分开——上层据此决定提示"请重新授权"还是"操作失败"。

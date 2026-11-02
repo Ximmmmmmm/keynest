@@ -22,6 +22,7 @@
 // 这一层在阶段 3.3 已经踩过坑，这里直接复用。
 
 import { injectInto } from '../inject.js';
+import { createSiteMemory } from '../site-memory.js';
 
 /** 注入到页面的函数。**完全自包含**：不能引用任何外部变量。 */
 function darkToggle(args) {
@@ -86,6 +87,30 @@ function darkToggle(args) {
   return { ok: true, brightness, contrast, sepia };
 }
 
+/**
+ * 从调用方给的 host 取站点名（popup 通常已知，直接传更快）。
+ * 不合法就返回 null，让调用方退回到 `hostOfTab`。
+ */
+function hostOf(raw) {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim().toLowerCase();
+  if (!s || s.includes('/') || s.includes(':')) return null;
+  return /^[a-z0-9.-]+$/.test(s) ? s : null;
+}
+
+/** 从 tab 的 URL 取 host。取不到就返回 null（不是错误）。 */
+async function hostOfTab(deps, tabId) {
+  try {
+    const frame = await deps.webNavigation.getFrame({ tabId, frameId: 0 });
+    if (!frame || typeof frame.url !== 'string') return null;
+    const u = new URL(frame.url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 export const BRIGHTNESS_RANGE = [40, 120];
 export const CONTRAST_RANGE = [60, 140];
 export const SEPIA_RANGE = [0, 40];
@@ -135,6 +160,11 @@ export function createDarkModule(deps) {
         max: SEPIA_RANGE[1],
         integer: true,
       },
+      // 按站点记忆：在这份名单里的站点，页面加载时自动套上夜间模式。
+      // 存 JSON 字符串（配置中心只支持标量），读出来一律过 sanitize。
+      darkSites: { type: 'string', default: '[]', maxLength: 8192 },
+      // 是否启用"按站点记忆"。关掉时只影响当前页面，不写名单。
+      remember: { type: 'boolean', default: true },
     },
     handlers: [
       {
@@ -149,8 +179,34 @@ export function createDarkModule(deps) {
             needPermission: action === 'install',
           });
           if (!out.ok) return out;
+
+          // 按站点记忆：只有注入成功才写名单。
+          // 注入失败还记成"已开启"，下次页面加载会自动尝试、又失败——用户看到的是"开关自己跳"。
+          if (ctx.config.get('remember')) {
+            const host = hostOf(msg.host) || (await hostOfTab(deps, tabId));
+            if (host) {
+              const mem = createSiteMemory(ctx.config, 'dark');
+              if (action === 'install') await mem.enable(host);
+              else await mem.disable(host);
+            }
+          }
+
           return { ok: true, ...out.result };
         },
+      },
+      {
+        /** 页面加载时查询：这个 host 是否在名单里（content script 用）。 */
+        type: 'dark.should-apply',
+        handle: (msg, ctx) => {
+          const host = typeof msg.host === 'string' ? msg.host : '';
+          if (!host) return { ok: false, error: 'BAD_ARGS' };
+          const mem = createSiteMemory(ctx.config, 'dark');
+          return { ok: true, apply: mem.has(host) };
+        },
+      },
+      {
+        type: 'dark.sites',
+        handle: (msg, ctx) => ({ ok: true, list: createSiteMemory(ctx.config, 'dark').list() }),
       },
       {
         type: 'dark.query',
