@@ -1,5 +1,5 @@
 [workspace]
-members = ["keynest-core", "keynest-egui"]
+members = ["keynest-core", "keynest-egui", "keynest-bridge"]
 resolver = "2"
 
 # 任务要求：strip + lto + opt-level="z" + panic=abort + codegen-units=1
