@@ -70,33 +70,75 @@ fn random_index(bound: usize) -> Result<usize> {
 pub fn generate(opts: &GenOptions) -> Result<String> {
     let length = opts.length.clamp(1, MAX_LENGTH);
 
+    // 逐个类别收集，同时记住"每一类还剩下哪些字符"——
+    // 保证每类至少出现一次时需要从各类里分别取。
+    let mut selected: Vec<Vec<char>> = Vec::with_capacity(4);
     let mut pool = String::new();
-    if opts.lowercase {
-        pool.push_str(LOWER);
+    for (want, set) in [
+        (opts.lowercase, LOWER),
+        (opts.uppercase, UPPER),
+        (opts.digits, DIGITS),
+        (opts.symbols, SYMBOLS),
+    ] {
+        if !want {
+            continue;
+        }
+        let chars: Vec<char> = if opts.exclude_ambiguous {
+            set.chars().filter(|c| !AMBIGUOUS.contains(*c)).collect()
+        } else {
+            set.chars().collect()
+        };
+        if chars.is_empty() {
+            continue;
+        }
+        pool.extend(chars.iter());
+        selected.push(chars);
     }
-    if opts.uppercase {
-        pool.push_str(UPPER);
-    }
-    if opts.digits {
-        pool.push_str(DIGITS);
-    }
-    if opts.symbols {
-        pool.push_str(SYMBOLS);
-    }
-    if opts.exclude_ambiguous {
-        pool = pool.chars().filter(|c| !AMBIGUOUS.contains(*c)).collect();
-    }
+
     if pool.is_empty() {
         pool.push_str(LOWER); // 兜底：至少有小写字母
+        selected.push(LOWER.chars().collect());
     }
+    let selected_classes = selected.len();
 
     let chars = Zeroizing::new(pool.chars().collect::<Vec<char>>());
 
-    let mut out = String::with_capacity(length);
-    for _ in 0..length {
-        let idx = random_index(chars.len())?;
-        out.push(chars[idx]);
+    // 每个选中的类别各放一个字符，剩下的随机填满，最后洗牌。
+    //
+    // 为什么必须这么做：大量网站在注册时强制"至少一个数字/符号"。
+    // 纯随机填充时，8 位密码缺某一类是很容易发生的——
+    // 用户点生成、粘贴、被拒、再生成，反复几轮才成功。
+    //
+    // 代价是熵略低于纯随机（少了"缺少某类"的那部分），
+    // 但换来的可用性远大于那点损失；而且所需类别数远小于长度，
+    // 影响可以忽略。
+    let mut slots: Vec<char> = Vec::with_capacity(length);
+
+    if length >= selected_classes {
+        for class in selected.iter() {
+            let idx = random_index(class.len())?;
+            slots.push(class[idx]);
+        }
+        while slots.len() < length {
+            let idx = random_index(chars.len())?;
+            slots.push(chars[idx]);
+        }
+        // Fisher–Yates 洗牌：把"每类一个"的位置打散。
+        // 不洗牌时前几位会固定是各类别的第一个，规律明显。
+        for i in (1..slots.len()).rev() {
+            let j = random_index(i + 1)?;
+            slots.swap(i, j);
+        }
+    } else {
+        // 长度比类别数还少（例如 length=2 但选了 4 类）：
+        // 无法兼顾，退回纯随机，不假装能满足。
+        for _ in 0..length {
+            let idx = random_index(chars.len())?;
+            slots.push(chars[idx]);
+        }
     }
+
+    let out: String = slots.iter().collect();
     Ok(out)
 }
 
@@ -128,6 +170,47 @@ pub fn estimate_strength(password: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 生成的密码必须**真的包含**每个选中的字符类别。
+    ///
+    /// 现实问题：大量网站在注册时强制要求"至少一个数字/符号"。
+    /// 用户点"生成"→ 粘贴 → 站点报错 → 再生成 → 又报错。
+    /// 短密码（8 位）配上 4 类字符时，缺一类是很容易发生的。
+    #[test]
+    fn generated_password_contains_every_selected_class() {
+        let opts = GenOptions {
+            length: 8,
+            lowercase: true,
+            uppercase: true,
+            digits: true,
+            symbols: true,
+            exclude_ambiguous: false,
+        };
+        // 生成多次，只要有一次缺类别就算失败
+        for _ in 0..200 {
+            let s = generate(&opts).unwrap();
+            assert!(s.chars().any(|c| c.is_ascii_lowercase()), "缺小写字母: {s}");
+            assert!(s.chars().any(|c| c.is_ascii_uppercase()), "缺大写字母: {s}");
+            assert!(s.chars().any(|c| c.is_ascii_digit()), "缺数字: {s}");
+            assert!(s.chars().any(|c| !c.is_ascii_alphanumeric()), "缺符号: {s}");
+        }
+    }
+
+    /// 只选一类时，长度不要被"保证涵盖"逻辑改坏。
+    #[test]
+    fn single_class_still_uses_full_length() {
+        let s = generate(&GenOptions {
+            length: 6,
+            lowercase: false,
+            uppercase: false,
+            digits: true,
+            symbols: false,
+            exclude_ambiguous: false,
+        })
+        .unwrap();
+        assert_eq!(s.chars().count(), 6);
+        assert!(s.chars().all(|c| c.is_ascii_digit()));
+    }
 
     #[test]
     fn generates_requested_length() {
