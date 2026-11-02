@@ -60,3 +60,6 @@ dist-egui/
 
 # 旧版 Electron 时期的截图（已被 docs/shots/ 取代，仅本地留存）
 docs/ui/
+
+# 验收脚本的运行产物（每轮不同，不入库）
+test/acceptance/.out/
