@@ -515,6 +515,28 @@ pub struct Settings {
     pub import_prompted: bool,
 }
 
+/// 自动锁定上限（分钟）。1440 = 24 小时。
+///
+/// 为什么要有上限：自动锁定是密码管理器最基本的防线。设成几年
+/// 等于把它关掉，而用户往往是在「嫌它太频繁」的时候随手填个大数，
+/// 并不会意识到自己刚刚关掉了什么。
+pub const MAX_AUTO_LOCK_MINUTES: u32 = 1440;
+
+/// 剪贴板清理间隔上限（秒）。
+///
+/// 密码在剪贴板里停留越久，被其他程序读取的机会越多。
+/// 300 秒已经足够完成粘贴，再长就没有安全意义了。
+pub const MAX_CLIPBOARD_SECONDS: u32 = 300;
+
+/// 密码显示时长上限（秒）。
+pub const MAX_REVEAL_SECONDS: u32 = 300;
+
+/// 剪贴板清理间隔下限（秒）。
+///
+/// 低于 3 秒时，用户还没切到目标窗口内容就被清掉了，
+/// 表现为「点了复制但粘贴出来是空的」。
+pub const MIN_CLIPBOARD_SECONDS: u32 = 3;
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -706,6 +728,20 @@ impl VaultData {
     /// 必须在**读入之后、任何界面逻辑之前**做掉——否则老库里的条目会显示成
     /// `login`，而且不在任何类型筛选里。
     fn migrate_legacy(&mut self) {
+        // 旧库里可能已经存着危险设置值（老版本没做夹紧，或库文件被手工改过）。
+        // 只在**打开时**修一次内存副本——不改磁盘上的文件，
+        // 用户下次在设置页点保存时才会写回新值。这样不会在用户不知情的
+        // 情况下改写他的库。
+        self.settings.auto_lock_minutes = self
+            .settings
+            .auto_lock_minutes
+            .clamp(1, MAX_AUTO_LOCK_MINUTES);
+        self.settings.clipboard_clear_seconds = self
+            .settings
+            .clipboard_clear_seconds
+            .clamp(MIN_CLIPBOARD_SECONDS, MAX_CLIPBOARD_SECONDS);
+        self.settings.reveal_seconds = self.settings.reveal_seconds.clamp(1, MAX_REVEAL_SECONDS);
+
         for e in self.entries.iter_mut() {
             if let Some(name) = kinds::migrate_legacy(&e.kind) {
                 e.kind = name.to_string();
@@ -2396,7 +2432,18 @@ impl Vault {
         Ok(trimmed.to_string())
     }
 
-    pub fn update_settings(&mut self, settings: Settings) -> Result<()> {
+    pub fn update_settings(&mut self, mut settings: Settings) -> Result<()> {
+        // 夹紧到安全范围。
+        //
+        // 在**写入这一层**做，而不是只在 UI 层：UI 可能有多个入口
+        // （设置页、将来的快捷键、导入的库），漏一个就会写进危险值。
+        // 而且这些值还可能来自旧版本或手工编辑过的库文件。
+        settings.auto_lock_minutes = settings.auto_lock_minutes.clamp(1, MAX_AUTO_LOCK_MINUTES);
+        settings.clipboard_clear_seconds = settings
+            .clipboard_clear_seconds
+            .clamp(MIN_CLIPBOARD_SECONDS, MAX_CLIPBOARD_SECONDS);
+        settings.reveal_seconds = settings.reveal_seconds.clamp(1, MAX_REVEAL_SECONDS);
+
         let before = self.data.as_ref().ok_or(VaultError::Locked)?.clone();
         {
             let data = self.data.as_mut().ok_or(VaultError::Locked)?;
@@ -3361,6 +3408,117 @@ mod tests {
     /// 缺陷：`on_disk` 一旦对不上就永久对不上——`save_inner` 每次都返回
     /// `ExternalChange`，而没有任何公开方法能让它重新对齐。
     /// 用户只能重启程序（丢掉未保存的编辑）或手动删文件。
+    /// 设置项必须被夹紧到安全范围，否则库会变成「打不开也用不了」。
+    ///
+    /// 具体后果：
+    /// * `auto_lock_minutes = 0` → `should_auto_lock` 每帧都为真，
+    ///   用户解锁后立刻又被锁，程序完全不可用
+    /// * `clipboard_clear_seconds = 0` → 刚写入就被定时器清空，
+    ///   表现为「点了复制但剪贴板是空的」
+    /// * `reveal_seconds = 0` → 密码一显示就消失
+    ///
+    /// 这些值可能来自旧版本、手工编辑库文件，或将来某个 UI 缺陷。
+    /// 在写入这一层夹紧，比在 UI 层修补更可靠——UI 可能有多个入口。
+    #[test]
+    fn update_settings_clamps_dangerous_values() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        let bad = Settings {
+            auto_lock_minutes: 0,
+            clipboard_clear_seconds: 0,
+            reveal_seconds: 0,
+            ..Default::default()
+        };
+        v.update_settings(bad).unwrap();
+
+        let s = v.snapshot().unwrap().settings;
+        assert!(
+            s.auto_lock_minutes >= 1,
+            "自动锁定不得为 0: {}",
+            s.auto_lock_minutes
+        );
+        assert!(
+            s.clipboard_clear_seconds >= 3,
+            "剪贴板清理间隔过短: {}",
+            s.clipboard_clear_seconds
+        );
+        assert!(
+            s.reveal_seconds >= 1,
+            "显示时长不得为 0: {}",
+            s.reveal_seconds
+        );
+    }
+
+    /// 过大的值也要夹紧：自动锁定设成几年等于关掉这个安全功能，
+    /// 而它是密码管理器最基本的一道防线。
+    #[test]
+    fn update_settings_caps_huge_values() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        let bad = Settings {
+            auto_lock_minutes: 100_000,
+            clipboard_clear_seconds: 100_000,
+            reveal_seconds: 100_000,
+            ..Default::default()
+        };
+        v.update_settings(bad).unwrap();
+
+        let s = v.snapshot().unwrap().settings;
+        assert!(
+            s.auto_lock_minutes <= MAX_AUTO_LOCK_MINUTES,
+            "{}",
+            s.auto_lock_minutes
+        );
+        assert!(s.clipboard_clear_seconds <= MAX_CLIPBOARD_SECONDS);
+        assert!(s.reveal_seconds <= MAX_REVEAL_SECONDS);
+    }
+
+    /// 打开旧库时，里面已存的危险设置值也要被夹紧。
+    ///
+    /// 否则「升级程序」对已有库没有效果：用户解锁后仍然立刻被锁，
+    /// 而他并不知道问题出在库文件里存的那个 0。
+    #[test]
+    fn opening_legacy_vault_clamps_settings_in_memory() {
+        let dir = tmp();
+        let path = dir.path().join("vault.dat");
+        let mut v = fast_vault(dir.path());
+        // 直接把危险值写进内存数据并保存（模拟旧版本写出的库）
+        {
+            let data = v.data.as_mut().unwrap();
+            data.settings.auto_lock_minutes = 0;
+            data.settings.clipboard_clear_seconds = 0;
+            data.settings.reveal_seconds = 0;
+        }
+        v.save().unwrap();
+        v.lock();
+
+        let mut v2 = Vault::new(&path);
+        let data = v2.unlock("master-password-123").unwrap();
+        assert!(data.settings.auto_lock_minutes >= 1, "解锁后仍为 0");
+        assert!(data.settings.clipboard_clear_seconds >= MIN_CLIPBOARD_SECONDS);
+        assert!(data.settings.reveal_seconds >= 1);
+    }
+
+    /// 正常值必须原样保留，不能被"顺手"改掉。
+    #[test]
+    fn update_settings_keeps_valid_values() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+        let good = Settings {
+            auto_lock_minutes: 15,
+            clipboard_clear_seconds: 30,
+            reveal_seconds: 10,
+            ..Default::default()
+        };
+        v.update_settings(good.clone()).unwrap();
+        let s = v.snapshot().unwrap().settings;
+        assert_eq!(s.auto_lock_minutes, 15);
+        assert_eq!(s.clipboard_clear_seconds, 30);
+        assert_eq!(s.reveal_seconds, 10);
+    }
+
     /// 库里出现重复 id 时必须被检出。
     ///
     /// 为什么这条重要：`upsert_entry` 靠 `id` 定位条目。两条同 id 的记录会让
