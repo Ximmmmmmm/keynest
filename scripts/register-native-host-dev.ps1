@@ -20,6 +20,11 @@
 .PARAMETER EdgeId
     Edge 里该扩展的 ID。省略则不注册 Edge。
 
+.PARAMETER ManifestDir
+    manifest 存放目录。默认 %LOCALAPPDATA%\KeyNest。
+    隔离测试时传临时目录，测试结束后 -Uninstall 会一并删除该 manifest。
+    脚本只会删除自己写的那一个 com.keynest.bridge.json，不动目录里其他文件。
+
 .PARAMETER Uninstall
     只删除本脚本创建的注册项与清单文件，不碰 vault.dat、不碰其它软件写的项。
 
@@ -32,13 +37,19 @@ param(
     [string]$HostExe,
     [string]$ChromeId,
     [string]$EdgeId,
+    # manifest 存放目录。默认与 Rust 侧数据目录约定一致；
+    # 隔离测试时传临时目录，避免污染真实 %LOCALAPPDATA%\KeyNest。
+    [string]$ManifestDir,
     [switch]$Uninstall
 )
 
 $ErrorActionPreference = 'Stop'
 
-# 与 Rust 侧 keynest_bridge::keyfile::KEY_FILE 同一目录约定
-$DataDir  = Join-Path $env:LOCALAPPDATA 'KeyNest'
+# 默认行为不变：不传 -ManifestDir 时仍是 %LOCALAPPDATA%\KeyNest
+if (-not $ManifestDir) {
+    $ManifestDir = Join-Path $env:LOCALAPPDATA 'KeyNest'
+}
+$DataDir  = $ManifestDir
 $Manifest = Join-Path $DataDir 'com.keynest.bridge.json'
 
 function Remove-OurRegistry {
