@@ -29,8 +29,9 @@ export function createModulesModule(deps) {
     title: '模块管理',
     description: '查看与开关各功能模块，并核对每个模块申请的浏览器权限',
     defaultEnabled: true,
-    // 纯扩展内页面操作，不碰任何网页，也不需要任何 manifest 权限
-    requires: ['extensionPages'],
+    // 纯扩展内页面操作，不碰任何网页。
+    // configStore：模块开关与各模块设置要持久化（否则 SW 重启就丢）。
+    requires: ['extensionPages', 'configStore'],
     handlers: [
       {
         type: 'modules.list',

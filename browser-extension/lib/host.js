@@ -18,7 +18,9 @@
 // 不变式 1：**只有这里能 `connectNative`**。content script 永远拿不到端口。
 // 所以 Native 端口的生命周期、请求排队、断连清理全部收敛在这个文件里。
 
+import { ConfigCenter } from './config.js';
 import { ModuleRegistry } from './modules.js';
+import { pickStore } from './storage.js';
 import { createVaultModule, HOST_NAME, PROTOCOL_VERSION } from './modules/vault.js';
 import { createModulesModule } from './modules/registry.js';
 import { createAdblockModule } from './modules/adblock.js';
@@ -152,8 +154,12 @@ export function createNativePort(chromeImpl, opts = {}) {
  * @param {object} chromeImpl 真实的 `chrome`（测试里传假实现）
  * @param {{nativeTimeoutMs?:number, registry?:ModuleRegistry, extraModules?:Array}} [opts]
  */
-export function createHost(chromeImpl, opts = {}) {
+export async function createHost(chromeImpl, opts = {}) {
   const extensionBase = chromeImpl.runtime.getURL('');
+  // 存储后端探测：真写一次再删。拿不到就退回内存，扩展仍能用，只是设置不持久。
+  const picked = opts.store
+    ? { store: opts.store, persistent: true, reason: 'INJECTED' }
+    : await pickStore(chromeImpl);
   const native = createNativePort(chromeImpl, { timeoutMs: opts.nativeTimeoutMs });
 
   /** 生命周期钩子的分发表。模块只登记函数，宿主负责挂到 chrome.* 上。 */
@@ -171,7 +177,7 @@ export function createHost(chromeImpl, opts = {}) {
     },
   };
 
-  const registry = opts.registry || new ModuleRegistry();
+  const registry = opts.registry || new ModuleRegistry({ config: new ConfigCenter({ store: picked.store }) });
   const vault = createVaultModule(deps);
   registry.register(vault);
   // 模块管理是**内置**模块：它自己不申请额外权限，只暴露注册表。
@@ -261,6 +267,8 @@ export function createHost(chromeImpl, opts = {}) {
     adblock,
     /** 核心模块清单：设置页不允许关闭它们。 */
     CORE_MODULES,
+    /** 配置是否持久化（false = 内存后端，SW 重启会丢）。 */
+    storage: { persistent: picked.persistent, reason: picked.reason },
   };
 }
 

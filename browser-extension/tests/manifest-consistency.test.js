@@ -44,9 +44,9 @@ function readManifest() {
   return JSON.parse(fs.readFileSync(p, 'utf8'));
 }
 
-test('PASS: manifest 与模块声明完全一致', () => {
+test('PASS: manifest 与模块声明完全一致', async () => {
   const manifest = readManifest();
-  const host = createHost(fakeChrome());
+  const host = await createHost(fakeChrome());
   const d = diffManifest(manifest, host.registry.list());
 
   assert.deepEqual(d.missing, [], '模块需要但 manifest 没声明的权限');
@@ -56,9 +56,9 @@ test('PASS: manifest 与模块声明完全一致', () => {
   assert.equal(d.ok, true);
 });
 
-test('FAIL-SAFE: 权限清单能抓出「加了模块但忘加权限」', () => {
+test('FAIL-SAFE: 权限清单能抓出「加了模块但忘加权限」', async () => {
   const manifest = readManifest();
-  const host = createHost(fakeChrome(), {
+  const host = await createHost(fakeChrome(), {
     extraModules: [
       {
         id: 'notify',
@@ -73,9 +73,9 @@ test('FAIL-SAFE: 权限清单能抓出「加了模块但忘加权限」', () => 
   assert.equal(d.ok, false);
 });
 
-test('FAIL-SAFE: 权限清单能抓出「加了权限但没模块用」', () => {
+test('FAIL-SAFE: 权限清单能抓出「加了权限但没模块用」', async () => {
   const manifest = readManifest();
-  const host = createHost(fakeChrome());
+  const host = await createHost(fakeChrome());
   const inflated = {
     ...manifest,
     permissions: [...manifest.permissions, 'tabs', 'bookmarks'],
@@ -85,21 +85,21 @@ test('FAIL-SAFE: 权限清单能抓出「加了权限但没模块用」', () => 
   assert.equal(d.ok, false);
 });
 
-test('FAIL-SAFE: 权限清单不会把 optional_host_permissions 误报成缺失', () => {
+test('FAIL-SAFE: 权限清单不会把 optional_host_permissions 误报成缺失', async () => {
   // 本项目把全站 host 放在 optional 里（安装时不弹窗）。
   // 只看 host_permissions 会一直误报，那样的报警很快就没人看了。
   const manifest = readManifest();
   assert.deepEqual(manifest.host_permissions || [], [], '本项目的全站权限在 optional 里');
   assert.ok((manifest.optional_host_permissions || []).includes('https://*/*'));
 
-  const host = createHost(fakeChrome());
+  const host = await createHost(fakeChrome());
   const d = diffManifest(manifest, host.registry.list());
   assert.deepEqual(d.missingHosts, []);
 });
 
 /* ============================ manifest 自身约束 ============================ */
 
-test('FAIL-SAFE: manifest 不声明高风险权限', () => {
+test('FAIL-SAFE: manifest 不声明高风险权限', async () => {
   const m = readManifest();
   // 这几项一旦出现，等于把这个扩展变成能读所有页面内容的工具。
   // 真需要时必须是一次显式决定 + 单独审查，不能顺手加。
@@ -116,7 +116,7 @@ test('FAIL-SAFE: manifest 不声明高风险权限', () => {
   }
 });
 
-test('FAIL-SAFE: content script 只在主 frame 注入', () => {
+test('FAIL-SAFE: content script 只在主 frame 注入', async () => {
   const m = readManifest();
   for (const cs of m.content_scripts || []) {
     assert.equal(
@@ -127,7 +127,7 @@ test('FAIL-SAFE: content script 只在主 frame 注入', () => {
   }
 });
 
-test('PASS: content script 只匹配 https', () => {
+test('PASS: content script 只匹配 https', async () => {
   const m = readManifest();
   for (const cs of m.content_scripts || []) {
     for (const pattern of cs.matches) {
@@ -136,21 +136,22 @@ test('PASS: content script 只匹配 https', () => {
   }
 });
 
-test('FAIL-SAFE: 不声明 web_accessible_resources 暴露内部文件', () => {
+test('FAIL-SAFE: 不声明 web_accessible_resources 暴露内部文件', async () => {
   const m = readManifest();
   assert.deepEqual(m.web_accessible_resources, [], '暴露内部文件等于让网页能加载它们');
 });
 
-test('PASS: 没有声明 storage 权限（当前刻意不持久化）', () => {
+test('PASS: storage 权限只为持久化配置而存在（阶段 3.0 的显式决定）', async () => {
   const m = readManifest();
-  assert.equal(
-    m.permissions.includes('storage'),
-    false,
-    '加 storage 权限是一次需要单独审查的安全决策，见 config.js 的说明'
-  );
+  // 阶段 2.8 曾刻意不声明 storage；阶段 3.0 为了持久化用户设置而打开。
+  // 只有声明 configStore 能力的模块才该用它；一旦有模块绕过配置中心存敏感数据，
+  // scanForSensitiveKeys 会报出来。
+  assert.equal(m.permissions.includes('storage'), true);
+  const host = await createHost(fakeChrome());
+  assert.deepEqual(host.registry.capabilityOwners('configStore'), ['registry']);
 });
 
-test('PASS: manifest version 与 package.json 一致', () => {
+test('PASS: manifest version 与 package.json 一致', async () => {
   const m = readManifest();
   const pkg = JSON.parse(
     fs.readFileSync(path.resolve(import.meta.dirname, '../package.json'), 'utf8')
@@ -168,7 +169,7 @@ test('PASS: options_ui 指向的页面在实际特权白名单里', async () => 
   );
 });
 
-test('PASS: service worker 文件真实存在', () => {
+test('PASS: service worker 文件真实存在', async () => {
   const m = readManifest();
   const sw = path.resolve(import.meta.dirname, '..', m.background.service_worker);
   assert.ok(fs.existsSync(sw), `${sw} 不存在`);

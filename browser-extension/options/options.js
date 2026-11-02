@@ -37,7 +37,7 @@ const CAPABILITY_LABEL = {
   extensionPages: '扩展自己的页面',
   notifications: '发送通知',
   contextMenus: '右键菜单',
-  storage: '扩展本地存储',
+  configStore: '保存设置（仅本地）',
   clipboardWrite: '写入剪贴板',
 };
 

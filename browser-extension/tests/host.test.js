@@ -117,7 +117,7 @@ async function waitPosted(f, n = 1) {
 
 /* --------------------------- Native 端口 --------------------------- */
 
-test('PASS: 懒连接 —— 不请求就不连', () => {
+test('PASS: 懒连接 —— 不请求就不连', async () => {
   const f = fakeChrome();
   const p = createNativePort(f.chrome);
   assert.equal(f.counts().connect, 0);
@@ -139,7 +139,7 @@ test('PASS: 首次请求才连接，且只连一次', async () => {
   assert.equal(p.inflightCount(), 0);
 });
 
-test('PASS: 请求帧形状符合协议', () => {
+test('PASS: 请求帧形状符合协议', async () => {
   const f = fakeChrome();
   const p = createNativePort(f.chrome, { timeoutMs: 20 });
   const req = p.request('vault.query', { origin: 'https://example.test' });
@@ -265,9 +265,9 @@ const POPUP_SENDER = { id: EXT_ID, url: `${EXT_BASE}popup/popup.html` };
 const CONTENT_SENDER = { id: EXT_ID, url: 'https://example.test/login', tab: { id: 5 }, frameId: 0 };
 const SELF_SENDER = { id: EXT_ID, url: `${EXT_BASE}background/service-worker.js` };
 
-function setup() {
+async function setup() {
   const f = fakeChrome();
-  const host = createHost(f.chrome, { nativeTimeoutMs: 50 });
+  const host = await createHost(f.chrome, { nativeTimeoutMs: 50 });
   return { f, host };
 }
 
@@ -279,12 +279,12 @@ function deliver(host, msg, sender) {
   });
 }
 
-test('PASS: 门禁表本身是冻结的（改不了攻击面）', () => {
+test('PASS: 门禁表本身是冻结的（改不了攻击面）', async () => {
   assert.equal(Object.isFrozen(KIND_REQUIREMENT), true);
 });
 
 test('PASS: popup 可以发 query 与 authorize-fill', async () => {
-  const { f, host } = setup();
+  const { f, host } = await setup();
   const p = deliver(host, { type: 'query', tabId: 5 }, POPUP_SENDER);
   const frame = await waitPosted(f, 1);
   f.reply({ id: frame.id, ok: true, payload: [] });
@@ -295,13 +295,13 @@ test('PASS: popup 可以发 query 与 authorize-fill', async () => {
 });
 
 test('FAIL-SAFE: content script 不能发 query', async () => {
-  const { host } = setup();
+  const { host } = await setup();
   const res = await deliver(host, { type: 'query', tabId: 5 }, CONTENT_SENDER);
   assert.deepEqual(res, { ok: false, error: 'PRIVILEGED_ONLY' });
 });
 
 test('FAIL-SAFE: content script 不能发 authorize-fill', async () => {
-  const { host } = setup();
+  const { host } = await setup();
   const res = await deliver(
     host,
     { type: 'authorize-fill', tabId: 5, entryId: 'x' },
@@ -311,13 +311,13 @@ test('FAIL-SAFE: content script 不能发 authorize-fill', async () => {
 });
 
 test('FAIL-SAFE: popup 不能发 redeem-fill（只有 content script 能）', async () => {
-  const { host } = setup();
+  const { host } = await setup();
   const res = await deliver(host, { type: 'redeem-fill', nonce: 'x', entryId: 'y' }, POPUP_SENDER);
   assert.deepEqual(res, { ok: false, error: 'CONTENT_ONLY' });
 });
 
 test('FAIL-SAFE: SW 自己发的消息不被信任', async () => {
-  const { host } = setup();
+  const { host } = await setup();
   // 这就是重构时踩过的坑：在 SW 里 sendMessage 给自己，classify 判成 unknown
   for (const type of ['query', 'authorize-fill', 'redeem-fill']) {
     const res = await deliver(host, { type, tabId: 5, entryId: 'x', nonce: 'n' }, SELF_SENDER);
@@ -327,7 +327,7 @@ test('FAIL-SAFE: SW 自己发的消息不被信任', async () => {
 });
 
 test('FAIL-SAFE: 缺 type / 空消息被拒绝', async () => {
-  const { host } = setup();
+  const { host } = await setup();
   assert.deepEqual(await deliver(host, null, POPUP_SENDER), { ok: false, error: 'BAD_MESSAGE' });
   assert.deepEqual(await deliver(host, {}, POPUP_SENDER), { ok: false, error: 'BAD_MESSAGE' });
   assert.deepEqual(await deliver(host, { type: 123 }, POPUP_SENDER), {
@@ -337,7 +337,7 @@ test('FAIL-SAFE: 缺 type / 空消息被拒绝', async () => {
 });
 
 test('PASS: status 谁都问得到（不含密码）', async () => {
-  const { f, host } = setup();
+  const { f, host } = await setup();
   const p = deliver(host, { type: 'status' }, CONTENT_SENDER);
   const frame = await waitPosted(f, 1);
   f.reply({ id: frame.id, ok: true, payload: { locked: false, protocol: 1 } });
@@ -347,28 +347,28 @@ test('PASS: status 谁都问得到（不含密码）', async () => {
 });
 
 test('FAIL-SAFE: 未知消息类型回 UNKNOWN_TYPE 而非静默', async () => {
-  const { host } = setup();
+  const { host } = await setup();
   const res = await deliver(host, { type: 'nope.nothing' }, POPUP_SENDER);
   assert.deepEqual(res, { ok: false, error: 'UNKNOWN_TYPE' });
 });
 
-test('PASS: 异步回复返回 true（Chrome 的异步约定）', () => {
-  const { host } = setup();
+test('PASS: 异步回复返回 true（Chrome 的异步约定）', async () => {
+  const { host } = await setup();
   const ret = host.onMessage({ type: 'status' }, CONTENT_SENDER, () => {});
   assert.equal(ret, true, '异步分支必须返回 true，否则 sendResponse 会失效');
 });
 
 /* --------------------------- 生命周期接线 --------------------------- */
 
-test('PASS: tabs.onRemoved 与 webNavigation.onCommitted 在建立宿主时就挂上', () => {
+test('PASS: tabs.onRemoved 与 webNavigation.onCommitted 在建立宿主时就挂上', async () => {
   const f = fakeChrome();
-  createHost(f.chrome);
+  await createHost(f.chrome);
   assert.equal(f.listeners.removed.length, 1);
   assert.equal(f.listeners.committed.length, 1);
 });
 
 test('PASS: 端口断连会清掉填充授权', async () => {
-  const { f, host } = setup();
+  const { f, host } = await setup();
   // 先签一个授权（走真实路径：query 复查条目 → sendMessage 到 tab）
   const entryId = 'e1';
   const authP = deliver(
@@ -394,7 +394,7 @@ test('PASS: 端口断连会清掉填充授权', async () => {
 });
 
 test('PASS: tab 关闭后该 tab 的授权失效', async () => {
-  const { f, host } = setup();
+  const { f, host } = await setup();
   const entryId = 'e2';
   const authP = deliver(host, { type: 'authorize-fill', tabId: 9, entryId }, POPUP_SENDER);
   const frame = await waitPosted(f, 1);
@@ -413,7 +413,7 @@ test('PASS: tab 关闭后该 tab 的授权失效', async () => {
 });
 
 test('PASS: 主框架导航后授权失效', async () => {
-  const { f, host } = setup();
+  const { f, host } = await setup();
   const entryId = 'e3';
   const authP = deliver(host, { type: 'authorize-fill', tabId: 11, entryId }, POPUP_SENDER);
   const frame = await waitPosted(f, 1);
@@ -433,20 +433,21 @@ test('PASS: 主框架导航后授权失效', async () => {
 
 /* --------------------------- 模块接线 --------------------------- */
 
-test('PASS: 宿主自动注册了 vault 模块', () => {
-  const { host } = setup();
+test('PASS: 宿主自动注册了 vault 模块', async () => {
+  const { host } = await setup();
   const ids = host.registry.list().map((m) => m.id);
   assert.deepEqual(ids, ['vault', 'registry']);
 });
 
-test('PASS: vault 模块声明的权限与 manifest 现状一致', () => {
-  const { host } = setup();
+test('PASS: vault 模块声明的权限与 manifest 现状一致', async () => {
+  const { host } = await setup();
   const need = host.registry.requiredManifestPermissions();
-  // manifest 里声明的是这四个 + optional host
+  // registry 的 configStore 会贡献 storage
   assert.deepEqual(need.permissions, [
     'activeTab',
     'nativeMessaging',
     'scripting',
+    'storage',
     'webNavigation',
   ]);
   assert.deepEqual(need.hostPermissions, ['https://*/*']);
@@ -454,7 +455,7 @@ test('PASS: vault 模块声明的权限与 manifest 现状一致', () => {
 
 test('PASS: 额外模块能被注入并参与分派', async () => {
   const f = fakeChrome();
-  const host = createHost(f.chrome, {
+  const host = await createHost(f.chrome, {
     extraModules: [
       {
         id: 'extra',
@@ -468,7 +469,11 @@ test('PASS: 额外模块能被注入并参与分派', async () => {
   assert.deepEqual(res, { ok: true, pong: true });
 });
 
-test('FAIL-SAFE: 额外模块的坏定义在启动时就炸，不带病运行', () => {
+test('FAIL-SAFE: 额外模块的坏定义在启动时就炸，不带病运行', async () => {
+  // createHost 是 async，所以坏定义表现为 rejected promise 而不是同步 throw。
+  // 语义一样：宿主建不起来，不会有"带病运行"的宿主。
   const f = fakeChrome();
-  assert.throws(() => createHost(f.chrome, { extraModules: [{ id: 'Bad', title: 'x' }] }));
+  await assert.rejects(() =>
+    createHost(f.chrome, { extraModules: [{ id: 'Bad', title: 'x' }] })
+  );
 });

@@ -192,7 +192,7 @@ test('PASS: 写入会同步到后端，load 能读回来', async () => {
 test('FAIL-SAFE: 后端里的脏数据被丢弃，模块仍能起来', async () => {
   // 场景：旧版本写了不存在的键、或手改坏了存储
   const store = new MemoryStore({
-    'keynest.cfg.m': { n: 999, ghost: 'x', another: true },
+    'cfg.m': { n: 999, ghost: 'x', another: true },
   });
   const c = new ConfigCenter({ store });
   c.registerModule('m', { n: { type: 'number', default: 1, max: 100 } });
@@ -225,7 +225,9 @@ test('PASS: 后端键名带命名空间前缀', async () => {
   const c = new ConfigCenter({ store });
   const view = c.registerModule('reader', { enabled: { type: 'boolean', default: true } });
   await view.set('enabled', false);
-  assert.equal(store.map.has('keynest.cfg.reader'), true);
+  // 命名空间前缀由**后端**负责（storage.js 的 STORAGE_PREFIX），
+  // 配置中心只给出 `cfg.<moduleId>`。两边都加会变成 keynest.keynest.cfg.x。
+  assert.equal(store.map.has('cfg.reader'), true);
   assert.equal(store.map.has('enabled'), false);
 });
 

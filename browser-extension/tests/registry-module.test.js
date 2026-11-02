@@ -51,16 +51,16 @@ function deliver(host, msg, sender) {
 
 /* --------------------------- 权限边界 --------------------------- */
 
-test('PASS: options 页面被识别为特权页面（与 popup 同级）', () => {
+test('PASS: options 页面被识别为特权页面（与 popup 同级）', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome);
+  const host = await createHost(chrome);
   assert.equal(host.classify(OPTIONS), 'popup');
   assert.equal(host.classify(POPUP), 'popup');
 });
 
-test('FAIL-SAFE: 其它扩展页面（非白名单）仍是 unknown', () => {
+test('FAIL-SAFE: 其它扩展页面（非白名单）仍是 unknown', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome);
+  const host = await createHost(chrome);
   for (const p of ['background/service-worker.js', 'options/other.html', 'content/x.js']) {
     assert.equal(host.classify({ id: EXT_ID, url: `${EXT_BASE}${p}` }), 'unknown', p);
   }
@@ -68,14 +68,14 @@ test('FAIL-SAFE: 其它扩展页面（非白名单）仍是 unknown', () => {
 
 test('FAIL-SAFE: content script 不能读模块列表', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome);
+  const host = await createHost(chrome);
   const res = await deliver(host, { type: 'modules.list' }, CONTENT);
   assert.deepEqual(res, { ok: false, error: 'PRIVILEGED_ONLY' });
 });
 
 test('FAIL-SAFE: content script 不能开关模块', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome);
+  const host = await createHost(chrome);
   const res = await deliver(
     host,
     { type: 'modules.set-enabled', id: 'vault', enabled: false },
@@ -86,7 +86,7 @@ test('FAIL-SAFE: content script 不能开关模块', async () => {
 
 test('FAIL-SAFE: SW 自己不能开关模块', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome);
+  const host = await createHost(chrome);
   const res = await deliver(
     host,
     { type: 'modules.set-enabled', id: 'vault', enabled: false },
@@ -99,7 +99,7 @@ test('FAIL-SAFE: SW 自己不能开关模块', async () => {
 
 test('PASS: 模块列表包含元数据与权限，且不含任何密钥字段', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome);
+  const host = await createHost(chrome);
   const res = await deliver(host, { type: 'modules.list' }, OPTIONS);
 
   assert.equal(res.ok, true);
@@ -122,31 +122,32 @@ test('PASS: 模块列表包含元数据与权限，且不含任何密钥字段',
 
 test('PASS: 列表带上由模块反推的 manifest 权限', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome);
+  const host = await createHost(chrome);
   const res = await deliver(host, { type: 'modules.list' }, OPTIONS);
   assert.deepEqual(res.manifest.permissions.sort(), [
     'activeTab',
     'nativeMessaging',
     'scripting',
+    'storage',
     'webNavigation',
   ]);
   assert.deepEqual(res.manifest.hostPermissions, ['https://*/*']);
 });
 
-test('PASS: 模块管理自己不申请任何 manifest 权限', async () => {
+test('PASS: 模块管理只申请扩展页面与设置持久化', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome);
+  const host = await createHost(chrome);
   const res = await deliver(host, { type: 'modules.list' }, OPTIONS);
   const reg = res.modules.find((m) => m.id === 'registry');
   assert.ok(reg);
-  assert.deepEqual(reg.requires, ['extensionPages']);
+  assert.deepEqual([...reg.requires].sort(), ['configStore', 'extensionPages']);
 });
 
 /* --------------------------- 开关 --------------------------- */
 
 test('FAIL-SAFE: vault 不允许被关掉', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome);
+  const host = await createHost(chrome);
   const res = await deliver(
     host,
     { type: 'modules.set-enabled', id: 'vault', enabled: false },
@@ -158,7 +159,7 @@ test('FAIL-SAFE: vault 不允许被关掉', async () => {
 
 test('FAIL-SAFE: registry 不允许被关掉（否则设置页失去自我描述）', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome);
+  const host = await createHost(chrome);
   const res = await deliver(
     host,
     { type: 'modules.set-enabled', id: 'registry', enabled: false },
@@ -169,7 +170,7 @@ test('FAIL-SAFE: registry 不允许被关掉（否则设置页失去自我描述
 
 test('PASS: 普通模块可以被关掉并真的停用', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome, {
+  const host = await createHost(chrome, {
     extraModules: [
       {
         id: 'reader',
@@ -204,7 +205,7 @@ test('PASS: 普通模块可以被关掉并真的停用', async () => {
 
 test('FAIL-SAFE: 开关参数缺 id 或类型不对被拒', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome);
+  const host = await createHost(chrome);
   const cases = [
     { type: 'modules.set-enabled', enabled: true },
     { type: 'modules.set-enabled', id: '', enabled: true },
@@ -219,7 +220,7 @@ test('FAIL-SAFE: 开关参数缺 id 或类型不对被拒', async () => {
 
 test('FAIL-SAFE: 不存在的模块 id 被拒', async () => {
   const { chrome } = fakeChrome();
-  const host = createHost(chrome);
+  const host = await createHost(chrome);
   // registry.setEnabled 对未注册模块抛 UNKNOWN_MODULE，dispatch 捕获后转成错误码
   const res = await deliver(
     host,

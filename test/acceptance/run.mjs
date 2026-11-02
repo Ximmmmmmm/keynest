@@ -647,6 +647,71 @@ async function main() {
     // 复原：把过滤关掉，避免影响后续用例
     await options.call(`chrome.runtime.sendMessage({ type: 'adblock.apply', mode: 'off' })`);
 
+    // ---------- T12 配置持久化（阶段 3.0）----------
+    // 关键点：不是"能写能读"，而是**跨上下文持久**。
+    // 在 options 页面写，在另一个扩展页面（popup）读回来 —— 这才是 SW 重启后的语义。
+    const writeRes = await options.call(
+      `chrome.storage.local.set({
+         'keynest.cfg.adblock': { enabled: true, mode: 'strict' },
+       }).then(() => chrome.storage.local.get('keynest.cfg.adblock'))`
+    );
+    const persisted = await popup.call(
+      `chrome.storage.local.get('keynest.cfg.adblock').then(g => g['keynest.cfg.adblock'])`
+    );
+    record(
+      'T12',
+      '配置跨上下文持久（options 写 → popup 读回）',
+      persisted && persisted.mode === 'strict' ? 'PASS' : 'FAIL',
+      `write=${JSON.stringify(writeRes)} read=${JSON.stringify(persisted)}`
+    );
+
+    // ---------- T12b 存储审计：没有敏感键 ----------
+    const audit = await popup.call(
+      `chrome.storage.local.get(null).then(all => {
+         const keys = Object.keys(all);
+         const SUSPECT = ['password','secret','token','apikey','masterkey','nonce','cookie','bridge.key'];
+         const walk = (path, v, hits) => {
+           if (v && typeof v === 'object') {
+             for (const [k, vv] of Object.entries(v)) walk(path ? path + '.' + k : k, vv, hits);
+           } else if (path && SUSPECT.some(s => path.toLowerCase().includes(s))) {
+             hits.push(path);
+           }
+         };
+         const hits = [];
+         for (const k of keys) walk(k, all[k], hits);
+         return { keys, hits };
+       })`
+    );
+    record(
+      'T12b',
+      '扩展存储里没有任何敏感键（密码/密钥/令牌/nonce/cookie）',
+      audit && Array.isArray(audit.hits) && audit.hits.length === 0 ? 'PASS' : 'FAIL',
+      JSON.stringify(audit)
+    );
+
+    // ---------- T12c 数据只落 storage.local，不落 sync ----------
+    // 注意：`chrome.storage.sync` 这个**对象**在声明了 storage 权限后永远存在，
+    // 所以"有没有 sync API"不是判据。真正的判据是 sync 区里有没有我们的键——
+    // 有就说明有人往云端写了数据，那与"本地密码管理器"的定位直接冲突。
+    const syncScope = await popup.call(
+      `chrome.storage.sync.get(null).then(g => ({
+         syncKeys: Object.keys(g || {}).filter(k => k.startsWith('keynest.')),
+         syncQuota: chrome.storage.sync.QUOTA_BYTES,
+         localHasData: chrome.storage.local.get(null).then(a => Object.keys(a || {}).length),
+       }))`
+    );
+    record(
+      'T12c',
+      'keynest 的键只写在 storage.local，sync 区为空（数据不出本机）',
+      syncScope && Array.isArray(syncScope.syncKeys) && syncScope.syncKeys.length === 0
+        ? 'PASS'
+        : 'FAIL',
+      JSON.stringify(syncScope)
+    );
+
+    // 清掉测试写入的配置，避免污染后续
+    await options.call(`chrome.storage.local.remove('keynest.cfg.adblock')`);
+
     // ---------- T8c 错误 entryId ----------
     const badAuth = await popup.call(
       `chrome.runtime.sendMessage({ type: 'authorize-fill', tabId: ${knTabB.id}, entryId: 'nonexistent-entry' })`

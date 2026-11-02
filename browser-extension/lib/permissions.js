@@ -49,8 +49,10 @@ export const CAPABILITIES = Object.freeze({
   notifications: 'notifications',
   // 右键菜单
   contextMenus: 'contextMenus',
-  // 扩展级存储（**敏感数据禁止**：见 config.js 的 SECRET_FORBIDDEN）
-  storage: 'storage',
+  // 扩展级存储。**敏感数据禁止**（见 config.js 的 SECRET_FORBIDDEN）。
+  // 只用 storage.local，不用 storage.sync——后者会把数据传到云端账户，
+  // 与"本地密码管理器"的定位冲突。
+  configStore: 'storage',
   // 剪贴板写入（仅扩展页面）
   clipboardWrite: 'clipboardWrite',
 });

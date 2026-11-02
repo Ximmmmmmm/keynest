@@ -255,8 +255,17 @@ export class ConfigCenter {
     return s;
   }
 
+  /**
+   * 后端里的键名。
+   *
+   * **不带 `keynest.` 前缀**：前缀是存储后端的事（storage.js 的 STORAGE_PREFIX）。
+   * 这里再带一次会变成 `keynest.keynest.cfg.x`——写入正常、读回全空，
+   * 表现是"设置存了但重启就丢"，而且两边都不报错。
+   *
+   * 这个 bug 在阶段 3.0 接上真存储时被 storage.test.js 抓到。
+   */
   #ns(moduleId) {
-    return `keynest.cfg.${moduleId}`;
+    return `cfg.${moduleId}`;
   }
 
   /** 读一个键的当前值（未设置则返回默认值）。 */
