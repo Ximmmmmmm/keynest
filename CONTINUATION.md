@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-02 21:45 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`c3df4b7`
+> 最后更新：2026-11-02 22:15 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`1d8c5d9`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **249** | `cd rust && cargo test --workspace` |
+| Rust | **259** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **453** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -39,6 +39,9 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `216309e` | 错误提示不可操作（只说「被其他程序修改」） | P1 可用性 |
 | `ed66cff` | 生成器不保证包含每个选中的字符类别 | P1 可用性 |
 | `c3df4b7` | 剪贴板清除失败被静默吞掉（密码留在剪贴板） | P1 安全 |
+| `f035b92` | 手动锁定静默丢弃未保存的编辑 | P1 数据丢失 |
+| `b701ae2` | Ctrl+L 绕过未保存确认（与按钮行为不一致） | P2 一致性 |
+| `1d8c5d9` | 明文导出文件在 unix 上同机其他账号可读 | P1 安全 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
@@ -47,6 +50,9 @@ Rust workspace 根是 `rust/`；Windows 上需要
 - `can_reload_after_external_change` / `reload_rejects_a_different_vault`
 - `import_stops_at_entry_limit` / `import_below_limit_is_unaffected`
 - `generated_password_contains_every_selected_class` / `single_class_still_uses_full_length`
+- `views::edit::tests::*`（9 项，覆盖 `is_dirty` 判定）
+- `plaintext_export_is_owner_only`（unix 专属，本机跳过）
+- `plaintext_export_roundtrips`
 
 ---
 
