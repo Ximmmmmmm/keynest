@@ -97,6 +97,20 @@ const SCRYPT_MEM_LIMIT: u64 = 256 * 1024 * 1024;
 /// 单个库文件的大小上限。库是纯 JSON + base64，64 MiB 对应约 5 万条条目。
 pub const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
 
+/// 单个库的条目数上限。
+///
+/// # 为什么必须在**导入**时也挡住
+///
+/// `MAX_VAULT_BYTES` 只在**读盘**时检查，管不到"内存里刚导入进来的一大批条目"。
+/// 一个 32 MiB 的 CSV 可以轻松造出上百万条记录，随后：
+///
+/// * 每次保存都要序列化全部条目再加密 → 界面卡死
+/// * 加密后的文件远超 64 MiB → 保存失败，库从此写不进去
+/// * 用户已经看到的条目却存不下去 → 实际的数据丢失
+///
+/// 5 万条与 `MAX_VAULT_BYTES` 的估算一致（64 MiB ≈ 5 万条）。
+pub const MAX_ENTRIES: usize = 50_000;
+
 /// 供上层（导出/备份前做预检查）读取的大小上限。
 pub fn max_vault_bytes() -> u64 {
     MAX_VAULT_BYTES
@@ -1255,6 +1269,51 @@ fn open_any(any: &AnyFile, master: &str) -> Result<Opened> {
     }
 }
 
+/// 用**已有密钥**重新解开磁盘上的一份文件。
+///
+/// 与 `open_any` 的区别：不派生 KDF（不要求主密码），直接用现有密钥解密。
+/// 用于 `reload()`：库被外部改动后重新载入，此时会话里的密钥仍然有效。
+///
+/// 密钥与文件不匹配时解密会失败——恰好能区分"同一个库被改过"
+/// 与"换成了别的库"，不需要额外的身份标记。
+///
+/// 返回 `(数据, v3 的正文缓存)`。
+fn open_with_key(
+    any: &AnyFile,
+    key_bytes: &[u8],
+) -> Result<(VaultData, Option<(CipherParams, String)>)> {
+    match any {
+        AnyFile::Legacy(f) => {
+            let mut tmp = [0u8; KEY_LEN];
+            if key_bytes.len() != KEY_LEN {
+                return Err(VaultError::Corrupt);
+            }
+            tmp.copy_from_slice(key_bytes);
+            let plain = open(f, &tmp)?;
+            let mut data: VaultData =
+                serde_json::from_slice(plain.as_slice()).map_err(|_| VaultError::Corrupt)?;
+            data.migrate_legacy();
+            Ok((data, None))
+        }
+        AnyFile::V3(f) => {
+            // 复制一份再交给 SecretKey（它会把传入数组清零）。
+            // 不能把会话里那把密钥的字节直接传进去——那会被清零，
+            // 之后整个会话就再也保存不了了。
+            let mut tmp = [0u8; KEY_LEN];
+            if key_bytes.len() != KEY_LEN {
+                return Err(VaultError::Corrupt);
+            }
+            tmp.copy_from_slice(key_bytes);
+            let dek = SecretKey::new(tmp);
+            let plain = open_body(&dek, &f.cipher, &f.payload)?;
+            let mut data: VaultData =
+                serde_json::from_slice(plain.as_slice()).map_err(|_| VaultError::Corrupt)?;
+            data.migrate_legacy();
+            Ok((data, Some((f.cipher.clone(), f.payload.clone()))))
+        }
+    }
+}
+
 /// 推荐的 KDF 下限。
 ///
 /// 这不是"能不能解开"的门槛，而是"够不够扛离线爆破"的门槛。
@@ -1961,6 +2020,14 @@ impl Vault {
 
         {
             let data = self.data.as_mut().ok_or(VaultError::Locked)?;
+            // 上限在**导入时**就要挡：读盘时的 MAX_VAULT_BYTES 管不到
+            // "内存里刚导入进来的一大批条目"。放任它冲进库里的后果是
+            // 每次保存都要序列化全部条目、加密结果远超文件上限、
+            // 最终保存失败——用户已经看到的条目却存不下去。
+            //
+            // 注意这里**不提前整体拒绝**：已达上限时仍然走一遍循环，
+            // 把每一条如实计入 `skipped_limit`。用户需要看到
+            // "有 5 条没导进来"，而不是一个笼统的失败。
             // 只把「活跃」条目算作已存在：用户删掉某条之后重新导入，
             // 说明他想要它回来，不该被回收站里的旧记录挡住。
             let mut seen: std::collections::HashSet<(String, String)> = data
@@ -2006,6 +2073,12 @@ impl Vault {
                 }
                 if !data.categories.iter().any(|c| c == &e.category) {
                     data.categories.push(e.category.clone());
+                }
+                if data.entries.len() >= MAX_ENTRIES {
+                    // 达到上限就停，把"没导进去"如实计入报告，
+                    // 而不是让整批失败——已经导进来的部分是有价值的。
+                    report.skipped_limit += 1;
+                    continue;
                 }
                 data.entries.push(e);
                 report.added += 1;
@@ -2399,6 +2472,51 @@ impl Vault {
                 Err(e)
             }
         }
+    }
+
+    /// 放弃本地未保存的改动，重新载入磁盘上的库。
+    ///
+    /// # 这个方法解决的现实问题
+    ///
+    /// 库放在网盘同步目录里，另一台机器改了它、同步过来——`save_inner` 会
+    /// 返回 `ExternalChange` 并拒绝保存（这是对的：覆盖会丢掉对方的改动）。
+    ///
+    /// 但在加这个方法之前，用户**没有任何恢复路径**：`on_disk` 一旦对不上
+    /// 就永久对不上，此后每次保存都失败，只能重启程序（丢掉未保存的编辑）
+    /// 或手动删文件。
+    ///
+    /// # 它做什么、不做什么
+    ///
+    /// - 重新读盘、重新解密，用**已解锁的密钥**重建内存状态
+    /// - 不重置 `key` / `header` / `wrap`：密钥还是那一套，只是数据换成盘上的
+    /// - 磁盘上的文件如果不是同一个库（换了主密码 / 换了 salt），
+    ///   解密会失败——此时返回错误，内存状态保持不变（不会变成半截状态）
+    ///
+    /// 调用方（GUI）应当先确认用户愿意放弃本地改动。
+    pub fn reload(&mut self) -> Result<VaultData> {
+        // 未解锁时无从校验密钥，直接拒绝——这不是「载入」而是「打开」，
+        // 应当走 `unlock`。
+        let key = self.key.as_ref().ok_or(VaultError::Locked)?;
+
+        let bytes = read_vault_bytes(&self.path)?;
+        let any = AnyFile::parse(&bytes)?;
+        any.validate()?;
+
+        // 用现有密钥解开磁盘上的那一份。
+        // `open_with_key` 只在密钥与文件的 wrap/header 匹配时成功——
+        // 恰好能区分"同一个库被改过" 与 "换成了别的库"。
+        let (data, body_cache) = open_with_key(&any, key.as_bytes())?;
+
+        let stamp = DiskStamp {
+            len: bytes.len() as u64,
+            updated_at: any.updated_at().to_string(),
+        };
+
+        // —— 到这里磁盘上的内容已被证明可用，才开始改内存状态 ——
+        self.data = Some(data.clone());
+        self.body_cache = body_cache;
+        self.on_disk = Some(stamp);
+        Ok(data)
     }
 
     /// 把任意旧格式（v1 / v2）显式升级为 v3（KEK 包裹随机 DEK）。
@@ -3211,6 +3329,113 @@ mod tests {
             before,
             "认证失败不得改动磁盘上的任何字节"
         );
+    }
+
+    /// 检测到外部改动后，必须有一条**用户能走通的路**。
+    ///
+    /// 现实场景：库放在网盘同步目录里，另一台机器改了它，同步过来。
+    /// 此时应当提示"文件被别处改过"，然后让用户选择：
+    /// 放弃本地改动重新载入，或者另存为一份新库。
+    ///
+    /// 缺陷：`on_disk` 一旦对不上就永久对不上——`save_inner` 每次都返回
+    /// `ExternalChange`，而没有任何公开方法能让它重新对齐。
+    /// 用户只能重启程序（丢掉未保存的编辑）或手动删文件。
+    /// 导入必须有条目上限，且超限时**保留已导入的部分**。
+    ///
+    /// 没有上限时：一个 32 MiB 的 CSV 能造出上百万条记录，
+    /// 每次保存都要序列化全部条目 → 界面卡死；
+    /// 加密结果远超 `MAX_VAULT_BYTES` → 保存失败，库从此写不进去。
+    /// 用户已经看到那些条目，却存不下去——实际的数据丢失。
+    #[test]
+    fn import_stops_at_entry_limit() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        // 造到上限前一点，避免测试本身太慢：直接替换内存数据
+        {
+            let data = v.data.as_mut().unwrap();
+            data.entries = (0..MAX_ENTRIES)
+                .map(|i| {
+                    let mut e = entry(&format!("filler{i}"), "p");
+                    e.id = format!("id-{i}");
+                    e
+                })
+                .collect();
+        }
+
+        let incoming: Vec<Entry> = (0..5).map(|i| entry(&format!("new{i}"), "p")).collect();
+        let report = v.import_entries(incoming).unwrap();
+
+        assert_eq!(report.added, 0, "已达上限，不该再写入");
+        assert_eq!(report.skipped_limit, 5, "被上限挡下的条数要如实计入报告");
+        assert!(report.summary().contains("条目上限"), "摘要要说明原因");
+    }
+
+    /// 未达上限时导入照常，且 `skipped_limit` 为 0。
+    #[test]
+    fn import_below_limit_is_unaffected() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+        let report = v
+            .import_entries((0..3).map(|i| entry(&format!("n{i}"), "p")).collect())
+            .unwrap();
+        assert_eq!(report.added, 3);
+        assert_eq!(report.skipped_limit, 0);
+    }
+
+    #[test]
+    fn can_reload_after_external_change() {
+        let dir = tmp();
+        let path = dir.path().join("vault.dat");
+        let mut v = fast_vault(dir.path());
+        v.upsert_entry(entry("A", "p")).unwrap();
+
+        // 模拟另一个进程写入了新内容（版本号变了但仍是同一个库）
+        let mut json = read_json(&path);
+        json["updatedAt"] = serde_json::json!("2000-01-01T00:00:00.000Z");
+        write_json(&path, &json);
+
+        let err = v.upsert_entry(entry("B", "p")).unwrap_err();
+        assert_eq!(err.code(), "EXTERNAL_CHANGE");
+
+        // 用户选择「重新载入」——必须成功，且之后能正常保存
+        v.reload().expect("应当能重新载入磁盘上的库");
+        v.upsert_entry(entry("C", "p"))
+            .expect("重新载入之后应当能正常保存");
+
+        v.lock();
+        let mut reopened = Vault::new(&path);
+        let data = reopened.unlock("master-password-123").unwrap();
+        assert!(data.entries.iter().any(|e| e.title == "C"));
+    }
+
+    /// 磁盘上被换成**另一个库**时，`reload` 必须失败且不破坏内存状态。
+    ///
+    /// 现实场景：用户把另一台机器的 vault.dat 拷进来覆盖了。
+    /// 那不是"同一个库被改过"，而是"换了一个库"——
+    /// 用旧会话的密钥解不开它，此时绝不能把内存清空或留下半截状态。
+    #[test]
+    fn reload_rejects_a_different_vault() {
+        let dir = tmp();
+        let path = dir.path().join("vault.dat");
+        let mut v = fast_vault(dir.path());
+        v.upsert_entry(entry("mine", "p")).unwrap();
+        let before = v.snapshot().unwrap().entries.len();
+
+        // 造一个"别人的库"覆盖上去
+        let other = dir.path().join("other.dat");
+        {
+            let mut o = Vault::new(&other);
+            o.create("another-master-password").unwrap();
+        }
+        std::fs::copy(&other, &path).unwrap();
+
+        let r = v.reload();
+        assert!(r.is_err(), "换了库却 reload 成功——旧密钥不该能解开新库");
+
+        // 内存状态必须保持原样：用户还没决定要放弃本地数据
+        let after = v.snapshot().unwrap().entries.len();
+        assert_eq!(after, before, "reload 失败时不得清空或改动内存状态");
     }
 
     #[test]

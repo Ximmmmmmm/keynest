@@ -598,7 +598,7 @@ impl App {
                     "INVALID_ENTRY" | "INVALID_CATEGORY" => {
                         "名称无效：不能为空、不能重名、「其他」不可删除".to_string()
                     }
-                    _ => format!("操作失败：{e}"),
+                    _ => self.explain_error(&e),
                 };
                 if let Some(st) = self.settings.as_mut() {
                     st.error = Some(msg);
@@ -743,6 +743,42 @@ impl App {
         Err(keynest_bridge::BridgeError::InvalidRequest(
             "保存功能尚未启用（阶段 3）",
         ))
+    }
+
+    /// 把 `VaultError` 翻成**用户能照着做**的话。
+    ///
+    /// 为什么需要这一层：`Display` 实现是给日志用的（"仓库文件已被其他程序修改"），
+    /// 用户看完仍然不知道该点哪里。这几类错误在实际使用中都会遇到，
+    /// 而且都需要具体动作，不是"重试一下"能解决的：
+    ///
+    /// * `EXTERNAL_CHANGE` —— 库放在网盘同步目录、或另一台机器改过它
+    /// * `IO` —— 磁盘满、目录只读、杀毒软件锁文件
+    /// * `CORRUPT` —— 文件被写坏，需要从备份恢复
+    fn explain_error(&self, e: &VaultError) -> String {
+        match e.code() {
+            "EXTERNAL_CHANGE" => "密码库文件在你打开之后被别处改过（常见于网盘同步或另一台机器）。
+
+                 已中止保存，以免覆盖对方的改动。
+
+                 如果那些改动不是你做的：先关掉同步盘，再重新打开钥巢。
+                 如果确实是你改的：本次修改需要重新做一遍。"
+                .to_string(),
+            "IO" => format!(
+                "{e}
+
+                 常见原因：磁盘已满、目录不可写、或安全软件正在扫描该文件。
+                 处理后可重试；你的修改还留在界面上。"
+            ),
+            "CORRUPT" | "UNSUPPORTED_FORMAT" => format!(
+                "{e}
+
+                 库文件的结构已损坏。设置里可以从备份恢复。"
+            ),
+            "NO_BACKUP" => "没有可用的备份。".to_string(),
+            "LOCKED" => "密码库已锁定，请重新解锁。".to_string(),
+            "INVALID_PASSWORD" => "主密码错误。".to_string(),
+            _ => format!("操作失败：{e}"),
+        }
     }
 
     fn set_toast(&mut self, msg: impl Into<String>) {
@@ -955,9 +991,12 @@ impl App {
                 self.selected_id = Some(saved_id);
             }
             Err(e) => {
-                // 保留用户输入，把错误回填到对话框，并取消关闭
+                // 保留用户输入，把错误回填到对话框，并取消关闭。
+                // 用 explain_error 而不是 e.to_string()：
+                // 保存失败的原因大多需要用户做具体动作，光说"失败了"没用。
+                let msg = self.explain_error(&e);
                 if let Some(st) = self.edit.as_mut() {
-                    st.error = Some(e.to_string());
+                    st.error = Some(msg);
                     st.closing = false;
                 }
             }

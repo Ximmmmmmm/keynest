@@ -57,6 +57,11 @@ pub struct ImportReport {
     pub skipped_existing: usize,
     /// 因为缺少标题等基本字段而跳过的条数。
     pub skipped_invalid: usize,
+    /// 因为库里条目数已达上限而没能写入的条数。
+    ///
+    /// 单列一项而不是混进 `skipped_invalid`：用户需要知道
+    /// "这��东西本身是对的，只是库装不下了"，处理方式完全不同。
+    pub skipped_limit: usize,
 }
 
 impl ImportReport {
@@ -67,6 +72,12 @@ impl ImportReport {
         }
         if self.skipped_invalid > 0 {
             s.push_str(&format!("，忽略 {} 条无效记录", self.skipped_invalid));
+        }
+        if self.skipped_limit > 0 {
+            s.push_str(&format!(
+                "，{} 条因库已达条目上限未导入",
+                self.skipped_limit
+            ));
         }
         s
     }
