@@ -166,6 +166,57 @@ mod tests {
         );
     }
 
+    /// 与 JS 侧（`browser-extension/tests/origin-parity.test.js`）用**同一批语料**。
+    ///
+    /// 两边语义一旦分叉，就会出现「扩展认为匹配、KeyNest 认为不匹配」或者
+    /// 更糟的反向情况。改任何一边的规则，都必须同步改另一边的这份清单。
+    #[test]
+    fn matches_js_implementation_on_shared_corpus() {
+        // (输入, 期望的规范化结果)
+        let cases: &[(&str, Option<&str>)] = &[
+            ("https://example.com", Some("https://example.com")),
+            ("https://example.com/", Some("https://example.com")),
+            (
+                "https://example.com/login?x=1#f",
+                Some("https://example.com"),
+            ),
+            ("HTTPS://Example.COM/Path", Some("https://example.com")),
+            ("https://example.com:443", Some("https://example.com")),
+            ("https://example.com:8443", Some("https://example.com:8443")),
+            ("http://example.com", Some("http://example.com")),
+            ("http://example.com:80", Some("http://example.com")),
+            (
+                "https://example.com.evil.test",
+                Some("https://example.com.evil.test"),
+            ),
+            ("https://evil-example.com", Some("https://evil-example.com")),
+            ("https://sub.example.com", Some("https://sub.example.com")),
+            (
+                "https://user:pass@example.com/",
+                Some("https://example.com"),
+            ),
+            ("https://[::1]:8443/x", Some("https://[::1]:8443")),
+            ("https://", None),
+            ("https:///path", None),
+            ("", None),
+            ("   ", None),
+            ("javascript:alert(1)", None),
+            ("file:///etc/passwd", None),
+            ("chrome://settings", None),
+            ("mailto:a@b.c", None),
+            ("data:text/html,x", None),
+        ];
+
+        for (input, want) in cases {
+            let got = normalize(input);
+            assert_eq!(
+                got.as_deref(),
+                *want,
+                "与 JS 语料不一致：{input:?} → 得到 {got:?}，期望 {want:?}"
+            );
+        }
+    }
+
     #[test]
     fn handles_ipv6_literal() {
         assert_eq!(

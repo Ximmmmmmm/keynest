@@ -106,28 +106,63 @@ async function refresh() {
   show(els.listSection);
 }
 
-/** 唯一会取密码的动作：必须由用户点击触发。 */
+/**
+ * 唯一会取密码的动作：必须由用户点击触发。
+ *
+ * 两段式：
+ *   1. `authorize-fill` —— SW 校验后签发一次性授权，把 nonce 交给 content script（**不含密码**）
+ *   2. `redeem-now`     —— content script 出示 nonce 兑换，SW 重新校验 tab/origin 后才给密码
+ *
+ * popup 全程**拿不到密码**，也拿不到可用的授权令牌。
+ */
 async function doFill(entryId, username) {
   setError('');
   els.list.replaceChildren();
 
-  const res = await chrome.runtime.sendMessage({
-    type: 'fill',
+  const auth = await chrome.runtime.sendMessage({
+    type: 'authorize-fill',
     tabId: currentTabId,
     entryId,
     username: typeof username === 'string' ? username : '',
   });
 
-  if (!res || !res.ok) {
+  if (!auth || !auth.ok) {
     const map = {
       HTTP_NOT_ALLOWED: '该页面不是 HTTPS，拒绝填充。',
       ORIGIN_MISMATCH: '页面地址与条目不一致，已阻止填充。',
-      NO_FORM: '这个页面没有找到登录表单。',
+      ENTRY_NOT_MATCHED: '该条目不属于当前网站。',
+      NO_CONTENT_SCRIPT: '无法与页面通信，请刷新页面后重试。',
       VAULT_LOCKED: 'KeyNest 刚刚被锁定，已拒绝填充。',
-      NO_PASSWORD: '条目里没有密码。',
       TIMEOUT: 'KeyNest 没有响应。',
     };
-    setError(map[res && res.error] || `填充失败：${(res && res.error) || '未知错误'}`);
+    setError(map[auth && auth.error] || `填充失败：${(auth && auth.error) || '未知错误'}`);
+    await refresh();
+    return;
+  }
+
+  // 触发 content script 兑换（content script 持有 nonce，popup 不持有）
+  let done = null;
+  try {
+    done = await chrome.tabs.sendMessage(
+      currentTabId,
+      { type: 'redeem-now', entryId },
+      { frameId: 0 }
+    );
+  } catch (e) {
+    setError('无法与页面通信，请刷新页面后重试。');
+    await refresh();
+    return;
+  }
+
+  if (!done || !done.ok) {
+    const map = {
+      AUTH_REJECTED: '授权校验未通过（可能页面已跳转或授权已过期）。',
+      NO_FORM: '这个页面没有找到登录表单。',
+      NO_PASSWORD: '条目里没有密码。',
+      VAULT_LOCKED: 'KeyNest 已锁定，已拒绝填充。',
+      REDEEM_FAILED: '兑换授权失败。',
+    };
+    setError(map[done && done.error] || `填充失败：${(done && done.error) || '未知错误'}`);
     await refresh();
     return;
   }

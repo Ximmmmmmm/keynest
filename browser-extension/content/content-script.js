@@ -1,17 +1,75 @@
-// Content script：只做两件事——找登录表单、把值写进去。
+// Content script：只做三件事——找登录表单、兑换一次性授权、把值写进去。
 //
-// 它**不知道** KeyNest 的存在，不持有 native port，不请求密码。
-// 唯一能触发它动作的是 Service Worker 发来的 `do-fill`。
+// 它**不知道** KeyNest 的存在，不持有 native port，不签发授权。
+// 唯一能拿到密码的路径是：向 Service Worker 出示 SW 自己签发的 nonce 并兑换。
+//
+// 注意：MV3 的 content script **不支持 ES module**，所以这里不能 `import`。
+// 下面 `normalizeOrigin` 是 lib/origin.js 的等价实现，
+// 由 tests/origin-parity.test.js 保证两边行为一致。
 
 (() => {
   if (window.__keynestContentLoaded) return;
   window.__keynestContentLoaded = true;
 
+  /** 待兑换的授权：{nonce, origin}，由 SW 的 prepare-fill 设置 */
+  let pending = null;
+
   /**
-   * 找页面里的登录表单：必须同时有"可见的密码框"和至少一个文本输入框。
-   * @returns {{form: HTMLFormElement|null, user: HTMLInputElement|null, pass: HTMLInputElement}}
-   *   | null
+   * origin 规范化（与 lib/origin.js 逐条等价）。
+   * **绝不使用 startsWith / includes 做 origin 判据。**
    */
+  function normalizeOrigin(raw) {
+    if (typeof raw !== 'string') return null;
+    const text = raw.trim();
+    if (!text) return null;
+
+    const idx = text.indexOf('://');
+    if (idx <= 0) return null;
+    const scheme = text.slice(0, idx).toLowerCase();
+    if (scheme !== 'http' && scheme !== 'https') return null;
+
+    let rest = text.slice(idx + 3);
+    const cut = rest.search(/[/?#]/);
+    if (cut !== -1) rest = rest.slice(0, cut);
+
+    const at = rest.lastIndexOf('@');
+    if (at !== -1) rest = rest.slice(at + 1);
+    if (!rest) return null;
+
+    let host;
+    let port = null;
+    if (rest.startsWith('[')) {
+      const close = rest.indexOf(']');
+      if (close === -1) return null;
+      host = rest.slice(0, close + 1);
+      const after = rest.slice(close + 1);
+      if (after.startsWith(':')) port = after.slice(1);
+      else if (after !== '') return null;
+    } else {
+      const colon = rest.lastIndexOf(':');
+      if (colon !== -1) {
+        host = rest.slice(0, colon);
+        port = rest.slice(colon + 1);
+      } else {
+        host = rest;
+      }
+    }
+
+    if (!host) return null;
+    if (port !== null) {
+      if (!/^[0-9]+$/.test(port)) return null;
+      const isDefault =
+        (scheme === 'https' && port === '443') || (scheme === 'http' && port === '80');
+      if (!isDefault) return `${scheme}://${host.toLowerCase()}:${port}`;
+    }
+    return `${scheme}://${host.toLowerCase()}`;
+  }
+
+  function isVisible(el) {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
   function findLoginFields() {
     const passwords = Array.from(document.querySelectorAll('input[type="password"]')).filter(
       (el) => !el.disabled && !el.readOnly && isVisible(el)
@@ -20,24 +78,17 @@
 
     const pass = passwords[0];
     const form = pass.form || pass.closest('form');
-
-    // 用户名：同表单内第一个可见的 text/email/tel 输入框
     const scope = form || document;
-    const user = Array.from(
-      scope.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"], input:not([type])')
-    ).find((el) => !el.disabled && !el.readOnly && isVisible(el)) || null;
+    const user =
+      Array.from(
+        scope.querySelectorAll(
+          'input[type="text"], input[type="email"], input[type="tel"], input:not([type])'
+        )
+      ).find((el) => !el.disabled && !el.readOnly && isVisible(el)) || null;
 
     return { form, user, pass };
   }
 
-  function isVisible(el) {
-    const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  }
-
-  /**
-   * 写入值并派发事件——很多框架（React/Vue）只认原生 setter + input 事件。
-   */
   function setValue(el, value) {
     const proto = Object.getPrototypeOf(el);
     const desc = Object.getOwnPropertyDescriptor(proto, 'value');
@@ -47,46 +98,77 @@
     el.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
+  /** 当前页面的精确 origin（用浏览器给的 location.origin，再规范化对齐语义）。 */
+  function currentOrigin() {
+    return normalizeOrigin(location.origin || `${location.protocol}//${location.host}`);
+  }
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    // 只处理来自扩展自身（Service Worker）的填充指令
-    if (!msg || msg.type !== 'do-fill') return false;
+    if (!msg || typeof msg.type !== 'string') return false;
 
-    // origin 必须与当前页面一致——SW 已经校验过，这里再兜一层，
-    // 防止有人用别的途径给 content script 投递消息
-    const here = `${location.protocol}//${location.host}`.toLowerCase();
-    if (typeof msg.origin !== 'string' || !here.startsWith(msg.origin)) {
-      sendResponse({ ok: false, error: 'ORIGIN_MISMATCH' });
-      return false;
-    }
-
-    const found = findLoginFields();
-    if (!found) {
-      sendResponse({ ok: false, error: 'NO_FORM' });
-      return false;
-    }
-
-    try {
-      // username 缺省就**不动**用户名字段。之前写空串会清掉用户已经敲进去的账号，
-      // 用户点一下填充反而把号删了。
-      if (found.user && typeof msg.username === 'string' && msg.username) {
-        setValue(found.user, msg.username);
+    // ---- 第一步：SW 通知"用户点了填充，这是授权 nonce"（不含密码）----
+    if (msg.type === 'prepare-fill') {
+      const here = currentOrigin();
+      // 授权里的 origin 必须与当前页面**精确相等**（不是前缀、不是包含）
+      if (typeof msg.origin !== 'string' || here !== msg.origin) {
+        sendResponse({ ok: false, error: 'ORIGIN_MISMATCH' });
+        return false;
       }
-      setValue(found.pass, msg.password || '');
+      if (!findLoginFields()) {
+        sendResponse({ ok: false, error: 'NO_FORM' });
+        return false;
+      }
+      pending = { nonce: msg.nonce, origin: here };
       sendResponse({ ok: true });
-    } catch (e) {
-      sendResponse({ ok: false, error: 'FILL_FAILED' });
-    } finally {
-      // 不给闭包留下引用
-      msg.password = null;
-      msg.username = null;
+      return false;
     }
+
+    // ---- 第二步：出示 nonce 兑换密码并填充 ----
+    if (msg.type === 'redeem-now') {
+      if (!pending) {
+        sendResponse({ ok: false, error: 'NO_PENDING' });
+        return false;
+      }
+      const nonce = pending.nonce;
+
+      chrome.runtime
+        .sendMessage({ type: 'redeem-fill', nonce, entryId: msg.entryId })
+        .then((res) => {
+          pending = null;
+          if (!res || !res.ok) {
+            sendResponse({ ok: false, error: (res && res.error) || 'REDEEM_FAILED' });
+            return;
+          }
+          const found = findLoginFields();
+          if (!found) {
+            sendResponse({ ok: false, error: 'NO_FORM' });
+            return;
+          }
+          try {
+            // username 缺省就**不动**用户名字段，避免清掉用户已输入的账号
+            if (found.user && typeof res.username === 'string' && res.username) {
+              setValue(found.user, res.username);
+            }
+            setValue(found.pass, res.password || '');
+            sendResponse({ ok: true });
+          } finally {
+            res.password = null;
+            res.username = null;
+          }
+        })
+        .catch(() => {
+          pending = null;
+          sendResponse({ ok: false, error: 'REDEEM_FAILED' });
+        });
+      return true; // 异步响应
+    }
+
     return false;
   });
 
-  // 告知 SW 本页已就绪（SW 据此判断能否注入）
   try {
     chrome.runtime.sendMessage({ type: 'content-ready' }).catch(() => {});
   } catch (e) {
-    /* 扩展被重新加载时可能失败，忽略 */
+    /* 扩展重载时可能失败，忽略 */
   }
 })();
