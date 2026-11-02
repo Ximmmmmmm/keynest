@@ -491,6 +491,47 @@ async function main() {
       JSON.stringify(storage)
     );
 
+    // ---------- T10 设置页（模块注册表 UI）----------
+    const { targetId: optTarget } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${extensionId}/options/options.html`,
+    });
+    const options = await attach(cdp, optTarget);
+    await waitFor(async () => (await options.call('document.readyState')) === 'complete', {
+      label: 'options load',
+    });
+    // 页面自己会发 modules.list 并渲染，等它渲染出至少两张卡片
+    const optsState = await waitFor(
+      async () =>
+        options.call(`(() => {
+          const cards = document.querySelectorAll('#modules .module');
+          const err = document.getElementById('error');
+          return {
+            cards: cards.length,
+            summary: document.getElementById('summary').textContent,
+            error: err && !err.classList.contains('hidden') ? err.textContent : null,
+            perms: document.getElementById('perm-diff').textContent,
+          };
+        })()`).then((v) => (v && v.cards >= 2 ? v : null)),
+      { label: 'options rendered', timeoutMs: 12000 }
+    );
+    record(
+      'T10',
+      '设置页渲染出模块列表（含权限自述）',
+      optsState && optsState.cards >= 2 && !optsState.error ? 'PASS' : 'FAIL',
+      JSON.stringify(optsState)
+    );
+
+    // 设置页能看到核心模块被标记为不可关闭
+    const coreTags = await options.call(
+      `Array.from(document.querySelectorAll('#modules .badge-required')).map(e => e.textContent)`
+    );
+    record(
+      'T10b',
+      '核心模块在设置页标记为不可关闭',
+      Array.isArray(coreTags) && coreTags.length === 2 ? 'PASS' : 'FAIL',
+      JSON.stringify(coreTags)
+    );
+
     // ---------- T8c 错误 entryId ----------
     const badAuth = await popup.call(
       `chrome.runtime.sendMessage({ type: 'authorize-fill', tabId: ${knTabB.id}, entryId: 'nonexistent-entry' })`

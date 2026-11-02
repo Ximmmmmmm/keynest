@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="options.css" />
+    <title>KeyNest 设置</title>
+  </head>
+  <body>
+    <header>
+      <h1>KeyNest 设置</h1>
+      <p class="lede">
+        这里列出了扩展的每一个功能模块，以及它申请了哪些浏览器能力。
+        关掉某个模块后，它不会再收到任何消息。
+      </p>
+    </header>
+
+    <section id="error" class="error hidden"></section>
+
+    <p id="summary" class="summary"></p>
+
+    <section id="modules"></section>
+
+    <section class="manifest">
+      <h2>权限自述</h2>
+      <p class="note">
+        下面这组权限是<b>由各模块的实际需要推导出来的</b>，不是手写的清单。
+        如果它和浏览器安装时提示的权限不一致，说明有一方需要更新。
+      </p>
+      <pre id="perm-diff"></pre>
+    </section>
+
+    <footer>
+      <p class="note">
+        这个扩展不读取、不修改、不同步浏览器内置的密码库。
+      </p>
+    </footer>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KeyNest",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "用本地 KeyNest 密码库填充网页登录表单（不读取也不写入浏览器内置密码库）",
 
   "minimum_chrome_version": "102",
@@ -30,7 +30,7 @@
   ],
 
   "options_ui": {
-    "page": "popup/popup.html",
+    "page": "options/options.html",
     "open_in_tab": true
   },
 
