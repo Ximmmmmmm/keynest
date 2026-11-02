@@ -126,7 +126,25 @@ where
     T: Read + Write,
     V: VaultOps,
 {
-    serve_inner(transport, shared, ops, challenge, ServeOptions::default())
+    serve_with_challenge_and_options(transport, shared, ops, challenge, ServeOptions::default())
+}
+
+/// 与 [`serve_with_challenge`] 相同，但可配置超时参数。
+///
+/// 存在的理由：测试需要**同时**控制挑战值与超时阈值
+/// （否则随机挑战会让客户端的 proof 必然对不上）。
+pub fn serve_with_challenge_and_options<T, V>(
+    transport: &mut T,
+    shared: &SharedSecret,
+    ops: &mut V,
+    challenge: [u8; CHALLENGE_LEN],
+    opts: ServeOptions,
+) -> Result<(), BridgeError>
+where
+    T: Read + Write,
+    V: VaultOps,
+{
+    serve_inner(transport, shared, ops, challenge, opts)
 }
 
 fn serve_inner<T, V>(
@@ -178,9 +196,26 @@ where
     let session_start = Instant::now();
 
     // ---- 2. 请求循环 ----
+    //
+    // # 三个阶段，两种保护
+    //
+    // 1. **客户端空闲**：等下一个请求的第一个字节。这里**不 arm** 看门狗——
+    //    用户点开扩展后犹豫多久都不该被断开；连接由 `read_frame` 自然阻塞。
+    //
+    // 2. **读帧进行中**：收到首字节即 `arm`。半截帧（只发了长度前缀、
+    //    或长度前缀完整但消息体只发一半就停）会在这里被看门狗打断，
+    //    不会永久占住服务线程。
+    //
+    // 3. **处理请求**：读完整帧后看门狗仍在计时（第 2 步已 arm），
+    //    处理完 `disarm`。请求处理超时依旧生效。
+    //
+    // 之前把 `arm` 放在读帧**之前**，等于把「客户端思考时间」也算进
+    // 3 秒请求超时——真实 Chrome 验收里表现为「用户犹豫几秒连接就断」。
     loop {
-        watchdog.arm(opts.request_timeout);
-        let frame = match read_frame(transport) {
+        // 阶段 1 → 2：首字节到达时才启动帧读取/处理超时
+        let frame = match crate::framing::read_frame_on_first_byte(transport, || {
+            watchdog.arm(opts.request_timeout);
+        }) {
             Ok(f) => f,
             Err(BridgeError::Closed) => return Ok(()), // 浏览器关掉了扩展，正常
             Err(e) => return Err(e),
@@ -192,6 +227,7 @@ where
         if !limiter.allow() {
             let resp = Response::err("", &BridgeError::RateLimited);
             reply(transport, &mut tx, &resp)?;
+            watchdog.disarm();
             continue;
         }
 
@@ -210,7 +246,7 @@ where
         watchdog.disarm();
 
         if watchdog.fired() {
-            // 上一次请求超时，连接已被打断，不能继续复用
+            // 本次请求超时，连接已被打断，不能继续复用
             return Err(BridgeError::Timeout);
         }
     }

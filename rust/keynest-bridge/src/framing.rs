@@ -31,8 +31,19 @@ pub fn encode(payload: &[u8]) -> Result<Vec<u8>, BridgeError> {
 /// 长度前缀先做上限检查**再**分配内存：否则一个声明 4 GiB 的恶意帧
 /// 就能让进程直接 OOM，这比读不完更糟。
 pub fn read_frame<R: Read>(reader: &mut R) -> Result<Vec<u8>, BridgeError> {
+    read_frame_on_first_byte(reader, || {})
+}
+
+/// 与 [`read_frame`] 相同，但在**收到首个字节时**回调一次。
+///
+/// 服务端用它区分「客户端空闲」与「读帧进行中」：
+/// 只有后者才需要帧读取超时保护（见 `server.rs` 的请求循环）。
+pub fn read_frame_on_first_byte<R: Read>(
+    reader: &mut R,
+    on_first_byte: impl FnMut(),
+) -> Result<Vec<u8>, BridgeError> {
     let mut len_buf = [0u8; 4];
-    read_exact_or_eof(reader, &mut len_buf)?;
+    read_exact_on_first_byte(reader, &mut len_buf, on_first_byte)?;
     let len = u32::from_le_bytes(len_buf) as usize;
 
     if len > MAX_MESSAGE_BYTES {
@@ -46,13 +57,30 @@ pub fn read_frame<R: Read>(reader: &mut R) -> Result<Vec<u8>, BridgeError> {
     }
 
     let mut buf = vec![0u8; len];
+    // 消息体阶段不再回调（首字节已经触发过）
     read_exact_or_eof(reader, &mut buf)?;
     Ok(buf)
 }
 
 /// 读到 0 字节表示对端正常关闭（EOF），这是**正常退出**路径，不是错误。
 fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<(), BridgeError> {
+    read_exact_on_first_byte(reader, buf, || {})
+}
+
+/// 与 [`read_exact_or_eof`] 相同，但在**收到第一个字节后**回调一次。
+///
+/// 用途：让调用方知道"客户端真的开始发数据了"。
+/// 服务端借此把「客户端空闲等待」与「读帧进行中」区分开——
+/// 只有后者才该受帧读取超时约束（见 `server.rs`）。
+///
+/// 回调只触发一次；若对端在首字节之前就 EOF（`Closed`），回调不会执行。
+pub fn read_exact_on_first_byte<R: Read>(
+    reader: &mut R,
+    buf: &mut [u8],
+    mut on_first_byte: impl FnMut(),
+) -> Result<(), BridgeError> {
     let mut filled = 0;
+    let mut notified = false;
     while filled < buf.len() {
         match reader.read(&mut buf[filled..]) {
             Ok(0) => {
@@ -61,7 +89,13 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<(), Brid
                 }
                 return Err(BridgeError::Malformed("帧被截断"));
             }
-            Ok(n) => filled += n,
+            Ok(n) => {
+                if !notified {
+                    notified = true;
+                    on_first_byte();
+                }
+                filled += n;
+            }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(BridgeError::Io(e.to_string())),
         }
