@@ -680,6 +680,27 @@ impl fmt::Debug for Field {
 pub const MAX_FIELDS: usize = 50;
 
 impl VaultData {
+    /// 找出重复的条目 id。
+    ///
+    /// `upsert_entry` 靠 `id` 定位条目。两条同 id 的记录会让
+    /// 「编辑其中一条」变成「覆盖排在前面的那条」，另一条永远改不动也删不掉。
+    ///
+    /// 正常情况下 id 由 `Uuid::new_v4` 生成，不可能重复。
+    /// 但库文件被手工编辑过、或由第三方工具生成时可能出现——
+    /// 解锁后检查一次，能给出「库里有 N 组重复记录」这种具体提示，
+    /// 而不是让用户在编辑时莫名发现内容串了。
+    ///
+    /// 返回去重后的 id 列表（顺序按首次出现）。
+    pub fn find_duplicate_ids(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut dups = Vec::new();
+        for e in &self.entries {
+            if !seen.insert(e.id.as_str()) && !dups.iter().any(|d: &String| d == &e.id) {
+                dups.push(e.id.clone());
+            }
+        }
+        dups
+    }
     /// 兼容老数据：类型曾经是 `login` / `card` 这样的英文 id，现在存中文名。
     ///
     /// 必须在**读入之后、任何界面逻辑之前**做掉——否则老库里的条目会显示成
@@ -3340,6 +3361,43 @@ mod tests {
     /// 缺陷：`on_disk` 一旦对不上就永久对不上——`save_inner` 每次都返回
     /// `ExternalChange`，而没有任何公开方法能让它重新对齐。
     /// 用户只能重启程序（丢掉未保存的编辑）或手动删文件。
+    /// 库里出现重复 id 时必须被检出。
+    ///
+    /// 为什么这条重要：`upsert_entry` 靠 `id` 定位条目。两条同 id 的记录会让
+    /// 「编辑其中一条」变成「覆盖排在前面的那条」，另一条永远改不动也删不掉。
+    ///
+    /// 现实中怎么出现：
+    /// * 用户手工编辑过库文件（哪怕只是复制粘贴了一段）
+    /// * 第三方工具生成的库
+    /// * 导入时若将来放宽去重规则，可能引入
+    ///
+    /// 检出时机是**解锁之后**——那时才拿到明文，也才有机会在不破坏文件的前提下
+    /// 提示用户。这里直接验 `VaultData::find_duplicate_ids`。
+    #[test]
+    fn duplicate_entry_ids_are_detected() {
+        let mut data = VaultData::default();
+        let mut a = entry("A", "p");
+        a.id = "same-id".into();
+        let mut b = entry("B", "p");
+        b.id = "same-id".into();
+        data.entries = vec![a, b];
+
+        let dup = data.find_duplicate_ids();
+        assert_eq!(dup, vec!["same-id".to_string()], "应当检出重复 id");
+    }
+
+    /// 正常库不应报告重复。
+    #[test]
+    fn unique_ids_report_nothing() {
+        let mut data = VaultData::default();
+        let mut a = entry("A", "p");
+        a.id = "id-a".into();
+        let mut b = entry("B", "p");
+        b.id = "id-b".into();
+        data.entries = vec![a, b];
+        assert!(data.find_duplicate_ids().is_empty());
+    }
+
     /// 导入必须有条目上限，且超限时**保留已导入的部分**。
     ///
     /// 没有上限时：一个 32 MiB 的 CSV 能造出上百万条记录，

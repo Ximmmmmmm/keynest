@@ -367,6 +367,15 @@ impl App {
                         self.search.clear();
                         self.filter = Filter::All;
                         self.unlock_failures = 0;
+
+                        // 解锁后检查一次重复 id。
+                        //
+                        // 正常情况下 id 由 Uuid 生成，不可能重复；但库文件被手工
+                        // 编辑过、或由第三方工具生成时会出现。那时的表现是
+                        // 「编辑某条记录却改了另一条」，用户完全无从判断。
+                        // 这里主动提示，把「莫名其妙」变成「明确告知」。
+                        let dup_ids = data.find_duplicate_ids();
+
                         self.state = AppState::Unlocked {
                             vault,
                             data,
@@ -375,6 +384,13 @@ impl App {
                             copy_banner: None,
                         };
                         self.bridge.start();
+
+                        if !dup_ids.is_empty() {
+                            self.set_toast(format!(
+                                "库里有 {} 组重复的记录 id，编辑时可能改到错误的那条；                                 建议导出 JSON 备份后联系维护者",
+                                dup_ids.len()
+                            ));
+                        }
                     }
                     Err(e) => {
                         let msg = e.to_string();
