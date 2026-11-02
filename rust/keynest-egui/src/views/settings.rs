@@ -179,6 +179,11 @@ pub enum SettingsIntent {
     ExportBackup,
     /// 从 CSV / JSON 文件导入
     ImportFile,
+    /// 放弃本地未保存的改动，重新载入磁盘上的库。
+    ///
+    /// 用于「库文件被别处改过」之后——那是网盘同步/多机使用的常见情况，
+    /// 用户需要一条能走通的路，而不是只能重启程序。
+    ReloadFromDisk,
     /// 关闭动画播完
     Closed,
 }
@@ -680,6 +685,9 @@ fn tab_data(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut SettingsInte
         }
         if icons::labeled(ui, icons::Icon::Plus, "从文件导入").clicked() {
             *intent = SettingsIntent::ImportFile;
+        }
+        if icons::labeled(ui, icons::Icon::Refresh, "重新载入磁盘上的库").clicked() {
+            *intent = SettingsIntent::ReloadFromDisk;
         }
     });
     ui.add_space(4.0);

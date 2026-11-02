@@ -25,6 +25,8 @@ pub enum Icon {
     User,
     /// 外链箭头：用于「在浏览器中打开」
     External,
+    /// 环形箭头：用于「重新载入磁盘上的库」
+    Refresh,
 }
 
 impl Icon {
@@ -108,6 +110,28 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32, wi
                 ],
                 Stroke::new(width, color),
             ));
+        }
+        Icon::Refresh => {
+            // 一个带缺口的圆环 + 箭头，表示"重新载入"
+            let r = 6.5 * s;
+            let c = pt(12.0, 12.0);
+            // 弧：从 -60° 画到 240°，留出缺口给箭头
+            let start = -std::f32::consts::FRAC_PI_3;
+            let end = start + std::f32::consts::PI * 1.55;
+            let steps = 24;
+            let mut prev = pt(12.0 + r / s * start.cos(), 12.0 + r / s * start.sin());
+            for i in 1..=steps {
+                let t = start + (end - start) * (i as f32 / steps as f32);
+                let cur = pt(12.0 + r / s * t.cos(), 12.0 + r / s * t.sin());
+                painter.line_segment([prev, cur], stroke);
+                prev = cur;
+            }
+            // 箭头：在弧的起点处画一个指向切线方向的三角
+            let ax = 12.0 + r / s * start.cos();
+            let ay = 12.0 + r / s * start.sin();
+            painter.line_segment([pt(ax, ay), pt(ax - 1.5, ay - 3.5)], stroke);
+            painter.line_segment([pt(ax, ay), pt(ax + 3.0, ay - 2.5)], stroke);
+            let _ = c;
         }
         Icon::External => {
             // 方框 + 指向右上的箭头：一眼能看出是「跳出去」

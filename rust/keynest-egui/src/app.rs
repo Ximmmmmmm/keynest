@@ -1027,6 +1027,58 @@ impl App {
 
     /* ---------------- 设置相关 ---------------- */
 
+    /// 放弃本地未保存的改动，重新载入磁盘上的库。
+    ///
+    /// 这是「库文件被别处改过」之后唯一能走通的路：
+    /// 没有它，用户只能重启程序（丢掉编辑）或手动删文件。
+    ///
+    /// 失败时**不破坏当前会话**——`reload()` 内部保证磁盘内容先被证明可用，
+    /// 才动内存状态。
+    fn apply_reload_from_disk(&mut self) {
+        // 结果先在窄作用域里算出来，避免与 &mut self 的其它部分同时借用。
+        enum Outcome {
+            Reloaded,
+            Failed(String),
+        }
+
+        let outcome = {
+            let AppState::Unlocked { vault, data, .. } = &mut self.state else {
+                return;
+            };
+            match vault.reload() {
+                Err(e) => Outcome::Failed(e.to_string()),
+                Ok(fresh) => {
+                    *data = fresh;
+                    Outcome::Reloaded
+                }
+            }
+        };
+
+        match outcome {
+            Outcome::Failed(msg) => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.error = Some(msg);
+                }
+            }
+            Outcome::Reloaded => {
+                // 选中项可能已经不在新数据里
+                let still_there = match (&self.selected_id, &self.state) {
+                    (Some(id), AppState::Unlocked { data, .. }) => {
+                        data.entries.iter().any(|x| x.id == *id)
+                    }
+                    _ => false,
+                };
+                if !still_there {
+                    self.selected_id = None;
+                }
+                if let Some(st) = self.settings.as_mut() {
+                    st.error = None;
+                }
+                self.set_toast("已重新载入磁盘上的库");
+            }
+        }
+    }
+
     fn apply_settings_save(&mut self) {
         let Some(st) = self.settings.as_mut() else {
             return;
@@ -1476,6 +1528,7 @@ impl App {
             SettingsIntent::None => {}
             SettingsIntent::Close => self.settings = None,
             SettingsIntent::Save => self.apply_settings_save(),
+            SettingsIntent::ReloadFromDisk => self.apply_reload_from_disk(),
             SettingsIntent::ChangeMaster => self.apply_change_master(),
             SettingsIntent::Upgrade => self.apply_upgrade(),
             SettingsIntent::OpenWipe => {
