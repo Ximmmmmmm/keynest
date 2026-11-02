@@ -485,10 +485,39 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// 把明文导出内容写到文件。写完 `sync_all`，避免「导出了但是空的」。
 pub fn write_plaintext_export<P: AsRef<Path>>(dest: P, text: &str) -> Result<u64> {
     let dest = dest.as_ref();
-    let mut f = std::fs::File::create(dest)?;
+
+    // 明文导出必须只有本人可读。
+    //
+    // `File::create` 在类 Unix 上会遵循 umask，默认往往给出 0644——
+    // 同一台机器上的其他账号就能读到整库密码。Windows 上由父目录的
+    // ACL 决定，行为不同，所以按平台分别处理。
+    let mut f = open_owner_only(dest)?;
     f.write_all(text.as_bytes())?;
     f.sync_all()?;
     Ok(text.len() as u64)
+}
+
+/// 以「仅所有者可读写」的权限创建文件（已存在则截断）。
+///
+/// Windows 上没有对应的 umask 概念，文件默认继承父目录 ACL，
+/// 与用户在资源管理器里新建文件一致，不再额外收紧
+/// （那需要改 ACL，容易把用户自己的访问也弄坏）。
+fn open_owner_only(dest: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // 0600：只有属主可读写。先创建再写入，避免出现「短暂可读」窗口。
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(dest)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::create(dest)
+    }
 }
 
 /// 给界面用的「导出体积」提示。
@@ -508,6 +537,37 @@ pub fn human_size(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 明文导出文件必须只有所有者可读写。
+    ///
+    /// 密码管理器导出的 CSV / JSON 是**整库明文**。类 Unix 上
+    /// `File::create` 会遵循 umask，默认常给出 0644——同机其他账号能读。
+    #[cfg(unix)]
+    #[test]
+    fn plaintext_export_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.csv");
+        write_plaintext_export(
+            &path, "a,b
+",
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "权限过宽: {:o}", mode & 0o777);
+    }
+
+    /// 导出内容必须逐字节可读回（权限改动不能影响写入）。
+    #[test]
+    fn plaintext_export_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.json");
+        let text = "{\"a\":1}";
+        let n = write_plaintext_export(&path, text).unwrap();
+        assert_eq!(n, text.len() as u64);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
     use crate::vault::{Entry, Vault};
 
     fn entry(title: &str, username: &str, password: &str) -> Entry {
