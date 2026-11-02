@@ -1,0 +1,11 @@
+[package]
+name = "keynest-paths"
+version = "0.1.0"
+edition = "2021"
+description = "钥巢数据目录解析：唯一实现，供 core / bridge / GUI / Native Host 共用"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# 刻意保持零依赖：路径解析不需要任何第三方库，
+# 这样它不可能引入密码库、DEK 或 Vault 的任何能力。

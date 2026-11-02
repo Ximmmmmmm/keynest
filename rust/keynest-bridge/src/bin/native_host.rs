@@ -42,25 +42,11 @@ fn main() -> ExitCode {
 
 /// 定位共享密钥所在目录。
 ///
-/// 必须与 GUI 的 `resolve_data_dir()` 规则一致，否则两端算出不同路径、
-/// 读不到同一把密钥，握手永远失败。
-///
-/// `KEYNEST_DATA_DIR` > `%APPDATA%\KeyNest`（若已有库）> `%LOCALAPPDATA%\KeyNest`
+/// **直接调用 `keynest-paths`，不再自己写一份**：GUI 与 Host 是两个进程，
+/// 只要两边逻辑有一丁点差异，就会读到不同的 `bridge.key`，
+/// 握手永久失败且现象只是 `HANDSHAKE`——阶段 2.6 为此查了很久。
 fn data_dir() -> PathBuf {
-    if let Some(d) = std::env::var_os("KEYNEST_DATA_DIR") {
-        return PathBuf::from(d);
-    }
-    let roaming = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("KeyNest");
-    if roaming.join("vault.dat").exists() {
-        return roaming;
-    }
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("KeyNest")
+    keynest_paths::resolve_data_dir()
 }
 
 fn load_secret() -> Result<SharedSecret, BridgeError> {

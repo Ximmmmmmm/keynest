@@ -1,65 +1,51 @@
-//! 数据目录解析。
+//! 数据目录解析（**转发层**）。
 //!
-//! 对应审查清单第 6 条：库文件应放在 `%LOCALAPPDATA%`，而不是 `%APPDATA%`。
+//! 真正的实现在 `keynest-paths`——因为 GUI 与 Native Host 是两个进程，
+//! 两边必须算出完全相同的目录，否则会读到不同的 `bridge.key`，
+//! 握手永久失败且极难定位。
 //!
-//! 原因：`%APPDATA%`（Roaming）在加入域或开启「同步设置」的机器上会被
-//! 复制到漫游配置文件/其他登录会话，等于把加密库（以及它的历史版本）
-//! 扩散到用户没预期的地方。`%LOCALAPPDATA%` 只在本机。
+//! 这里保留同名函数只是为了不破坏既有调用方（`keynest_core::paths::*`）；
+//! 内部一律委托给 `keynest_paths`，不再维护第二份逻辑。
 //!
-//! 兼容策略：如果旧位置 `%APPDATA%\KeyNest\vault.dat` 已经存在、
-//! 而新位置还没有库，则**继续使用旧位置**，避免升级后用户「找不到自己的库」。
-//! 迁移必须由用户显式触发（复制文件），不做隐式搬移。
+//! 背景（保留原注释要点）：`%APPDATA%`（Roaming）在域环境或开启「同步设置」时
+//! 会被复制到漫游配置文件/其他登录会话，等于把加密库扩散到用户没预期的地方。
+//! 但升级不能把用户的库"变没"，所以旧位置**已有库时**继续用旧位置，
+//! 迁移必须由用户显式触发。
 
 use std::path::PathBuf;
 
+pub use keynest_paths::{BRIDGE_KEY_FILE, ENV_DATA_DIR, LOCK_FILE, VAULT_FILE};
+
 /// 新安装默认位置：`%LOCALAPPDATA%\KeyNest`。
 pub fn local_data_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("KeyNest")
+    keynest_paths::local_data_dir()
 }
 
 /// 旧版本位置：`%APPDATA%\KeyNest`。
 pub fn roaming_data_dir() -> PathBuf {
-    std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("KeyNest")
+    keynest_paths::roaming_data_dir()
 }
 
 /// 解析实际使用的数据目录。
 ///
-/// 优先级：
-/// 1. 环境变量 `KEYNEST_DATA_DIR`（测试/便携）
-/// 2. 旧位置已有库 → 继续用旧位置
-/// 3. 否则用新位置
+/// 优先级：`KEYNEST_DATA_DIR` > 旧 `%APPDATA%\KeyNest`（已有库）> `%LOCALAPPDATA%\KeyNest`
 pub fn resolve_data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("KEYNEST_DATA_DIR") {
-        return PathBuf::from(dir);
-    }
-
-    let legacy = roaming_data_dir();
-    if legacy.join("vault.dat").exists() {
-        return legacy;
-    }
-
-    local_data_dir()
+    keynest_paths::resolve_data_dir()
 }
 
 /// 库文件完整路径。
 pub fn resolve_vault_path() -> PathBuf {
-    resolve_data_dir().join("vault.dat")
+    keynest_paths::resolve_vault_path()
 }
 
-/// 单实例锁文件路径。与库文件同目录，保证「一个库对应一把锁」。
+/// 单实例锁文件路径。
 pub fn resolve_lock_path() -> PathBuf {
-    resolve_data_dir().join("vault.lock")
+    keynest_paths::resolve_lock_path()
 }
 
 /// 数据目录是否仍位于漫游目录（用于提示用户考虑迁移）。
 pub fn is_on_roaming_profile() -> bool {
-    resolve_data_dir() == roaming_data_dir() && roaming_data_dir() != local_data_dir()
+    keynest_paths::is_on_roaming_profile()
 }
 
 #[cfg(test)]
@@ -67,15 +53,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn env_override_wins() {
-        // 谨慎起见不修改进程环境，仅验证路径拼接形态
-        let p = local_data_dir();
-        assert!(p.to_string_lossy().ends_with("KeyNest"));
+    fn delegates_to_shared_implementation() {
+        // 转发层必须与共享实现给出完全相同的值
+        assert_eq!(resolve_data_dir(), keynest_paths::resolve_data_dir());
+        assert_eq!(resolve_vault_path(), keynest_paths::resolve_vault_path());
+        assert_eq!(resolve_lock_path(), keynest_paths::resolve_lock_path());
     }
 
     #[test]
     fn vault_path_ends_with_dat() {
         let p = resolve_vault_path();
-        assert_eq!(p.file_name().unwrap(), "vault.dat");
+        assert_eq!(p.file_name().unwrap(), std::ffi::OsStr::new(VAULT_FILE));
     }
 }

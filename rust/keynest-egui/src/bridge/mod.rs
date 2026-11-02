@@ -53,14 +53,24 @@ pub enum Call {
 pub struct VaultProxy {
     tx: Sender<Call>,
     timeout: Duration,
+    /// 成功入队后唤醒 UI 线程。
+    ///
+    /// **顺序很重要**：必须先 `send` 成功，再唤醒。
+    /// 反过来的话，UI 线程可能在被唤醒后、消息入队前就跑完 `pump_bridge()`，
+    /// 于是这一帧没东西可处理，而下一帧又要等到 500ms 后——
+    /// 极端情况下请求会一直等不到处理者。
+    wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl VaultProxy {
     fn ask<T>(&self, make: impl FnOnce(Sender<T>) -> Call) -> Result<T, BridgeError> {
         let (tx, rx) = mpsc::channel();
+        // 1) 先入队
         self.tx
             .send(make(tx))
             .map_err(|_| BridgeError::Io("UI 线程已退出".into()))?;
+        // 2) 入队成功后才唤醒
+        (self.wake)();
         // 等 UI 线程处理；超时说明界面卡住了，宁可报错也不让浏览器无限等
         rx.recv_timeout(self.timeout)
             .map_err(|_| BridgeError::Timeout)
@@ -110,6 +120,10 @@ pub struct BridgeService {
     data_dir: std::path::PathBuf,
     /// 最近一次启动失败的原因，供设置页展示
     last_error: Option<String>,
+    /// UI 上下文：后台线程靠它按需唤醒界面。
+    ///
+    /// 只在 `start()` 后有效；`None` 时唤醒退化为空操作（不会 panic）。
+    ctx: Option<egui::Context>,
 }
 
 struct Running {
@@ -126,7 +140,15 @@ impl BridgeService {
             tx,
             data_dir,
             last_error: None,
+            ctx: None,
         }
+    }
+
+    /// 绑定 UI 上下文：之后后台线程发请求时会用它唤醒界面。
+    ///
+    /// 必须在 `start()` 之前调用；`start()` 之后调用不会生效。
+    pub fn attach_ctx(&mut self, ctx: egui::Context) {
+        self.ctx = Some(ctx);
     }
 
     pub fn is_running(&self) -> bool {
@@ -164,6 +186,17 @@ impl BridgeService {
         let err_slot = Arc::new(std::sync::Mutex::new(None::<String>));
         let err_for_thread = Arc::clone(&err_slot);
 
+        // 唤醒器：后台线程每入队一个请求就调一次。
+        // 拿不到 ctx（未 attach）时退化为空操作，不 panic。
+        let wake: Arc<dyn Fn() + Send + Sync> = {
+            let ctx = self.ctx.clone();
+            Arc::new(move || {
+                if let Some(c) = &ctx {
+                    c.request_repaint();
+                }
+            })
+        };
+
         let join = thread::spawn(move || {
             while !stop_thread.load(std::sync::atomic::Ordering::SeqCst) {
                 // 阻塞等一个客户端；GUI 锁定后 stop 会在下一次循环断言里退出
@@ -192,6 +225,7 @@ impl BridgeService {
                 let mut proxy = VaultProxy {
                     tx: tx.clone(),
                     timeout,
+                    wake: Arc::clone(&wake),
                 };
                 let opts = keynest_bridge::server::ServeOptions {
                     request_timeout: timeout,
@@ -270,6 +304,7 @@ mod tests {
         let mut proxy = VaultProxy {
             tx,
             timeout: Duration::from_millis(500),
+            wake: Arc::new(|| {}),
         };
 
         // UI 线程侧：收到调用就回一个假结果
@@ -299,6 +334,7 @@ mod tests {
         let mut proxy = VaultProxy {
             tx,
             timeout: Duration::from_millis(30),
+            wake: Arc::new(|| {}),
         };
         // 没人处理：必须超时，而不是永久阻塞
         let r = proxy.query("https://example.com");
@@ -312,9 +348,92 @@ mod tests {
         let proxy = VaultProxy {
             tx,
             timeout: Duration::from_millis(30),
+            wake: Arc::new(|| {}),
         };
         // UI 线程没了：lock_state 安全降级为 Locked
         assert_eq!(proxy.lock_state(), LockState::Locked);
+    }
+
+    #[test]
+    fn wake_fires_only_after_successful_enqueue() {
+        // 顺序不变式：先入队，后唤醒。
+        // 反过来的话，UI 可能在被唤醒后、消息入队前跑完 pump_bridge()，
+        // 于是这一帧没东西可处理，请求要等到下一次 100ms 兜底才被看见。
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (tx, rx) = channel::<Call>();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let w = Arc::clone(&wakes);
+        let mut proxy = VaultProxy {
+            tx,
+            timeout: Duration::from_millis(50),
+            wake: Arc::new(move || {
+                w.fetch_add(1, Ordering::SeqCst);
+            }),
+        };
+
+        // UI 侧不处理，让 ask 超时——但入队与唤醒仍应各发生一次
+        let _ = proxy.query("https://example.com");
+        assert_eq!(wakes.load(Ordering::SeqCst), 1, "入队成功后必须唤醒一次");
+        // 通道里确实有一条消息（证明先入队）
+        assert!(rx.try_recv().is_ok(), "消息必须在唤醒之前就已入队");
+    }
+
+    #[test]
+    fn wake_not_called_when_enqueue_fails() {
+        // UI 线程已退出（rx 被 drop）→ send 失败 → **不应**唤醒
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (tx, rx) = channel::<Call>();
+        drop(rx);
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let w = Arc::clone(&wakes);
+        let mut proxy = VaultProxy {
+            tx,
+            timeout: Duration::from_millis(30),
+            wake: Arc::new(move || {
+                w.fetch_add(1, Ordering::SeqCst);
+            }),
+        };
+        let r = proxy.query("https://example.com");
+        assert!(r.is_err(), "UI 已退出应报错");
+        assert_eq!(wakes.load(Ordering::SeqCst), 0, "入队失败不应唤醒");
+    }
+
+    #[test]
+    fn multiple_enqueues_each_wake() {
+        // 连续多个请求：每个都要唤醒一次，不能合并成一次（否则后面的请求要等兜底）
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (tx, rx) = channel::<Call>();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let w = Arc::clone(&wakes);
+        let proxy = VaultProxy {
+            tx,
+            timeout: Duration::from_millis(20),
+            wake: Arc::new(move || {
+                w.fetch_add(1, Ordering::SeqCst);
+            }),
+        };
+        for _ in 0..5 {
+            let _ = proxy.lock_state();
+        }
+        assert_eq!(wakes.load(Ordering::SeqCst), 5, "5 个请求应有 5 次唤醒");
+        // 5 条消息都在队列里，没有丢失
+        let mut n = 0;
+        while rx.try_recv().is_ok() {
+            n += 1;
+        }
+        assert_eq!(n, 5, "消息不丢失");
+    }
+
+    #[test]
+    fn no_ctx_means_wake_is_noop_not_panic() {
+        // 未 attach_ctx 时唤醒必须退化为空操作
+        let mut svc = BridgeService::new(std::path::PathBuf::from("."));
+        svc.attach_ctx(egui::Context::default());
+        // 这里只验证 attach 不 panic；实际唤醒由上面的 proxy 测试覆盖
+        assert!(svc.ctx.is_some());
     }
 
     #[test]

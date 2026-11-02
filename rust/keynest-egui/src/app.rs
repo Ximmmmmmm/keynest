@@ -286,7 +286,10 @@ impl App {
             AppState::NoVault
         };
 
-        let bridge = crate::bridge::BridgeService::new(keynest_core::paths::resolve_data_dir());
+        let mut bridge = crate::bridge::BridgeService::new(keynest_paths::resolve_data_dir());
+        // 把 UI 上下文交给桥接层：后台线程收到请求时用它唤醒界面。
+        // 必须在 start() 之前绑定。
+        bridge.attach_ctx(cc.egui_ctx.clone());
 
         Self {
             path,
@@ -1724,12 +1727,10 @@ impl eframe::App for App {
         // 浏览器桥：把后台线程积压的请求在 UI 线程里执行。
         // 放在最前面，保证每次请求都读取"当前这一帧"的解锁状态与条目内容。
         //
-        // **必须主动请求重绘**：egui 空闲时会完全停止重绘，`logic()` 不再被
-        // 调用；而桥接请求是通过通道到达 UI 线程的，没有重绘就没有处理者，
-        // 浏览器那边会一路 TIMEOUT。这条是真实 Chrome 测试暴露的。
-        if self.bridge.is_running() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
-        }
+        // 唤醒由**后台线程**负责（`VaultProxy` 入队成功后调 `request_repaint()`），
+        // 这里不再无条件请求 16ms 重绘——那会让空闲 GUI 持续约 60 FPS 空转。
+        // 兜底见函数末尾：桥接运行时把既有调度从 500ms 收紧到 100ms，
+        // 即使唤醒回调失效，请求最坏也只延迟 100ms（远小于 5s 超时）。
         self.pump_bridge();
 
         // 窗口关闭：先锁库
@@ -1792,9 +1793,16 @@ impl eframe::App for App {
         self.check_auto_lock();
         self.expire_transient();
 
-        // 有倒计时在动就快刷，否则 500ms 一次足够
+        // 有倒计时在动就快刷，否则 500ms 一次足够。
+        //
+        // 桥接运行时收紧到 100ms 作为**兜底**：正常情况下后台线程会用
+        // `request_repaint()` 立即唤醒，这里只保证"即使唤醒失效也不会让
+        // 请求等到 500ms 之后"。100ms 远小于浏览器侧 5s 超时，且比 16ms
+        // 空转省得多（10 FPS vs 60 FPS）。
         if self.repaint_fast {
             ctx.request_repaint_after(Duration::from_millis(50));
+        } else if self.bridge.is_running() {
+            ctx.request_repaint_after(Duration::from_millis(100));
         } else {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
