@@ -1706,17 +1706,26 @@ impl Vault {
                 _ => return Err(VaultError::ExternalChange),
             }
         }
-        self.rotate_backup(current.as_deref())?;
-
+        // 备份轮转**不能**放在这里。
+        //
+        // 原来是在写新文件之前轮转，于是：写盘失败时库内容没变，
+        // 备份却已经整体移位了一代。连试几次（磁盘满、杀毒软件反复锁文件），
+        // 若干代真实历史会被同一个旧内容挤空——这是数据完整性缺陷。
+        //
+        // 现在改成：先写成功，再由各写盘路径自己去轮转。
+        // 这样"备份"永远只记录已经成功落盘过的内容。
         if self.wrap.is_some() {
-            self.save_v3(reuse_body)
+            self.save_v3(reuse_body, current.as_deref())
         } else {
-            self.save_legacy()
+            self.save_legacy(current.as_deref())
         }
     }
 
     /// v3 写盘：DEK 加密正文，KEK 包裹块原样写回。
-    fn save_v3(&mut self, reuse_body: bool) -> Result<()> {
+    ///
+    /// `previous` 是写盘**之前**盘上的旧内容。新文件成功落盘之后，
+    /// 才用它轮转备份——顺序反了会在写盘失败时把历史挤掉。
+    fn save_v3(&mut self, reuse_body: bool, previous: Option<&[u8]>) -> Result<()> {
         let kdf = self.header.clone().ok_or(VaultError::Locked)?;
         let wrap = self.wrap.clone().ok_or(VaultError::Locked)?;
 
@@ -1743,6 +1752,10 @@ impl Vault {
         let len = json.len() as u64;
         write_atomic(&self.path, json.as_bytes())?;
 
+        // 新内容已经落盘，现在才把旧内容推进备份。
+        // 即使这一步失败，用户的库也是完好的——只是少了一代历史。
+        self.rotate_backup(previous)?;
+
         self.body_cache = Some((cipher, payload));
         self.on_disk = Some(DiskStamp {
             len,
@@ -1752,7 +1765,9 @@ impl Vault {
     }
 
     /// v1 / v2 写盘：主密钥直接加密正文（旧路径，保持原行为）。
-    fn save_legacy(&mut self) -> Result<()> {
+    ///
+    /// 与 v3 一样：先写成功，再轮转备份。
+    fn save_legacy(&mut self, previous: Option<&[u8]>) -> Result<()> {
         let key = self.key.as_ref().ok_or(VaultError::Locked)?;
         let header = self.header.clone().ok_or(VaultError::Locked)?;
 
@@ -1781,6 +1796,8 @@ impl Vault {
         let json = Zeroizing::new(serde_json::to_string_pretty(&file)?);
         let len = json.len() as u64;
         write_atomic(&self.path, json.as_bytes())?;
+
+        self.rotate_backup(previous)?;
 
         self.on_disk = Some(DiskStamp {
             len,
@@ -2328,10 +2345,27 @@ impl Vault {
             let new_kek = derive_key(new_password, &new_salt, &new_header)?;
             let new_wrap = wrap_dek(&new_kek, &new_header, current.as_bytes())?;
 
+            // **先把旧状态取出来，改完再写盘，失败就回滚。**
+            //
+            // 这里不能直接改 self 再保存：写盘失败时内存里已是新 wrap，
+            // 磁盘上还是旧库，此后任何一次保存都会把"新 wrap + 旧密码承诺"
+            // 写进去——用户重启后旧密码打不开，新密码也从未真正生效。
+            // 那是不可逆的数据丢失（库还在，但没人能打开）。
+            let old_header = self.header.take();
+            let old_wrap = self.wrap.take();
+
             self.header = Some(new_header);
             self.wrap = Some(new_wrap);
             // 正文不重新加密——这正是 DEK / KEK 分离存在的理由。
-            return self.save_inner(true);
+            return match self.save_inner(true) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    // 回滚到旧 header/wrap，让库继续用旧密码
+                    self.header = old_header;
+                    self.wrap = old_wrap;
+                    Err(e)
+                }
+            };
         }
 
         // ---------- v1 / v2 ----------
@@ -2350,10 +2384,21 @@ impl Vault {
         };
         let new_key = derive_key(new_password, &new_salt, &new_header)?;
 
-        self.key = Some(new_key); // 旧 key 被 drop → 清零
+        // 与 v3 同样的回滚要求：旧库没有 DEK，换密码要整体重加密，
+        // 失败时磁盘内容没变，内存里的 key/header 也必须退回去。
+        let old_key = self.key.take();
+        let old_header = self.header.take();
+
+        self.key = Some(new_key);
         self.header = Some(new_header);
-        self.save()?;
-        Ok(())
+        match self.save() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.key = old_key;
+                self.header = old_header;
+                Err(e)
+            }
+        }
     }
 
     /// 把任意旧格式（v1 / v2）显式升级为 v3（KEK 包裹随机 DEK）。
@@ -2693,6 +2738,47 @@ mod tests {
         assert_ne!(before["kdf"]["salt"], after["kdf"]["salt"], "盐必须换新");
     }
 
+    /// 换主密码写盘失败时，内存状态必须回滚。
+    ///
+    /// 缺陷：v3 路径先把 `self.header` / `self.wrap` 换成了新密码派生的那一套，
+    /// 然后才 `save_inner(true)`。如果写盘失败：
+    ///
+    ///   * 磁盘上还是旧密码保护的库（用户看不出异常）
+    ///   * 内存里却已经是新 wrap
+    ///   * 之后任何一次保存都会把**新 wrap + 旧密码承诺**写进去
+    ///     → 用户重启后旧密码打不开，新密码也从未真正生效过
+    ///
+    /// 这是不可逆的数据丢失：库还在，但没人能打开。
+    #[test]
+    fn failed_change_master_keeps_old_password_working() {
+        let dir = tmp();
+        let path = dir.path().join("vault.dat");
+        let mut v = fast_vault(dir.path());
+        v.upsert_entry(entry("A", "pw-A")).unwrap();
+
+        // 让写盘失败
+        let tmp_file = super::tmp_path(&v.path);
+        std::fs::create_dir(&tmp_file).unwrap();
+        let r = v.change_master("master-password-123", "new-master-password-456");
+        let _ = std::fs::remove_dir(&tmp_file);
+
+        assert!(r.is_err(), "前提：这次换密码本该失败");
+
+        // 失败之后，内存里的库必须还能正常用（内部状态已回滚）
+        v.upsert_entry(entry("B", "pw-B")).unwrap();
+        v.lock();
+
+        // 关键断言：旧密码仍然能打开，并且能看到失败之后新增的 B
+        let mut reopened = Vault::new(&path);
+        let data = reopened
+            .unlock("master-password-123")
+            .expect("换密码失败后，旧密码必须仍然可用");
+        assert!(
+            data.entries.iter().any(|e| e.title == "B"),
+            "失败回滚后新增的条目应当已落盘"
+        );
+    }
+
     #[test]
     fn change_master_then_reopen_with_new_password() {
         let dir = tmp();
@@ -3007,6 +3093,60 @@ mod tests {
             good,
             "坏文件不得顶掉完好的备份"
         );
+    }
+
+    /// 写盘失败时，**不能把备份轮转掉**。
+    ///
+    /// 数据完整性缺陷：`save_inner` 先 `rotate_backup` 再写新文件。
+    /// 如果写新文件失败（磁盘满、权限、杀毒软件锁文件），库内容其实没变，
+    /// 但备份已经整体移位了一代——连试几次，若干代真实历史会被同一个旧内容挤空。
+    ///
+    /// 正确顺序：**先写成功（临时文件 + fsync + rename），再轮转备份。**
+    /// 这样"备份"永远只记录已经成功落盘过的内容。
+    #[test]
+    fn failed_save_does_not_rotate_backups() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        // 造出多代可区分的历史
+        for i in 0..3 {
+            v.upsert_entry(entry(&format!("gen{i}"), "p")).unwrap();
+        }
+        let before = backup_fingerprint(&v);
+        assert!(
+            before.iter().filter(|x| x.is_some()).count() >= 2,
+            "前提：应当已有多个备份代"
+        );
+
+        // 让下一次写盘必然失败：把临时文件路径占成一个目录。
+        // （比改文件权限可靠——Windows 上以管理员运行的程序不受只读位限制。）
+        let tmp_file = super::tmp_path(&v.path);
+        std::fs::create_dir(&tmp_file).unwrap();
+
+        let r = v.save();
+        let after = backup_fingerprint(&v);
+        let _ = std::fs::remove_dir(&tmp_file);
+
+        assert!(r.is_err(), "前提：这次保存本该失败");
+        assert_eq!(
+            before, after,
+            "写盘失败后备份不得移位——否则连续失败会把真实历史挤空"
+        );
+    }
+
+    /// 备份指纹：每代取 (长度, 内容前 32 字节) 的简易摘要。
+    ///
+    /// 只用于比较"是否变化"，不需要密码学强度；
+    /// 直接把整份密文放进断言消息会让失败输出无法阅读。
+    fn backup_fingerprint(v: &Vault) -> Vec<Option<(usize, Vec<u8>)>> {
+        (1..=BACKUP_GENERATIONS)
+            .map(|i| {
+                std::fs::read(v.backup_slot(i)).ok().map(|b| {
+                    let head = b.iter().take(32).copied().collect();
+                    (b.len(), head)
+                })
+            })
+            .collect()
     }
 
     #[test]
