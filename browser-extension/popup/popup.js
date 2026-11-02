@@ -11,6 +11,13 @@ const els = {
   empty: document.getElementById('empty'),
   error: document.getElementById('error'),
   refresh: document.getElementById('refresh'),
+  openOptions: document.getElementById('open-options'),
+
+  adblockSection: document.getElementById('adblock-section'),
+  adblockState: document.getElementById('adblock-state'),
+  adblockHost: document.getElementById('adblock-host'),
+  adblockToggle: document.getElementById('adblock-toggle'),
+  adblockNote: document.getElementById('adblock-note'),
 };
 
 /** 当前标签页的 id，页面上所有操作都以它为准。 */
@@ -38,8 +45,19 @@ function escapeText(s) {
 async function init() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTabId = tab && tab.id;
+  currentTabUrl = tab && tab.url;
   await refresh();
+  await refreshAdblock();
 }
+
+/**
+ * 当前标签页的 URL。
+ *
+ * 注意：没有 tabs 权限时这个值是 undefined——**这不是错误**，
+ * 广告过滤那一段会自行退化为"不显示站点信息但按钮仍可用"（见下）。
+ * 密码填充本来就只用 getFrame 取 origin，不依赖这里。
+ */
+let currentTabUrl = null;
 
 async function refresh() {
   hide(els.listSection);
@@ -174,3 +192,101 @@ async function doFill(entryId, username) {
 els.refresh.addEventListener('click', refresh);
 document.addEventListener('DOMContentLoaded', init);
 init();
+
+/* ------------------------------------------------------------------ */
+/* 广告过滤：按站点暂停                                                */
+/* ------------------------------------------------------------------ */
+
+/** 从 URL 里取 host。非 http(s) 返回 null。 */
+function hostOfUrl(url) {
+  if (typeof url !== 'string' || !url) return null;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 渲染广告过滤那一段。
+ *
+ * # 为什么失败时整段隐藏而不是显示错误
+ *
+ * 广告过滤默认关闭。对一个只用密码填充的用户来说，这里显示一段
+ * "广告过滤不可用"只会造成困惑——他根本没启用这个功能。
+ * 所以：模块没启用就整段不出现；启用了但查询失败才显示错误。
+ */
+async function refreshAdblock() {
+  const host = hostOfUrl(currentTabUrl);
+
+  // 先问模块有没有启用（modules.list 是安全的只读接口）
+  let enabled = false;
+  try {
+    const list = await chrome.runtime.sendMessage({ type: 'modules.list' });
+    const m = list && list.ok ? (list.modules || []).find((x) => x.id === 'adblock') : null;
+    enabled = !!(m && m.enabled);
+  } catch {
+    enabled = false;
+  }
+
+  if (!enabled || !host) {
+    hide(els.adblockSection);
+    return;
+  }
+
+  const status = await chrome.runtime.sendMessage({ type: 'adblock.status' });
+  if (!status || !status.ok) {
+    hide(els.adblockSection);
+    return;
+  }
+
+  const check = await chrome.runtime.sendMessage({ type: 'adblock.check', host });
+  const allowed = !!(check && check.ok && check.allowed);
+
+  show(els.adblockSection);
+  els.adblockHost.textContent = host;
+
+  if (status.mode === 'off' || status.mode === null) {
+    els.adblockState.textContent = '未生效';
+    els.adblockState.className = 'badge';
+    els.adblockToggle.disabled = true;
+    els.adblockToggle.textContent = '过滤已关闭（在设置里开启）';
+    return;
+  }
+
+  els.adblockToggle.disabled = false;
+  if (allowed) {
+    els.adblockState.textContent = '本站已暂停';
+    els.adblockState.className = 'badge bad';
+    els.adblockToggle.textContent = '恢复本站过滤';
+  } else {
+    els.adblockState.textContent = '本站已启用';
+    els.adblockState.className = 'badge ok';
+    els.adblockToggle.textContent = '在此站暂停过滤';
+  }
+
+  els.adblockToggle.onclick = async () => {
+    els.adblockToggle.disabled = true;
+    const res = await chrome.runtime.sendMessage({
+      type: allowed ? 'adblock.disallow' : 'adblock.allow',
+      domain: host,
+    });
+    els.adblockToggle.disabled = false;
+    if (!res || !res.ok) {
+      setError(`操作失败：${(res && res.error) || '未知错误'}`);
+      return;
+    }
+    setError('');
+    els.adblockNote.textContent = allowed
+      ? '已恢复过滤，刷新页面后生效'
+      : '已暂停过滤，刷新页面后生效';
+    els.adblockNote.classList.remove('hidden');
+    await refreshAdblock();
+  };
+}
+
+els.openOptions.addEventListener('click', () => {
+  chrome.runtime.openOptionsPage();
+});

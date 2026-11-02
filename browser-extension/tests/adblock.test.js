@@ -364,3 +364,127 @@ test('FAIL-SAFE: 每条规则都有 id / priority / action / condition', async (
     assert.ok(r.condition);
   }
 });
+
+/* ============================ 豁免名单接口 ============================ */
+
+/**
+ * 带配置记忆的 ctx。adblock 的豁免接口会读/写 `allowlist` 配置。
+ *
+ * 注意配置里存的是 **JSON 字符串**（配置中心只支持标量），
+ * 这里如实模拟，否则测不出序列化相关的问题。
+ */
+function ctxWith(initial = {}) {
+  const store = { mode: 'basic', allowlist: '[]', ...initial };
+  return {
+    store,
+    config: {
+      get: (k) => store[k],
+      set: async (k, v) => {
+        store[k] = v;
+      },
+    },
+  };
+}
+
+test('PASS: adblock.allow 把域名写进配置并返回名单', async () => {
+  const dnr = fakeDnr();
+  const m = mod(dnr);
+  const ctx = ctxWith();
+  const h = m.handlers.find((x) => x.type === 'adblock.allow');
+
+  const res = await h.handle({ domain: 'news.test' }, ctx);
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.list, ['news.test']);
+  assert.equal(res.added, true);
+  assert.deepEqual(JSON.parse(ctx.store.allowlist), ['news.test']);
+});
+
+test('PASS: 豁免后立即重装规则（不需要用户再点一次）', async () => {
+  const dnr = fakeDnr();
+  const m = mod(dnr);
+  const ctx = ctxWith();
+  const h = m.handlers.find((x) => x.type === 'adblock.allow');
+
+  await h.handle({ domain: 'news.test' }, ctx);
+  const allow = dnr.state.installed.find((r) => r.action.type === 'allowAllRequests');
+  assert.ok(allow, '豁免规则没装上');
+  assert.deepEqual(allow.condition.requestDomains, ['news.test']);
+});
+
+test('FAIL-SAFE: adblock.allow 拒绝非法域名', async () => {
+  const m = mod(fakeDnr());
+  const h = m.handlers.find((x) => x.type === 'adblock.allow');
+  for (const domain of ['', 'not a domain', 'https://x.test/', '../etc', 123, null]) {
+    const res = await h.handle({ domain }, ctxWith());
+    assert.deepEqual(res, { ok: false, error: 'BAD_ARGS' }, String(domain));
+  }
+});
+
+test('PASS: adblock.disallow 移除并重装', async () => {
+  const dnr = fakeDnr();
+  const m = mod(dnr);
+  const ctx = ctxWith({ allowlist: '["news.test","other.test"]' });
+  const h = m.handlers.find((x) => x.type === 'adblock.disallow');
+
+  const res = await h.handle({ domain: 'news.test' }, ctx);
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.list, ['other.test']);
+  assert.equal(res.removed, true);
+
+  const allows = dnr.state.installed.filter((r) => r.action.type === 'allowAllRequests');
+  assert.equal(allows.length, 1);
+  assert.deepEqual(allows[0].condition.requestDomains, ['other.test']);
+});
+
+test('FAIL-SAFE: 配置里的坏 JSON 当空名单，不让功能整体失效', async () => {
+  const dnr = fakeDnr();
+  const m = mod(dnr);
+  const ctx = ctxWith({ allowlist: '{坏掉的数据' });
+  const h = m.handlers.find((x) => x.type === 'adblock.allowlist');
+  const res = await h.handle({}, ctx);
+  assert.deepEqual(res, { ok: true, list: [] });
+});
+
+test('FAIL-SAFE: 配置里混入非法域名时被清洗掉（否则 Chrome 拒整批规则）', async () => {
+  const dnr = fakeDnr();
+  const m = mod(dnr);
+  const ctx = ctxWith({
+    allowlist: JSON.stringify(['good.test', 'bad entry', 'https://x.test/', 'good.test']),
+  });
+  const h = m.handlers.find((x) => x.type === 'adblock.apply');
+  const res = await h.handle({ mode: 'basic' }, ctx);
+
+  assert.equal(res.ok, true);
+  const allows = dnr.state.installed.filter((r) => r.action.type === 'allowAllRequests');
+  assert.equal(allows.length, 1, '只有一条合法豁免');
+  assert.deepEqual(allows[0].condition.requestDomains, ['good.test']);
+});
+
+test('PASS: adblock.check 判断当前站点是否已豁免', async () => {
+  const m = mod(fakeDnr());
+  const ctx = ctxWith({ allowlist: '["example.test"]' });
+  const h = m.handlers.find((x) => x.type === 'adblock.check');
+
+  const yes = await h.handle({ host: 'www.example.test' }, ctx);
+  assert.equal(yes.allowed, true);
+  assert.equal(yes.matched, 'example.test');
+
+  const no = await h.handle({ host: 'notexample.test' }, ctx);
+  assert.equal(no.allowed, false);
+  assert.equal(no.matched, null);
+});
+
+test('FAIL-SAFE: adblock.check 拒绝非法 host', async () => {
+  const m = mod(fakeDnr());
+  const h = m.handlers.find((x) => x.type === 'adblock.check');
+  for (const host of ['', 123, null, 'a b']) {
+    assert.deepEqual(await h.handle({ host }, ctxWith()), { ok: false, error: 'BAD_ARGS' });
+  }
+});
+
+test('PASS: adblock.allowlist 返回当前名单', async () => {
+  const m = mod(fakeDnr());
+  const ctx = ctxWith({ allowlist: '["b.test","a.test"]' });
+  const h = m.handlers.find((x) => x.type === 'adblock.allowlist');
+  assert.deepEqual((await h.handle({}, ctx)).list, ['b.test', 'a.test']);
+});

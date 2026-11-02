@@ -21,7 +21,14 @@
 // 这是唯一允许生成的放行规则类型，且绑定到用户显式选择的主 frame 域名。
 
 import { buildRuleset, explainHost, MODES } from '../filters/rules.js';
-import { normalizeDomain } from '../filters/domain.js';
+import {
+  addEntry,
+  isAllowed,
+  normalizeEntry,
+  parseAllowlist,
+  removeEntry,
+  sanitizeAllowlist,
+} from '../filters/allowlist.js';
 
 /** 动态规则集的固定 id。一个扩展只能有一个同名规则集。 */
 export const RULESET_ID = 'keynest_adblock';
@@ -100,12 +107,14 @@ export function createAdblockModule(deps) {
    * 用户在 example.com 点"暂停"，该页面上所有请求都不拦。
    *
    * 域名的合法性在这里**再校验一次**：调用方可能从存储里读回脏数据。
+   * 用 `normalizeEntry` 而不是 `normalizeDomain`——后者会把
+   * `https://x.test/` 变成 `https`，生成一条永远匹配不上的规则。
    */
   function buildAllowRules(domains) {
     const rules = [];
     let id = ALLOW_RULE_ID_BASE;
     for (const raw of domains) {
-      const d = normalizeDomain(raw);
+      const d = normalizeEntry(raw);
       if (!d) continue;
       rules.push({
         id: id++,
@@ -119,6 +128,26 @@ export function createAdblockModule(deps) {
       });
     }
     return rules;
+  }
+
+  /**
+   * 从配置读豁免名单。
+   *
+   * 配置里存的是 **JSON 字符串**（配置中心目前只支持标量），
+   * 所以这里要解析。解析失败就当作空名单——不是"报错"，因为
+   * 一份坏名单不该让整个过滤功能用不了。
+   *
+   * 解析后一律过 `sanitizeAllowlist`：存储里的数据不可信（可能是旧版本写的、
+   * 也可能被外部改过），未清洗的域名会变成无效 dNR 规则，
+   * 而 Chrome 会因此**拒绝整批**规则——表现是"过滤完全失效"。
+   */
+  function readAllowlist(ctx) {
+    return parseAllowlist(ctx.config.get('allowlist'));
+  }
+
+  /** 写回配置。统一在写的时候序列化，避免各处 import JSON.stringify。 */
+  async function writeAllowlist(ctx, list) {
+    await ctx.config.set('allowlist', JSON.stringify(sanitizeAllowlist(list)));
   }
 
   /** 把 dNR 的原生错误转成稳定错误码。 */
@@ -151,13 +180,68 @@ export function createAdblockModule(deps) {
         values: [...MODES],
         default: 'basic',
       },
+      // 豁免名单。存字符串（JSON 序列化友好），读出来一律过 sanitizeAllowlist。
+      // 不用数组类型：配置中心目前只支持标量，加数组类型是另一个决定。
+      allowlist: {
+        type: 'string',
+        default: '[]',
+        maxLength: 8192,
+      },
     },
     handlers: [
+      /**
+       * 当前豁免名单（已清洗）。
+       * 从配置读，而不是让调用方传——否则两个入口（popup / options）
+       * 各自维护一份，必然对不上。
+       */
+      {
+        type: 'adblock.allowlist',
+        handle: (msg, ctx) => ({ ok: true, list: readAllowlist(ctx) }),
+      },
+      {
+        type: 'adblock.allow',
+        handle: async (msg, ctx) => {
+          const host = typeof msg.domain === 'string' ? msg.domain : '';
+          // 用 normalizeEntry 而不是 normalizeDomain：前者拒绝带协议/路径的输入。
+          // normalizeDomain('https://x.test/') 会得到 'https'（把 scheme 当标签），
+          // 于是名单里出现一条永远匹配不上的豁免项。
+          if (!normalizeEntry(host)) return { ok: false, error: 'BAD_ARGS' };
+          const cur = readAllowlist(ctx);
+          const { list, added, moved } = addEntry(cur, host);
+          await writeAllowlist(ctx, list);
+          const res = await applyRules(ctx.config.get('mode'), list);
+          return res.ok ? { ok: true, list, added, moved } : res;
+        },
+      },
+      {
+        type: 'adblock.disallow',
+        handle: async (msg, ctx) => {
+          const host = typeof msg.domain === 'string' ? msg.domain : '';
+          if (!normalizeEntry(host)) return { ok: false, error: 'BAD_ARGS' };
+          const cur = readAllowlist(ctx);
+          const { list, removed } = removeEntry(cur, host);
+          await writeAllowlist(ctx, list);
+          const res = await applyRules(ctx.config.get('mode'), list);
+          return res.ok ? { ok: true, list, removed } : res;
+        },
+      },
+      {
+        type: 'adblock.check',
+        handle: (msg, ctx) => {
+          const host = typeof msg.host === 'string' ? msg.host : '';
+          if (!normalizeEntry(host)) return { ok: false, error: 'BAD_ARGS' };
+          const list = readAllowlist(ctx);
+          return { ok: true, allowed: isAllowed(list, host), matched: list.find((d) => host === d || host.endsWith('.' + d)) || null };
+        },
+      },
       {
         type: 'adblock.apply',
         handle: async (msg, ctx) => {
           const mode = msg.mode ?? ctx.config.get('mode');
-          const allow = Array.isArray(msg.allowDomains) ? msg.allowDomains : [];
+          // 豁免名单优先用调用方传的（测试/一次性场景），否则读配置
+          const allow = Array.isArray(msg.allowDomains)
+            ? sanitizeAllowlist(msg.allowDomains)
+            : readAllowlist(ctx);
           const res = await applyRules(mode, allow);
           if (!res.ok) return res;
           // 把档位记回配置：否则下次 `ctx.config.get('mode')` 还是旧值，

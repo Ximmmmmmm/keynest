@@ -97,3 +97,49 @@ footer {
 .foot-note { color: var(--muted); font-size: 10px; }
 
 .hidden { display: none; }
+
+/* ---------------- 广告过滤：按站点暂停 ---------------- */
+
+.block {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.block-title { font-weight: 600; font-size: 12px; }
+
+.block-host {
+  margin: 4px 0 8px;
+  color: var(--muted);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.block-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+button.wide {
+  width: 100%;
+  font-size: 12px;
+}
+
+button.ghost:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+footer {
+  flex-wrap: wrap;
+  gap: 6px;
+}

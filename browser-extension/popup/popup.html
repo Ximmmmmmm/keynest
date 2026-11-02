@@ -11,6 +11,7 @@
       <span id="status" class="badge">检查中…</span>
     </header>
 
+    <!-- 密码填充 -->
     <section id="locked-note" class="note hidden">
       KeyNest 已锁定或未启动。请先打开钥巢并解锁密码库。
     </section>
@@ -21,10 +22,23 @@
     </section>
 
     <section id="empty" class="note hidden">这个网站没有匹配的条目。</section>
+
+    <!-- 广告过滤：按站点暂停 -->
+    <section id="adblock-section" class="block hidden">
+      <div class="block-head">
+        <span class="block-title">广告与跟踪器过滤</span>
+        <span id="adblock-state" class="badge"></span>
+      </div>
+      <p id="adblock-host" class="block-host"></p>
+      <button id="adblock-toggle" class="ghost wide"></button>
+      <p id="adblock-note" class="block-note hidden"></p>
+    </section>
+
     <section id="error" class="note error hidden"></section>
 
     <footer>
       <button id="refresh" class="ghost">刷新</button>
+      <button id="open-options" class="ghost">设置</button>
       <span class="foot-note">不会读取或修改浏览器保存的密码</span>
     </footer>
 

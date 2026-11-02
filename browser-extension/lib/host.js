@@ -296,4 +296,8 @@ export const KIND_REQUIREMENT = Object.freeze({
   'adblock.apply': 'popup',
   'adblock.status': 'popup',
   'adblock.explain': 'popup',
+  'adblock.allowlist': 'popup',
+  'adblock.allow': 'popup',
+  'adblock.disallow': 'popup',
+  'adblock.check': 'popup',
 });

@@ -712,6 +712,82 @@ async function main() {
     // 清掉测试写入的配置，避免污染后续
     await options.call(`chrome.storage.local.remove('keynest.cfg.adblock')`);
 
+    // ---------- T13 按站点暂停（popup 入口的模块层行为）----------
+    // 先启用广告过滤并装 basic 规则
+    await options.call(
+      `chrome.runtime.sendMessage({ type: 'modules.set-enabled', id: 'adblock', enabled: true })`
+    );
+    await options.call(`chrome.runtime.sendMessage({ type: 'adblock.apply', mode: 'basic' })`);
+
+    const allowRes = await popup.call(
+      `chrome.runtime.sendMessage({ type: 'adblock.allow', domain: 'example.test' })`
+    );
+    const afterAllow = await popup.call(
+      `chrome.declarativeNetRequest.getDynamicRules().then(r =>
+         r.filter(x => x.action.type === 'allowAllRequests')
+          .map(x => x.condition.requestDomains[0]))`
+    );
+    record(
+      'T13',
+      '在站点暂停：写入豁免名单并立即生成 allowAllRequests 规则',
+      allowRes && allowRes.ok &&
+        Array.isArray(afterAllow) && afterAllow.includes('example.test')
+        ? 'PASS'
+        : 'FAIL',
+      `res=${JSON.stringify(allowRes)} allows=${JSON.stringify(afterAllow)}`
+    );
+
+    // ---------- T13b 子域归属：豁免 example.test 也覆盖 www.example.test ----------
+    const subCheck = await popup.call(
+      `chrome.runtime.sendMessage({ type: 'adblock.check', host: 'www.example.test' })`
+    );
+    const otherCheck = await popup.call(
+      `chrome.runtime.sendMessage({ type: 'adblock.check', host: 'notexample.test' })`
+    );
+    record(
+      'T13b',
+      '豁免按域名归属生效：子域被覆盖，相似域名不被覆盖',
+      subCheck && subCheck.ok && subCheck.allowed === true &&
+        otherCheck && otherCheck.ok && otherCheck.allowed === false
+        ? 'PASS'
+        : 'FAIL',
+      `sub=${JSON.stringify(subCheck)} other=${JSON.stringify(otherCheck)}`
+    );
+
+    // ---------- T13c 恢复过滤：规则被移除 ----------
+    const disallowRes = await popup.call(
+      `chrome.runtime.sendMessage({ type: 'adblock.disallow', domain: 'example.test' })`
+    );
+    const afterDisallow = await popup.call(
+      `chrome.declarativeNetRequest.getDynamicRules().then(r =>
+         r.filter(x => x.action.type === 'allowAllRequests').length)`
+    );
+    record(
+      'T13c',
+      '恢复过滤：豁免规则被移除',
+      disallowRes && disallowRes.ok && afterDisallow === 0 ? 'PASS' : 'FAIL',
+      `res=${JSON.stringify(disallowRes)} remainingAllows=${afterDisallow}`
+    );
+
+    // ---------- T13d 豁免名单持久化（跨上下文）----------
+    await options.call(`chrome.runtime.sendMessage({ type: 'adblock.allow', domain: 'persist.test' })`);
+    const persistedList = await popup.call(
+      `chrome.storage.local.get('keynest.cfg.adblock').then(g => {
+         const v = g['keynest.cfg.adblock'];
+         return v ? v.allowlist : null;
+       })`
+    );
+    record(
+      'T13d',
+      '豁免名单写进 storage（跨上下文可见）',
+      typeof persistedList === 'string' && persistedList.includes('persist.test') ? 'PASS' : 'FAIL',
+      `stored=${JSON.stringify(persistedList)}`
+    );
+
+    // 复原：清掉豁免与规则
+    await options.call(`chrome.runtime.sendMessage({ type: 'adblock.disallow', domain: 'persist.test' })`);
+    await options.call(`chrome.runtime.sendMessage({ type: 'adblock.apply', mode: 'off' })`);
+
     // ---------- T8c 错误 entryId ----------
     const badAuth = await popup.call(
       `chrome.runtime.sendMessage({ type: 'authorize-fill', tabId: ${knTabB.id}, entryId: 'nonexistent-entry' })`
