@@ -153,13 +153,23 @@ export function requiredManifestPermissions(modules) {
  *   - `missing` —— 模块需要但 manifest 没声明 → 运行时必然失败
  *   - `unused`  —— manifest 声明了但没有模块用 → 权限膨胀，应删掉
  *
- * @param {{permissions?:string[], host_permissions?:string[]}} manifest
+ * # host 权限要同时看两个字段
+ *
+ * 本项目把全站 host 权限放在 `optional_host_permissions` 里——安装时不弹窗，
+ * 需要时再由用户操作触发授权。只看 `host_permissions` 会把这种情况误报成"缺失"，
+ * 于是每加一个需要站点的模块都要重新解释一遍为什么这个报警可以忽略。
+ * 那样的报警很快就没人看了。
+ *
+ * @param {{permissions?:string[], host_permissions?:string[], optional_host_permissions?:string[]}} manifest
  * @param {Array<{id:string, requires:ReadonlyArray<string>}>} modules
  */
 export function diffManifest(manifest, modules) {
   const need = requiredManifestPermissions(modules);
   const have = new Set(manifest.permissions || []);
-  const haveHosts = new Set(manifest.host_permissions || []);
+  const haveHosts = new Set([
+    ...(manifest.host_permissions || []),
+    ...(manifest.optional_host_permissions || []),
+  ]);
 
   const missing = need.permissions.filter((p) => !have.has(p));
   const unused = [...have].filter((p) => !need.permissions.includes(p)).sort();

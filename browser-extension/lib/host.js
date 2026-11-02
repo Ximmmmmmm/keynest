@@ -21,6 +21,7 @@
 import { ModuleRegistry } from './modules.js';
 import { createVaultModule, HOST_NAME, PROTOCOL_VERSION } from './modules/vault.js';
 import { createModulesModule } from './modules/registry.js';
+import { createAdblockModule } from './modules/adblock.js';
 import { classifySender } from './sender.js';
 
 /**
@@ -177,6 +178,15 @@ export function createHost(chromeImpl, opts = {}) {
   // 放在这里而不是让调用方传，是因为它必须永远存在——否则设置页会空掉。
   const modulesAdmin = createModulesModule({ registry });
   registry.register(modulesAdmin);
+
+  // 广告过滤需要 dNR。chrome 上没这个 API 时（老版本/无权限）不注册该模块，
+  // 而不是让它在运行时报错——"模块列表里没有"比"模块可以点但总失败"诚实。
+  let adblock = null;
+  if (chromeImpl.declarativeNetRequest) {
+    adblock = createAdblockModule({ dnr: chromeImpl.declarativeNetRequest });
+    registry.register(adblock);
+  }
+
   for (const m of opts.extraModules || []) registry.register(m);
 
   // 断连 → 清授权（模块自己登记的回调已经在 lifecycle.disconnected 里）
@@ -248,6 +258,7 @@ export function createHost(chromeImpl, opts = {}) {
     classify,
     vault,
     modulesAdmin,
+    adblock,
     /** 核心模块清单：设置页不允许关闭它们。 */
     CORE_MODULES,
   };
@@ -273,4 +284,8 @@ export const KIND_REQUIREMENT = Object.freeze({
   // 设置页自己读模块清单（不含任何密码或密钥）
   'modules.list': 'popup',
   'modules.set-enabled': 'popup',
+  // 广告过滤：只有扩展页面能改规则或问诊断；explain 无副作用但也没必要开放
+  'adblock.apply': 'popup',
+  'adblock.status': 'popup',
+  'adblock.explain': 'popup',
 });

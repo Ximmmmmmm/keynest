@@ -1,6 +1,6 @@
 {
   "name": "keynest-browser-extension",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "钥巢浏览器扩展（Manifest V3）。模块化架构：密码填充、广告过滤、阅读模式等功能各为独立模块，权限由模块需要反推。",

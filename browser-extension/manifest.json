@@ -1,12 +1,18 @@
 {
   "manifest_version": 3,
   "name": "KeyNest",
-  "version": "0.6.0",
-  "description": "用本地 KeyNest 密码库填充网页登录表单（不读取也不写入浏览器内置密码库）",
+  "version": "0.7.0",
+  "description": "本地钥匙巢：网页密码填充、广告与跟踪器过滤（不读取也不写入浏览器内置密码库）",
 
   "minimum_chrome_version": "102",
 
-  "permissions": ["nativeMessaging", "activeTab", "scripting", "webNavigation"],
+  "permissions": [
+    "nativeMessaging",
+    "activeTab",
+    "scripting",
+    "webNavigation",
+    "declarativeNetRequest"
+  ],
 
   "optional_host_permissions": ["https://*/*"],
 

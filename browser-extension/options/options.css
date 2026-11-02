@@ -70,6 +70,14 @@ header h1 {
   color: var(--danger);
 }
 
+.hint {
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+
 /* ---------------- 模块卡片 ---------------- */
 
 .module {
@@ -148,6 +156,39 @@ header h1 {
 }
 
 .switch input:disabled {
+  cursor: progress;
+}
+
+/* ---------------- 档位选择 ---------------- */
+
+.mode {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.mode-label {
+  flex: none;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.mode select {
+  flex: 1;
+  max-width: 320px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--card);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.mode select:disabled {
+  opacity: 0.6;
   cursor: progress;
 }
 

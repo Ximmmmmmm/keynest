@@ -502,16 +502,20 @@ async function main() {
     // 页面自己会发 modules.list 并渲染，等它渲染出至少两张卡片
     const optsState = await waitFor(
       async () =>
+        // 每个字段都要自己容错：页面还没渲染完时元素可能都还不存在，
+        // 让 probe 抛异常会把 waitFor 直接打断，看不到"其实马上就绪了"。
         options.call(`(() => {
           const cards = document.querySelectorAll('#modules .module');
           const err = document.getElementById('error');
+          const sum = document.getElementById('summary');
+          const pd = document.getElementById('perm-diff');
           return {
             cards: cards.length,
-            summary: document.getElementById('summary').textContent,
+            summary: sum ? sum.textContent : '',
             error: err && !err.classList.contains('hidden') ? err.textContent : null,
-            perms: document.getElementById('perm-diff').textContent,
+            perms: pd ? pd.textContent : '',
           };
-        })()`).then((v) => (v && v.cards >= 2 ? v : null)),
+        })()`).catch(() => null).then((v) => (v && v.cards >= 2 ? v : null)),
       { label: 'options rendered', timeoutMs: 12000 }
     );
     record(
@@ -531,6 +535,117 @@ async function main() {
       Array.isArray(coreTags) && coreTags.length === 2 ? 'PASS' : 'FAIL',
       JSON.stringify(coreTags)
     );
+
+    // ---------- T11 广告过滤：真实 dNR 规则安装 ----------
+    // 这一项验的是「模块真的把规则装进了浏览器」，不是"规则算对了"。
+    // 后者在 node 测试里覆盖（tests/filters.test.js 32 项 + tests/adblock.test.js 23 项）。
+
+    // 前置：adblock 默认关闭，必须先经设置页正规开关打开。
+    // 这一步顺带验了「禁用模块的消息真的被拦」——直接调 adblock.apply 会拿到
+    // MODULE_DISABLED，说明模块开关不是装饰。
+    const blockedWhileDisabled = await options.call(
+      `chrome.runtime.sendMessage({ type: 'adblock.apply', mode: 'basic' })`
+    );
+    record(
+      'T11pre',
+      '广告过滤默认关闭时，其消息被 MODULE_DISABLED 拦下',
+      blockedWhileDisabled && blockedWhileDisabled.ok === false &&
+        blockedWhileDisabled.error === 'MODULE_DISABLED'
+        ? 'PASS'
+        : 'FAIL',
+      JSON.stringify(blockedWhileDisabled)
+    );
+
+    const enableAdblock = await options.call(
+      `chrome.runtime.sendMessage({ type: 'modules.set-enabled', id: 'adblock', enabled: true })`
+    );
+    record(
+      'T11pre2',
+      '通过设置页接口启用广告过滤',
+      enableAdblock && enableAdblock.ok ? 'PASS' : 'FAIL',
+      JSON.stringify(enableAdblock)
+    );
+
+    const applyBasic = await options.call(
+      `chrome.runtime.sendMessage({ type: 'adblock.apply', mode: 'basic' })`
+    );
+    const rulesBasic = await options.call(
+      `chrome.declarativeNetRequest.getDynamicRules().then(r => ({
+         count: r.length,
+         types: [...new Set(r.map(x => x.action.type))].sort(),
+         maxPriority: Math.max(0, ...r.map(x => x.priority)),
+       }))`
+    );
+    record(
+      'T11',
+      '广告过滤 basic 档：真实安装动态规则',
+      applyBasic && applyBasic.ok && rulesBasic && rulesBasic.count > 0
+        ? 'PASS'
+        : 'FAIL',
+      `apply=${JSON.stringify(applyBasic)} installed=${JSON.stringify(rulesBasic)}`
+    );
+
+    // ---------- T11b strict 档规则更多且含 redirect ----------
+    const applyStrict = await options.call(
+      `chrome.runtime.sendMessage({ type: 'adblock.apply', mode: 'strict' })`
+    );
+    const rulesStrict = await options.call(
+      `chrome.declarativeNetRequest.getDynamicRules().then(r => ({
+         count: r.length,
+         types: [...new Set(r.map(x => x.action.type))].sort(),
+       }))`
+    );
+    record(
+      'T11b',
+      'strict 档规则数更多，且包含跟踪参数剔除（redirect）',
+      applyStrict && applyStrict.ok &&
+        rulesStrict &&
+        rulesStrict.count > rulesBasic.count &&
+        rulesStrict.types.includes('redirect')
+        ? 'PASS'
+        : 'FAIL',
+      `apply=${JSON.stringify(applyStrict)} installed=${JSON.stringify(rulesStrict)}`
+    );
+
+    // ---------- T11c off 档真的清空 ----------
+    const applyOff = await options.call(
+      `chrome.runtime.sendMessage({ type: 'adblock.apply', mode: 'off' })`
+    );
+    const rulesOff = await options.call(
+      `chrome.declarativeNetRequest.getDynamicRules().then(r => r.length)`
+    );
+    record(
+      'T11c',
+      'off 档清空全部动态规则（不是"有规则但不生效"）',
+      applyOff && applyOff.ok && rulesOff === 0 ? 'PASS' : 'FAIL',
+      `remaining=${rulesOff}`
+    );
+
+    // ---------- T11d 豁免域名提升为 allowAllRequests 且优先级最高 ----------
+    const applyAllow = await options.call(
+      `chrome.runtime.sendMessage({
+         type: 'adblock.apply', mode: 'basic', allowDomains: ['localhost']
+       })`
+    );
+    const allowRules = await options.call(
+      `chrome.declarativeNetRequest.getDynamicRules().then(r => r
+         .filter(x => x.action.type === 'allowAllRequests')
+         .map(x => ({ pri: x.priority, domains: x.condition.requestDomains })))`
+    );
+    record(
+      'T11d',
+      '豁免域名生成 allowAllRequests 规则',
+      applyAllow && applyAllow.ok &&
+        Array.isArray(allowRules) &&
+        allowRules.length === 1 &&
+        allowRules[0].domains.includes('localhost')
+        ? 'PASS'
+        : 'FAIL',
+      JSON.stringify(allowRules)
+    );
+
+    // 复原：把过滤关掉，避免影响后续用例
+    await options.call(`chrome.runtime.sendMessage({ type: 'adblock.apply', mode: 'off' })`);
 
     // ---------- T8c 错误 entryId ----------
     const badAuth = await popup.call(

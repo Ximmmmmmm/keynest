@@ -168,7 +168,13 @@ export class ModuleRegistry {
     await m.configView.set('enabled', enabled);
   }
 
-  /** 所有模块的公开描述（给设置页用；不含 handler）。 */
+  /**
+   * 所有模块的公开描述（给设置页用；不含 handler）。
+   *
+   * `config` 里每个键返回的是**当前值**，不是 schema。
+   * 设置页需要知道"现在是什么"才能渲染选中项；schema 的细节（范围、枚举值）
+   * 由 `configSchema` 单独给出——两者混在一起会让前端只能靠猜。
+   */
   list() {
     return [...this.modules.values()].map((m) => ({
       id: m.id,
@@ -177,7 +183,31 @@ export class ModuleRegistry {
       requires: [...m.requires],
       enabled: this.isEnabled(m.id),
       config: m.configView.all(),
+      configSchema: this.configSchema(m.id),
     }));
+  }
+
+  /**
+   * 某个模块的配置 schema（形状：`{ key: { type, values?, min?, max?, ... } }`）。
+   *
+   * 不含 `default`——默认值已经体现在 `list().config` 的当前值里，
+   * 再给一遍只会让前端纠结该信哪个。
+   */
+  configSchema(moduleId) {
+    const schema = this.config.schemas.get(moduleId);
+    if (!schema) return {};
+    const out = Object.create(null);
+    for (const [key, s] of Object.entries(schema)) {
+      out[key] = {
+        type: s.type,
+        ...(s.values ? { values: [...s.values] } : {}),
+        ...(s.min !== undefined ? { min: s.min } : {}),
+        ...(s.max !== undefined ? { max: s.max } : {}),
+        ...(s.maxLength !== undefined ? { maxLength: s.maxLength } : {}),
+        ...(s.integer !== undefined ? { integer: s.integer } : {}),
+      };
+    }
+    return out;
   }
 
   /**

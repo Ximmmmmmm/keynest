@@ -21,6 +21,7 @@ const els = {
   summary: document.getElementById('summary'),
   permDiff: document.getElementById('perm-diff'),
   error: document.getElementById('error'),
+  hint: document.getElementById('hint'),
 };
 
 /** 能力名 → 用户能看懂的中文。没列出的原样显示。 */
@@ -51,6 +52,63 @@ function showError(text) {
 
 function label(cap) {
   return CAPABILITY_LABEL[cap] || cap;
+}
+
+/**
+ * 某个模块的档位选择器。
+ *
+ * 只对声明了 `config.mode` 的模块渲染。这样设置页不需要知道
+ * "广告过滤有档位"这种事——模块在 schema 里说了，页面就渲染。
+ */
+function renderModePicker(m) {
+  const schema = (m.configSchema && m.configSchema.mode) || null;
+  if (!schema || schema.type !== 'enum') return null;
+  const current = m.config && m.config.mode;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'mode';
+
+  const label = document.createElement('span');
+  label.className = 'mode-label';
+  label.textContent = '过滤强度';
+
+  const select = document.createElement('select');
+  const MODE_TEXT = {
+    off: '关闭过滤',
+    basic: '基础（只拦专用广告/跟踪域名）',
+    strict: '严格（追加跟踪器与参数剔除）',
+  };
+  for (const v of schema.values || []) {
+    const opt = document.createElement('option');
+    opt.value = v;
+    opt.textContent = MODE_TEXT[v] || v;
+    if (v === current) opt.selected = true;
+    select.append(opt);
+  }
+
+  select.addEventListener('change', async () => {
+    select.disabled = true;
+    const res = await chrome.runtime.sendMessage({
+      type: 'adblock.apply',
+      mode: select.value,
+    });
+    select.disabled = false;
+    if (!res || !res.ok) {
+      showError(`切换过滤强度失败：${(res && res.error) || '未知错误'}`);
+      return;
+    }
+    showError('');
+    showHint(`已切换为「${MODE_TEXT[select.value] || select.value}」，规则数 ${res.rules}`);
+  });
+
+  wrap.append(label, select);
+  return wrap;
+}
+
+/** 临时提示（不打断操作）。 */
+function showHint(text) {
+  els.hint.textContent = text;
+  els.hint.classList.remove('hidden');
 }
 
 function renderModule(m, canToggle) {
@@ -117,6 +175,8 @@ function renderModule(m, canToggle) {
   }
 
   card.append(head, desc, perms);
+  const picker = renderModePicker(m);
+  if (picker) card.append(picker);
   return card;
 }
 
