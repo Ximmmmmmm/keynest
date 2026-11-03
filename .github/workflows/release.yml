@@ -75,6 +75,24 @@ jobs:
         working-directory: rust
         run: cargo test --workspace
 
+      # 扩展测试需要 Node。release 流程此前完全没装 Node——
+      # 光加测试步骤而不装 Node，只会把「node: command not found」带进发布。
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "24"
+
+      # 扩展的测试也要在发布前跑一遍。
+      #
+      # CI 会跑扩展测试，但 CI 跑的是**分支**代码；发布跑的是 **tag 指向的代码**。
+      # 如果 tag 是从某个没跑过 CI 的分支打的，扩展坏了也会照样发出去。
+      - name: 扩展测试
+        working-directory: browser-extension
+        run: node --test tests/*.test.js
+
+      - name: 扩展装配自检
+        working-directory: browser-extension
+        run: node scripts/selfcheck.mjs
+
   # ------------------------------------------------------------------ #
   # 依赖审计：必须跑在 Linux。
   # cargo-deny-action 是 Docker 容器型 action，Windows/macOS runner
