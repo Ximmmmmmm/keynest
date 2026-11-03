@@ -38,6 +38,22 @@ function ok(what, detail) {
   notes.push(`${what}${detail ? ` — ${detail}` : ''}`);
 }
 
+/**
+ * 从 `release.yml` 里读出扩展文件的打包白名单。
+ *
+ * 抽成函数是因为现在有两处要用：双向比对、以及传递依赖检查。
+ * 两处各写一份正则，将来改了白名单的写法就会只更新一处。
+ *
+ * @returns {string[]|null} 读不出来时返回 null（调用方各自报错）
+ */
+function whitelistFiles() {
+  const yml = read('.github/workflows/release.yml');
+  if (yml === null) return null;
+  const m = yml.match(/\$files\s*=\s*@\(([\s\S]*?)\n\s*\)/);
+  if (!m) return null;
+  return [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+}
+
 function read(rel) {
   const p = path.join(REPO, rel);
   if (!fs.existsSync(p)) {
@@ -211,6 +227,80 @@ for (const f of [
       } else {
         ok('扩展的运行时文件都在白名单里', `${actual.length} 个`);
       }
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 4a2) 扩展的**传递**依赖必须都在白名单里                               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 从 service-worker / content-script / popup / options 出发，
+ * 沿着 `import ... from './x.js'` 走一遍，检查闭包里每个文件都在白名单里。
+ *
+ * # 为什么「文件存在」不够
+ *
+ * 前面那条检查只确认「白名单里的文件存在」。但真正决定扩展能不能跑的
+ * 是**反过来**：运行时 import 的模块是不是都在包里。
+ *
+ * 漏一个的后果是扩展装上直接白屏，而打包阶段一切正常——
+ * 因为那个文件确实存在于仓库里，只是没被复制进 zip。
+ *
+ * 这个项目已经吃过一次亏：白名单漏了 5 个 lib 文件，
+ * 装上就白屏。当时是靠人工比对发现的。
+ *
+ * # 局限
+ *
+ * 只看静态 `from './...'`。动态 import、拼接路径、
+ * 以及 `chrome.scripting.executeScript({files:[...]})` 里的字符串
+ * 都不在覆盖范围。但本项目这几处都是静态写法，覆盖已经足够。
+ */
+{
+  const extRoot = path.join(REPO, 'browser-extension');
+  const wl = whitelistFiles();
+  if (wl && fs.existsSync(extRoot)) {
+    const seen = new Set();
+    const outside = [];
+    const unreadable = [];
+
+    const visit = (rel) => {
+      if (seen.has(rel)) return;
+      seen.add(rel);
+      if (!wl.includes(rel)) outside.push(rel);
+
+      const full = path.join(extRoot, rel);
+      if (!fs.existsSync(full)) return;
+      let src;
+      try {
+        src = fs.readFileSync(full, 'utf8');
+      } catch {
+        unreadable.push(rel);
+        return;
+      }
+      for (const m of src.matchAll(/from\s+['"](\.\.?\/[^'"]+)['"]/g)) {
+        visit(path.posix.normalize(path.posix.join(path.posix.dirname(rel), m[1])));
+      }
+    };
+
+    for (const entry of [
+      'background/service-worker.js',
+      'content/content-script.js',
+      'popup/popup.js',
+      'options/options.js',
+    ]) {
+      visit(entry);
+    }
+
+    if (outside.length) {
+      fail(
+        '扩展运行时会 import 但不在白名单里的文件（装上会白屏）',
+        [...new Set(outside)].join(', '),
+      );
+    } else if (unreadable.length) {
+      fail('扩展文件读不出来', unreadable.join(', '));
+    } else {
+      ok('扩展的传递依赖都在白名单里', `${seen.size} 个`);
     }
   }
 }
