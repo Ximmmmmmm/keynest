@@ -28,7 +28,22 @@ export function createFillPanel(deps) {
       // 1) 问 KeyNest 是否在线、是否解锁
       const status = await host.send('status');
       if (!status || !status.ok) {
-        host.el('p', 'note', 'KeyNest 未运行。请先打开钥巢。');
+        // **区分两种失败**。
+        //
+        // NATIVE_HOST_MISSING：浏览器根本没找到桥接宿主——
+        // 要么没装、要么没在钥巢的「设置 → 浏览器」里登记。
+        // HOST_DISCONNECTED：宿主找到了，但桌面程序没运行或已锁定。
+        //
+        // 两者都提示「KeyNest 未运行」的话，用户会去开钥巢——
+        // 而开了也没用，因为真正缺的是桥接登记。
+        const code = status && status.error;
+        if (code === 'NATIVE_HOST_MISSING') {
+          host.el('p', 'note error', '浏览器桥接未安装。请在钥巢的「设置 → 浏览器」里安装。');
+        } else if (code === 'HOST_DISCONNECTED') {
+          host.el('p', 'note', 'KeyNest 未运行。请先打开钥巢。');
+        } else {
+          host.el('p', 'note', 'KeyNest 未运行。请先打开钥巢。');
+        }
         return;
       }
       if (status.data && status.data.locked) {
