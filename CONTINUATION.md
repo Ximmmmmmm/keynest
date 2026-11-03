@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-04 02:00 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`a18cfb5`
+> 最后更新：2026-11-04 03:30 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`62a0040`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -19,6 +19,7 @@
 | --- | --- | --- |
 | 无头验收：扩展 | **11** | `node test/acceptance/extension-headless.mjs` |
 | 无头验收：填充页面侧 | **6** | `node test/acceptance/fill-headless.mjs` |
+| **GUI 端到端验收** | **47** | `node test/acceptance/run.mjs`（`--gui` 才进本地 CI） |
 | Rust | **372** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **494** | `cd browser-extension && node --test tests/*.test.js` |
@@ -467,9 +468,13 @@ sha256sum 列表 / 敏感检查白名单 / Release 附件列表必须互相覆�
 加上授权状态机的 20+ 项单元测试与桥接协议的三项跨端检查，
 「无人值守时能自动守住的」已经覆盖到桥接链路的绝大部分。
 
-**GUI 端到端验收仍需要有人在机器空闲时实际跑一次**——
-它验证的是真实窗口下的字体、高 DPI、输入法与真实剪贴板行为，
-这些自动化替代不了。
+**GUI 端到端验收已完成：47/47 通过。**
+第一次跑就抓到一个真实问题——`T17c` 断言的是旧语义
+（第 23 轮把「关闭夜间模式」改成「保留站点记忆」，改了单元测试
+却忘了改这条验收测试）。修完 47/47 全绿，
+且真实库 md5 未变、注册表前后都是 False。
+
+现在「解锁 → 桥接 → 填充」的完整链路**有了端到端证据**。
 
 ## 10. 审查方法记录（下一轮可复用）
 
