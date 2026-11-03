@@ -453,3 +453,67 @@ function snapshot(doc) {
   };
   return ser(doc.documentElement);
 }
+
+/* ============================ 临时退出 vs 忘记 ============================ */
+
+/** 只负责回答"这个 tab 的 URL 是什么"的假 webNavigation。 */
+function fakeNav(url) {
+  return { getFrame: async () => ({ url }) };
+}
+
+/** 带按站点记忆的 ctx。 */
+function memCtx(initial = {}) {
+  const store = { width: 680, theme: 'auto', readerSites: '[]', remember: true, ...initial };
+  // 返回 { ctx, store }：`ctx` 是 handler 期望的那个对象（带 config），
+  // `store` 是底层存储，用来断言"名单有没有被改"。
+  return {
+    ctx: {
+      config: {
+        get: (k) => store[k],
+        set: async (k, v) => {
+          store[k] = v;
+        },
+      },
+    },
+    store,
+  };
+}
+
+/**
+ * 「退出阅读模式」不该把站点记忆一起删掉。
+ *
+ * 用户只是想看一眼原始页面布局，点一下退出——如果连记忆都没了，
+ * 他下次还得重新点开，而且完全不知道刚才顺手删掉了什么。
+ */
+test('FAIL-SAFE: 临时退出保留站点记忆', async () => {
+  const { ctx, store } = memCtx({ readerSites: '["a.test"]' });
+  const m = createReaderModule({ scripting: fakeScripting(), webNavigation: fakeNav('https://a.test/x') });
+  const h = m.handlers.find((x) => x.type === 'reader.toggle');
+
+  await h.handle({ tabId: 1, action: 'uninstall' }, ctx);
+  assert.deepEqual(
+    JSON.parse(store.readerSites),
+    ['a.test'],
+    '临时退出不该删掉记忆'
+  );
+});
+
+/** 显式 `forget: true` 才真的从名单移除。 */
+test('PASS: forget:true 才移除站点记忆', async () => {
+  const { ctx, store } = memCtx({ readerSites: '["a.test"]' });
+  const m = createReaderModule({ scripting: fakeScripting(), webNavigation: fakeNav('https://a.test/x') });
+  const h = m.handlers.find((x) => x.type === 'reader.toggle');
+
+  await h.handle({ tabId: 1, action: 'uninstall', forget: true }, ctx);
+  assert.deepEqual(JSON.parse(store.readerSites), []);
+});
+
+/** 开启仍然要写入名单。 */
+test('PASS: 开启写入站点记忆', async () => {
+  const { ctx, store } = memCtx();
+  const m = createReaderModule({ scripting: fakeScripting(), webNavigation: fakeNav('https://a.test/x') });
+  const h = m.handlers.find((x) => x.type === 'reader.toggle');
+
+  await h.handle({ tabId: 1, action: 'install' }, ctx);
+  assert.deepEqual(JSON.parse(store.readerSites), ['a.test']);
+});

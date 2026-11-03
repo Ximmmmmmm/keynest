@@ -312,6 +312,19 @@ export function createReaderPanel(deps) {
       note.className = 'panel-note hidden';
       host.section.append(note);
 
+      // 已开启时额外给一个「以后都别自动开」的入口。
+      //
+      // 主按钮的行为是**临时退出**（保留站点记忆），对应的选项必须在这里，
+      // 否则用户想彻底关掉这个站点时会以为「退出」就是全部——
+      // 结果下次刷新又自动开，反复几次就再也不用这个功能了。
+      let forgetBtn = null;
+      if (active) {
+        forgetBtn = document.createElement('button');
+        forgetBtn.className = 'linkish';
+        forgetBtn.textContent = '以后不再自动为本站开启';
+        host.section.append(forgetBtn);
+      }
+
       btn.addEventListener('click', async () => {
         btn.disabled = true;
         const res = await host.send('reader.toggle', {
@@ -336,6 +349,25 @@ export function createReaderPanel(deps) {
         host.section.replaceChildren();
         await panel.render(host);
       });
+
+      if (forgetBtn) {
+        forgetBtn.addEventListener('click', async () => {
+          forgetBtn.disabled = true;
+          const res = await host.send('reader.toggle', {
+            tabId,
+            action: 'uninstall',
+            forget: true,
+          });
+          forgetBtn.disabled = false;
+          if (!res || !res.ok) {
+            host.error(`操作失败：${(res && res.error) || '未知错误'}`);
+            return;
+          }
+          host.error(null);
+          host.section.replaceChildren();
+          await panel.render(host);
+        });
+      }
     },
   };
   return panel;

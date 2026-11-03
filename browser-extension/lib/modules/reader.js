@@ -268,12 +268,22 @@ export function createReaderModule(deps) {
 
           // 按站点记忆：只有注入成功才写名单。
           // 注入失败还记成"已开启"，下次加载会自动尝试、又失败——用户看到开关自己跳。
+          //
+          // # 关闭分两种，不能混为一谈
+          //
+          // `forget: true`（设置页里"不再自动"）——真的从名单里移除；
+          // 否则（在页面上点"退出阅读模式"）——只本次关闭，**保留记忆**。
+          //
+          // 原来无论哪种都会 `mem.disable(host)`，于是用户只是想看一眼原始
+          // 页面布局，就把这个站点的记忆一起删了：下次还得重新点开，
+          // 而他并不知道刚才顺手删掉了什么。
           if (ctx.config.get('remember')) {
             const host = await hostOfTab(deps, tabId);
             if (host) {
               const mem = createSiteMemory(ctx.config, 'reader');
               if (action === 'install') await mem.enable(host);
-              else await mem.disable(host);
+              else if (msg.forget === true) await mem.disable(host);
+              // 否则只是本次退出：名单保持不动
             }
           }
 

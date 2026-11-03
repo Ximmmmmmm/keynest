@@ -166,3 +166,21 @@ footer {
   flex-wrap: wrap;
   gap: 6px;
 }
+
+/* 次级操作：看起来像链接而不是按钮。
+   用于「以后不再自动为本站开启」这类低频、但需要能被找到的动作——
+   做成按钮会和主操作抢注意力。 */
+button.linkish {
+  background: none;
+  border: none;
+  padding: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  text-decoration: underline;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+
+button.linkish:hover { color: var(--accent); }
+button.linkish:disabled { opacity: 0.55; cursor: not-allowed; }
