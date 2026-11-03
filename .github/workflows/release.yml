@@ -168,6 +168,11 @@ jobs:
             2. 首次启动会让你设置主密码（至少 12 位，无法找回）。
             3. 数据默认保存在 %LOCALAPPDATA%\KeyNest\vault.dat。
                若检测到旧的 %APPDATA%\KeyNest\vault.dat，会继续使用那里的库。
+               
+               浏览器扩展
+                 keynest-native-host.exe 是扩展与本程序之间的通信宿主。
+                 不带它，扩展装了也连不上——设置里的「安装浏览器桥接」
+                 会把它复制到 %LOCALAPPDATA%\KeyNest\bin\ 并写好注册表项。
 
           注意
             * 绿色版不写注册表、不需要管理员权限，删掉 exe 即卸载。
