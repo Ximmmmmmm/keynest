@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 13:45 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`61b890b`
+> 最后更新：2026-11-03 14:15 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`5bc3f67`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -80,6 +80,8 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `16668ae` | **系统空闲未知时自动锁定永久失效**（密码库一直开着） | **P1 安全** |
 | `02c362e` | 删掉只改内存不落盘的死 API `replace_data` | P3 代码健康 |
 | `61b890b` | **已提交的 ci.yml 是非法 YAML —— CI 静默失效数轮** | **P0 工程** |
+| `3e51973` | `keynest-paths` 测试只在 Windows 跑；legacy 作业漏跑 4 个测试文件 | P2 工程 |
+| `5bc3f67` | 本地 CI 复现脚本与 ci.yml 会悄悄漂移 | P2 工程 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
