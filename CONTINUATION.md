@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 15:40 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`7b21be0`
+> 最后更新：2026-11-03 16:45 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`6edd51e`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **331** | `cd rust && cargo test --workspace` |
+| Rust | **341** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **494** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -88,6 +88,10 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `aa6b25f` | 阅读模式同样缺站点管理（与夜间模式对称） | P1 可用性 |
 | `2b8fe01` | **条目列表每帧渲染全部条目**（大密码库直接卡死） | **P1 性能** |
 | `7b21be0` | 搜索每个字段都 `to_lowercase()` 分配内存（慢 8.7 倍） | P1 性能 |
+| `8a2cedc` | 无头 GUI 渲染测试（**新能力**：不开窗口验证渲染路径） | P2 测试能力 |
+| `0524da7` | 18 种筛选×排序组合 + 空库渲染覆盖 | P2 测试 |
+| `0da492e` | 设置页 5 分区 + 编辑框渲染覆盖 | P2 测试 |
+| `6edd51e` | CSV 转义往返护栏；**本地 CI 脚本自己有个 bug**（`env` + shell 函数） | P1 工具 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
@@ -252,6 +256,30 @@ YAML 节点」），并接进了 CI 与 release 流程。
 
 **教训**：CI 配置本身也是代码，也要有检查。
 凡是「手工维护、错了要等到发布才暴露」的东西，都该写成一个能跑的检查。
+
+## 9b. 一条新的测试能力：无头渲染 GUI（**重要**）
+
+egui 的 `Context::run_ui` 可以在**没有窗口、没有 GPU** 的情况下跑完一帧，
+返回 `FullOutput`——里面有这一帧画出的所有图元。
+
+于是「渲染了多少行」「某个面板会不会崩」都变成**可以断言的数字**，
+而不再只能靠「打开程序看看」。
+
+用法见 `rust/keynest-egui/tests/gui_headless.rs`（8 条测试）。
+一个坑：`FullOutput.textures_delta` 必须被消费，否则 drop 时 panic；
+无头渲染直接 `textures_delta.clear()`。
+
+**为什么这条能力重要**：在这之前，GUI 的渲染逻辑完全没有自动化保护。
+虚拟滚动那种「界面看起来正常、只是变卡」的退化，
+手工观察永远发现不了。
+
+## 9c. 一个反复踩的坑：改完只跑测试、不跑 fmt/clippy
+
+本轮跑 `bash scripts/ci-local.sh` 时抓到两处：
+`cargo fmt --check` 失败（跨行字符串没格式化）、
+clippy 失败（`let mut` 但没修改）。
+
+**每次改完代码，跑完整脚本，不要只跑测试。**
 
 ## 10. 审查方法记录（下一轮可复用）
 
