@@ -169,6 +169,10 @@ jobs:
         run: |
           $ext = "ext-stage"
           New-Item -ItemType Directory -Force -Path $ext | Out-Null
+          # 目标目录自己建一个，不依赖前面的步骤。
+          # 隐式依赖看着省事，但一旦有人调整步骤顺序，
+          # 报错会是「路径不存在」——完全指不到真正的原因。
+          New-Item -ItemType Directory -Force -Path "release-stage" | Out-Null
 
           $files = @(
             "manifest.json",
@@ -198,18 +202,28 @@ jobs:
             Copy-Item $src $dst
           }
 
-          # 版本必须与桌面程序一致，否则用户装到两个不同版本会看到
-          # 「扩展说协议 v1、桌面程序说 v2」这种没法排查的问题。
-          $mf = Get-Content "browser-extension/manifest.json" -Raw | ConvertFrom-Json
-          $pkg = Get-Content "browser-extension/package.json" -Raw | ConvertFrom-Json
-          $ver = "${env:REF_NAME}".TrimStart("v")
-          if ($mf.version -ne $ver) { throw "扩展 manifest 版本 $($mf.version) 与标签 $ver 不一致" }
-          if ($pkg.version -ne $ver) { throw "扩展 package.json 版本 $($pkg.version) 与标签 $ver 不一致" }
+          # 扩展有**自己独立**的版本号（0.13.x），与桌面程序（0.4.x）不是一套。
+          # 所以这里检查的是扩展**内部**的一致性：manifest 与 package.json 必须相同。
+          #
+          # 曾经写成「扩展版本必须等于 tag 版本」——那会让每次发布都失败，
+          # 因为两套版本号从来就不相等。
+          # **必须显式指定 UTF-8**。
+          #
+          # Windows PowerShell 5.1 的 `Get-Content -Raw` 用系统 ANSI 码页读文件，
+          # package.json 里的中文描述会被读坏，ConvertFrom-Json 直接报错：
+          # 「无效的 JSON 文法」。GitHub 的 pwsh 是 7.x（默认 UTF-8）所以碰不到，
+          # 但本地用 5.1 跑就炸——而且报错完全指不到真正的原因。
+          $mf = Get-Content "browser-extension/manifest.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+          $pkg = Get-Content "browser-extension/package.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($mf.version -ne $pkg.version) {
+            throw "扩展版本不一致：manifest $($mf.version) vs package.json $($pkg.version)"
+          }
+          $extVer = $mf.version
 
           # 装成一个 zip：用户在 Chrome/Edge 的「加载已解压的扩展程序」
           # 里直接指向解压后的目录即可，不需要这个 zip；
           # zip 是给需要归档/分发的人用的。
-          Compress-Archive -Path "$ext/*" -DestinationPath "release-stage/KeyNest-Extension-$ver.zip"
+          Compress-Archive -Path "$ext/*" -DestinationPath "release-stage/KeyNest-Extension-$extVer.zip"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
