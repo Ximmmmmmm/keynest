@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 11:40 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`200ab9d`
+> 最后更新：2026-11-03 11:50 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`80bd423`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **288** | `cd rust && cargo test --workspace` |
+| Rust | **291** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **475** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -63,6 +63,9 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `b202ac0` | **SPA 路由监听从未真正工作**（隔离世界与主世界不相通） | **P1 功能性** |
 | `7f7e450` | 扩展的 475 项测试**从未进过 CI** | P1 工程 |
 | `200ab9d` | 对端断开被报成 IO 错误（正常连接结束却像故障） | P1 健壮性 |
+| `cbaad9f` | 导入报告不统计「解析阶段就丢掉」的条目（用户看不到漏了什么） | P1 数据可发现性 |
+| `f201441` | 导出确认里的条数含回收站（说 500 实际 480） | P2 一致性 |
+| `80bd423` | 25 份阶段报告淹没真正的架构文档 | P2 文档组织 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
