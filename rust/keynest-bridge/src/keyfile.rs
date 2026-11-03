@@ -175,12 +175,40 @@ fn restrict_to_current_user(_path: &Path) -> Result<(), BridgeError> {
 mod tests {
     use super::*;
 
+    /// 测试用的临时目录，**drop 时自动删除**。
+    ///
+    /// # 为什么要有 Drop
+    ///
+    /// 原来 `tmpdir()` 只建目录、从不删目录本身
+    /// （`revoke()` 删的是目录里的密钥文件，不是目录）。
+    /// 每个测试留 5 个空目录，跑一次测试就积 5 个——
+    /// 本项目跑了二十多轮，用户 TEMP 里已经堆了 537 个
+    /// `kn-bridge-key-*` 目录。
+    ///
+    /// 空目录不占空间，但它会一直涨：用户看不到、也不会去清。
+    /// 测试应该自己收拾干净。
+    struct TestDir(PathBuf);
+
+    impl std::ops::Deref for TestDir {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            // 删不掉也不要 panic：测试失败时更要看到原来的错误。
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// 每个测试独立目录：几个测试并行跑，共用一个目录会互相覆盖。
-    fn tmpdir(tag: &str) -> PathBuf {
+    fn tmpdir(tag: &str) -> TestDir {
         let mut p = std::env::temp_dir();
         p.push(format!("kn-bridge-key-{}-{}", std::process::id(), tag));
         let _ = fs::create_dir_all(&p);
-        p
+        TestDir(p)
     }
 
     #[test]
