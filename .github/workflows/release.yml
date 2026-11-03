@@ -352,8 +352,19 @@ jobs:
           tag_name: ${{ env.REF_NAME }}
           name: "钥巢 KeyNest ${{ env.REF_NAME }}"
           body_path: release-notes.md
+          # 这份列表必须覆盖**全部**随包发布的文件。
+          #
+          # 原来漏了 keynest-native-host.exe 与 KeyNest-Extension-*.zip：
+          # 它们是浏览器桥接的必需产物，没上传的话
+          #   - 用户下载到的 Release 里没有原生宿主，桥接装不了
+          #   - SHA256SUMS 里有这两个文件的哈希，却找不到文件，校验会对不上
+          #
+          # 而 `fail_on_unmatched_files` 只管「列出来的文件存不存在」，
+          # 漏列它不会报错——所以这个缺口是静默的。
           files: |
             release-stage/KeyNest.exe
+            release-stage/keynest-native-host.exe
+            release-stage/KeyNest-Extension-*.zip
             release-stage/INSTALL.txt
             release-stage/README.md
             release-stage/README_EN.md

@@ -479,48 +479,32 @@ for (const rel of ['.github/workflows/ci.yml', '.github/workflows/release.yml'])
 }
 
 /* ------------------------------------------------------------------ */
-/* 4d) 发布流程的两份文件清单必须互相覆盖                                */
+/* 4d) 发布流程的三份文件清单必须互相覆盖                              */
 /* ------------------------------------------------------------------ */
 
 /**
- * `release.yml` 里有两处会列出「发布包里有哪些文件」：
+ * `release.yml` 里有**三处**会列出「发布时有哪些文件」：
  *
  * 1. `sha256sum ...` —— 给它算哈希的文件
  * 2. 敏感文件检查的 `grep -vE '^(...)$'` 白名单
+ * 3. `创建 Release` 那一步的 `files: |` 附件列表
  *
- * 两处**必须覆盖同一批文件**。第一处有、第二处没有，那第二个检查会把
- * 刚算过哈希的文件判成「预期之外」并 exit 1。
+ * 三者**必须覆盖同一批文件**，任一处漏了都会出问题：
  *
- * 实际发生过：白名单漏了 `keynest-native-host.exe` 与
- * `KeyNest-Extension-*.zip`，而前一步刚给它们算过哈希——
- * **发布永远会在这里失败**。这个作业从没真正跑过，所以一直没暴露。
+ * - 1 有、2 没有 → 敏感检查把刚算过哈希的文件判成「预期之外」，**发布 exit 1**
+ * - 1 有、3 没有 → SHA256SUMS 里有哈希但附件里没文件，用户校验对不上，
+ *   而且那个产物根本下载不到（浏览器桥接就装不了）
  *
- * 实现上刻意只用字符串切分，不写复杂正则——
- * 这个文件里已经被转义问题坑过两次了。
+ * 这两个缺口都真的存在过，而且都是**静默的**：
+ * `fail_on_unmatched_files` 只管「列出来的文件在不在」，漏列不报错。
  */
 {
   const yml = read('.github/workflows/release.yml');
   if (yml !== null) {
-    // ---- (a) sha256sum 之后、以反斜杠续行的那些文件名 ----
-    const idx = yml.indexOf('sha256sum KeyNest.exe');
-    const hashed = [];
-    if (idx !== -1) {
-      // 取到这一条命令结束（第一个不以反斜杠结尾的行）
-      const rest = yml.slice(idx + 'sha256sum'.length);
-      const cmdLines = [];
-      for (const raw of rest.split('\n')) {
-        const t = raw.trim();
-        cmdLines.push(t.replace(/\\$/, ''));
-        if (!t.endsWith('\\')) break;
-      }
-      for (const tok of cmdLines.join(' ').split(/[ \s]+/)) {
-        if (!tok || tok === '>') continue;
-        if (tok.includes('SHA256SUMS')) break;
-        hashed.push(tok);
-      }
-    }
+    // ---- 1) sha256sum 列的文件 ----
+    const hashed = listAfter(yml, 'sha256sum ', 'SHA256SUMS');
 
-    // ---- (b) 敏感文件检查白名单 ----
+    // ---- 2) 敏感文件检查白名单 ----
     const gIdx = yml.indexOf("grep -vE '^(");
     let allowed = [];
     if (gIdx !== -1) {
@@ -535,32 +519,86 @@ for (const rel of ['.github/workflows/ci.yml', '.github/workflows/release.yml'])
       }
     }
 
-    // ---- 比对（glob 用前缀） ----
-    const covered = (name) => {
+    // ---- 3) Release 附件列表 ----
+    const fIdx = yml.indexOf('files: |');
+    let assets = [];
+    if (fIdx !== -1) {
+      const rest = yml.slice(fIdx + 'files: |'.length);
+      for (const raw of rest.split('\n')) {
+        const t = raw.trim();
+        if (t === '') { if (assets.length) break; else continue; }
+        if (!t.startsWith('release-stage/')) break;
+        assets.push(t.slice('release-stage/'.length));
+      }
+    }
+
+    // glob 用前缀比
+    const covered = (name, list) => {
       if (name.includes('*')) {
         const prefix = name.split('*')[0];
-        return allowed.some((x) => x.startsWith(prefix));
+        return list.some((x) => x.startsWith(prefix));
       }
-      return allowed.includes(name);
+      return list.includes(name);
     };
 
-    if (hashed.length === 0 || allowed.length === 0) {
-      fail('release.yml 里找不到 sha256sum 列表或敏感文件检查白名单');
+    if (!hashed.length || !allowed.length || !assets.length) {
+      fail('release.yml 里有一处文件清单读不出来（发布流程结构变了？）');
     } else {
-      const missing = hashed.filter((h) => !covered(h));
-      if (missing.length) {
+      // 1 有、2 没有
+      const notAllowed = hashed.filter((h) => !covered(h, allowed));
+      if (notAllowed.length) {
         fail(
-          '发布包文件清单不一致（算过哈希但被敏感检查判为"预期之外"，发布必失败）',
-          missing.join(', '),
+          '敏感文件白名单漏了算过哈希的文件（发布必 exit 1）',
+          notAllowed.join(', '),
         );
-      } else {
-        ok('发布包的两份文件清单互相覆盖', `${hashed.length} 个`);
+      }
+      // 1 有、3 没有
+      const notShipped = hashed.filter((h) => !covered(h, assets));
+      if (notShipped.length) {
+        fail(
+          'Release 附件漏了算过哈希的文件（用户下载不到，校验也对不上）',
+          notShipped.join(', '),
+        );
+      }
+      if (!notAllowed.length && !notShipped.length) {
+        ok('发布流程的三份文件清单互相覆盖', `${hashed.length} 个`);
       }
     }
   }
 }
 
 /* ------------------------------------------------------------------ */
+
+/**
+ * 取 `marker` 之后、到 `stop` 之前，按空白切出来的 token 列表。
+ *
+ * 刻意用字符串切分而不是正则——这个文件被转义问题坑过多次。
+ *
+ * @param {string} text
+ * @param {string} marker
+ * @param {string} stop
+ * @returns {string[]}
+ */
+function listAfter(text, marker, stop) {
+  const i = text.indexOf(marker);
+  if (i === -1) return [];
+
+  const out = [];
+  // 逐行、逐 token 收集；反斜杠续行就继续下一行
+  for (const raw of text.slice(i + marker.length).split('\n')) {
+    const t = raw.trim();
+    const body = t.endsWith('\\') ? t.slice(0, -1) : t;
+    for (const tok of body.split(' ')) {
+      const v = tok.trim();
+      if (!v) continue;
+      if (v.includes(stop)) return out;
+      if (/^[></|&]+$/.test(v)) continue;
+      out.push(v);
+    }
+    if (!t.endsWith('\\')) break;
+  }
+  return out;
+}
 /* ------------------------------------------------------------------ */
 /* 4e) workflow 里的 action 必须 pin 到完整 SHA                          */
 /* ------------------------------------------------------------------ */
