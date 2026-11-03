@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 12:20 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`fce4a42`
+> 最后更新：2026-11-03 12:40 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`01188e5`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,9 +17,9 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **298** | `cd rust && cargo test --workspace` |
+| Rust | **309** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
-| 扩展单元 | **475** | `cd browser-extension && node --test tests/*.test.js` |
+| 扩展单元 | **480** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
 | 真实 Chrome 验收 | **46** | `node test/acceptance/run.mjs`（需启动浏览器） |
 
@@ -68,6 +68,12 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `80bd423` | 25 份阶段报告淹没真正的架构文档 | P2 文档组织 |
 | `28198d0` | 条目字段无长度上限（超长备注能让库再也写不进去） | **P1 数据完整性** |
 | `fce4a42` | **扩展从未进过发布包**（产品一半功能没有分发方式） | P1 发布准备度 |
+| `37ea621` | 上一轮的扩展打包步骤**三处会让发布直接失败** | P1 发布流程 |
+| `3becd08` | release 的 verify 不跑扩展测试、也没装 Node | P1 发布流程 |
+| `2b17d58` | 发布包**缺 native-host.exe**（扩展连不上的必要组件） | **P1 产品级** |
+| `518121f` | **产品从未注册 native messaging host**（扩展永远连不上） | **P1 产品级** |
+| `cf76106` | 扩展不显示自己的 ID（用户无法配置桥接） | P1 可用性 |
+| `1d8afef` | 设置里没有浏览器桥接入口 | P1 可用性 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
