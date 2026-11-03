@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 10:50 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`9fb4602`
+> 最后更新：2026-11-03 10:55 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`fa72b71`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -19,7 +19,7 @@
 | --- | --- | --- |
 | Rust | **279** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
-| 扩展单元 | **453** | `cd browser-extension && node --test tests/*.test.js` |
+| 扩展单元 | **468** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
 | 真实 Chrome 验收 | **46** | `node test/acceptance/run.mjs`（需启动浏览器） |
 
@@ -52,6 +52,8 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `67bf0e5` | TOTP 复制 TTL 被 `.max(3)` 拉长，剪贴板留过期码 | P1 安全 |
 | `f23b442` | 恢复留档（`vault.dat.corrupt-*`）界面完全不可见、无法清理 | P2 可用性 |
 | `9fb4602` | 恢复失败时还原失败被 `let _ =` 吞掉，用户不知道数据在哪 | P1 数据可发现性 |
+| `a1fb1c0` | 阅读模式「退出」会删掉站点记忆（想临时看一眼却永久关掉） | P1 语义 |
+| `fa72b71` | SPA 换页不重新应用站点偏好（单页应用里功能时灵时不灵） | P1 可用性 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
@@ -98,8 +100,8 @@ Rust workspace 根是 `rust/`；Windows 上需要
 
 | 项 | 说明 |
 | --- | --- |
-| SPA 路由变化 | 自动应用只在页面加载时跑一次，`pushState` 不会重新触发 |
-| 阅读模式的「只关这一次」 | 用户手动关掉会同时清掉站点名单，没有临时关闭的概念 |
+| ~~SPA 路由变化~~ | 已在 `fa72b71` 解决：监听 popstate/hashchange + 给 history 打补丁。<br>**尚未在真实浏览器的 SPA 站点上验证** |
+| ~~阅读模式的「只关这一次」~~ | 已在 `a1fb1c0` 解决：默认临时退出，`forget:true` 才移除记忆 |
 | ~~`.corrupt-*` 无清理入口~~ | 已在 `f23b442` 解决：设置页可列出并清空（带二次确认） |
 | `random_index` 的取值区间 | 当前实现拒绝 `v >= zone`，比理论必要略保守（不影响安全，仅效率） |
 
