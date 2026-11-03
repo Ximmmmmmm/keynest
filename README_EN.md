@@ -37,7 +37,8 @@ Three design rules:
 - Master-password unlock, idle auto-lock (uses the shorter of app-idle and system-idle)
 - Entries with title, username, password, URL, category, notes
 - Entry types: login, note, card, identity — and user-defined types with field templates
-- Custom fields (any key/value), each can be individually masked
+- Custom fields (user-defined key/value pairs, each length-bounded with a live
+  character counter), each can be individually masked
 - Search across title, username, URL, notes, category, type and custom field values
 - Category and type management (add / rename / delete, kept consistent with entries)
 - Favorites, and a recycle bin (soft delete → restore or permanently delete)

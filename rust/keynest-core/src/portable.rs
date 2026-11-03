@@ -272,8 +272,24 @@ pub fn import_csv(text: &str) -> Result<(Vec<Entry>, usize)> {
             .find_map(|c| headers.iter().position(|h| h == c))
     };
 
-    let i_title = col(&["name", "title", "标题", "名称"]);
-    let i_url = col(&["url", "login_uri", "website", "网址"]);
+    // 表头候选必须覆盖四种导出格式的**真实**表头：
+    //
+    //   Chrome / Edge : name, url, username, password, note
+    //   Firefox       : hostname, formSubmitURL, username, password
+    //   Bitwarden     : name, login_uri, login_username, login_password, notes, folder
+    //
+    // 之前漏了 Firefox 的 `hostname` / `formSubmitURL`：
+    // 它的 CSV 有 username/password 能匹配上，但**标题取不到值** →
+    // `into_entry()` 认为标题为空 → 整条被跳过 → 用户看到「导入 0 条」。
+    let i_title = col(&["name", "title", "hostname", "标题", "名称"]);
+    let i_url = col(&[
+        "url",
+        "login_uri",
+        "website",
+        "formsubmiturl",
+        "form_submit_url",
+        "网址",
+    ]);
     let i_user = col(&["username", "login_username", "login", "账号", "用户名"]);
     let i_pass = col(&["password", "login_password", "密码"]);
     let i_notes = col(&["notes", "note", "备注"]);
@@ -595,6 +611,87 @@ mod tests {
         assert_eq!(invalid, 0);
         assert_eq!(items[0].title, "t0");
         assert_eq!(items[1999].title, "t1999");
+    }
+
+    /// README 声称支持 Chrome / Edge / Firefox / Bitwarden 四种导出格式。
+    ///
+    /// 这条测试把四种格式的**真实表头**都跑一遍——
+    /// 「注释里写了支持」不算数，Firefox 那个缺陷就是这么藏了很久的：
+    /// 注释说支持，候选列表里却没有 Firefox 的表头。
+    #[test]
+    fn imports_every_advertised_csv_format() {
+        // Chrome / Edge
+        let chrome = concat!(
+            "name,url,username,password,note
+",
+            "GitHub,https://github.com,alice,hunter2,work
+",
+        );
+        let (items, _) = import_csv(chrome).expect("Chrome 格式应当能导入");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "GitHub");
+        assert_eq!(items[0].url, "https://github.com");
+        assert_eq!(items[0].password, "hunter2");
+
+        // Bitwarden
+        let bitwarden = concat!(
+            "folder,favorite,type,name,notes,fields,login_uri,login_username,login_password,login_totp
+",
+            "Social,1,login,Twitter,notes,,https://twitter.com,bob,p@ss,w0rd
+",
+        );
+        let (items, _) = import_csv(bitwarden).expect("Bitwarden 格式应当能导入");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Twitter");
+        assert_eq!(items[0].username, "bob");
+        assert_eq!(items[0].password, "p@ss");
+        assert_eq!(items[0].category, "Social");
+        assert!(items[0].favorite, "Bitwarden 用 1/0 表示收藏");
+
+        // Firefox（见下面那条专门的测试）
+        let firefox = concat!(
+            "\"hostname\",\"formSubmitURL\",\"username\",\"password\"
+",
+            "\"login.example.com\",\"https://login.example.com\",\"carol\",\"s3cret\"
+",
+        );
+        let (items, _) = import_csv(firefox).expect("Firefox 格式应当能导入");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "login.example.com");
+    }
+
+    /// Firefox 导出的 CSV 必须能导入。
+    ///
+    /// # 缺陷背景
+    ///
+    /// README 声称「按表头自动识别 Chrome / Edge / Firefox / Bitwarden」，
+    /// 但表头候选里只有 `name` / `title` 与 `url` / `login_uri`——
+    /// **Firefox 用的是 `hostname` 与 `formSubmitURL`**，两个都不匹配。
+    ///
+    /// 结果：Firefox 的 CSV 导进来时标题为空 → `into_entry()` 返回 None →
+    /// **整条被跳过**，用户看到「导入 0 条」。
+    ///
+    /// 这条测试守住「四种格式都真的能用」，而不只是「注释里说了」。
+    #[test]
+    fn imports_firefox_csv() {
+        // Firefox「导出密码 → CSV」的真实表头
+        let csv = concat!(
+            "\"hostname\",\"formSubmitURL\",\"username\",\"password\",\"httpRealm\",\"timeCreated\",\"timePasswordChanged\"
+",
+            "\"login.example.com\",\"https://login.example.com/signin\",\"alice@example.com\",\"hunter2\",\"\",\"1700000000000\",\"1700000000000\"
+",
+        );
+        let (items, invalid) = import_csv(csv).expect("Firefox 的 CSV 应当能导入");
+
+        assert_eq!(items.len(), 1, "Firefox 的条目不应被跳过");
+        assert_eq!(invalid, 0);
+        assert_eq!(items[0].title, "login.example.com", "标题应取 hostname");
+        assert_eq!(
+            items[0].url, "https://login.example.com/signin",
+            "网址应取 formSubmitURL"
+        );
+        assert_eq!(items[0].username, "alice@example.com");
+        assert_eq!(items[0].password, "hunter2");
     }
 
     /// 明文导出文件必须只有所有者可读写。
