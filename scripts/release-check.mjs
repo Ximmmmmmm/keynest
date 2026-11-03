@@ -649,6 +649,43 @@ function listAfter(text, marker, stop) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 4f) 桥接协议：扩展用的命令必须在 Rust 侧有定义                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 扩展通过 Native Messaging 向 `keynest-native-host.exe` 发命令，
+ * 再由它转成桥接协议发给 GUI 侧的 Rust 进程。
+ *
+ * 命令名是**字符串**，编译器不检查两边是否一致——
+ * 扩展写了 `vault.fil`，Rust 侧只有 `vault.fill`，
+ * 结果是运行时返回 UNKNOWN_COMMAND，用户只看到「填充失败」。
+ *
+ * # 只查一个方向
+ *
+ * **扩展用了但 Rust 没定义** = 真 bug（请求必然被拒）。
+ * 反过来「Rust 定义了但扩展没用」不是问题——
+ * `hello` 是握手用的，`vault.save` / `vault.conflict` 是刻意留的、
+ * 且 GUI 侧明确返回「尚未启用」的预留命令。
+ */
+{
+  const rs = read('rust/keynest-bridge/src/protocol.rs');
+  const js = read('browser-extension/lib/modules/vault.js');
+  if (rs !== null && js !== null) {
+    // Rust 侧：Command::X => "name"
+    const defined = [...rs.matchAll(/Command::\w+ => "([a-z.]+)"/g)].map((m) => m[1]);
+    // 扩展侧：deps.request('name', ...)
+    const used = [...new Set([...js.matchAll(/request\('([a-z.]+)'/g)].map((m) => m[1]))];
+
+    const unknown = used.filter((u) => !defined.includes(u));
+    if (unknown.length) {
+      fail('扩展用了 Rust 侧没定义的桥接命令（运行时会被拒）', unknown.join(', '));
+    } else {
+      ok('扩展用到的桥接命令 Rust 侧都有定义', `${used.length} 个`);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 5) 仓库里不能有敏感或调试文件                                        */
 /* ------------------------------------------------------------------ */
 
