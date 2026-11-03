@@ -217,6 +217,87 @@ fn every_filter_and_sort_combination_renders() {
     }
 }
 
+/// 渲染设置页（每个分区都点一遍）。
+///
+/// 设置页有 5 个分区，各自有独立的渲染代码路径。
+/// 设置页是用户**唯一**能改主密码、导入导出、清理回收站的地方——
+/// 这里崩了，用户就没有任何自救手段。
+fn render_settings_tab(tab: keynest_egui::views::settings::Tab) {
+    use keynest_core::vault::Settings;
+    use keynest_egui::views::settings::{SecuritySummary, SettingsContext, SettingsState};
+
+    let settings = Settings::default();
+    let ctx = SettingsContext {
+        categories: vec!["网站".into()],
+        types: vec![keynest_core::vault::TypeDef::new("账号", vec![])],
+        legacy: false,
+        kdf_algo: "argon2id".into(),
+        format: "v3".into(),
+        key_locked: Some(true),
+        kdf_ok: Some(true),
+        security: SecuritySummary {
+            total: 3,
+            weak: 1,
+            reused: 1,
+            with_totp: 0,
+            stale: 0,
+        },
+        leftovers: Vec::new(),
+        font_note: None,
+        dark: false,
+        bridge_installed: false,
+    };
+
+    let mut st = SettingsState::new(&settings, ctx);
+    st.tab = tab;
+
+    let context = Context::default();
+    let mut out = context.run_ui(RawInput::default(), |_ui: &mut Ui| {
+        let _ = keynest_egui::views::settings::show(&context, &mut st);
+    });
+    out.textures_delta.clear();
+}
+
+#[test]
+fn every_settings_tab_renders() {
+    use keynest_egui::views::settings::Tab;
+    for tab in [
+        Tab::Appearance,
+        Tab::Security,
+        Tab::Data,
+        Tab::Browser,
+        Tab::Danger,
+    ] {
+        render_settings_tab(tab);
+    }
+}
+
+#[test]
+fn the_edit_dialog_renders() {
+    // 编辑框是新增/修改条目的唯一入口。
+    // 里面有一堆 `unwrap` 与索引（模板字段、自定义字段行）。
+    use keynest_egui::views::edit::EditState;
+
+    // `EditState` 没有 Clone（含 Zeroizing），所以每个用例各构造一个。
+    let cases: Vec<Box<dyn Fn() -> EditState>> = vec![
+        Box::new(|| EditState::new_entry("网站".into())),
+        Box::new(|| EditState::from_entry(&entry(0))),
+    ];
+    for make in cases {
+        let ctx = Context::default();
+        let mut st = make();
+        let mut out = ctx.run_ui(RawInput::default(), |_ui: &mut Ui| {
+            let _ = keynest_egui::views::edit::show(
+                &ctx,
+                &mut st,
+                &["网站".to_string()],
+                &[keynest_core::vault::TypeDef::new("账号", vec![])],
+            );
+        });
+        out.textures_delta.clear();
+    }
+}
+
 #[test]
 fn renders_the_first_entries_at_the_top() {
     // 顶部应当显示最前面的条目——虚拟滚动算错了范围就会露馅。
