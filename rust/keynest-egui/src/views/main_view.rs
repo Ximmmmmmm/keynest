@@ -281,6 +281,14 @@ fn detail_panel(
     data: &VaultData,
     reveal: &mut Option<(Zeroizing<String>, Instant)>,
     just_copied: bool,
+    // 这一条在回收站里吗？
+    //
+    // 在回收站里**不提供显示/复制**。上一轮修了列表行的快捷图标，
+    // 详情面板是另一条路径——它照样把明文密码摆在那儿。
+    //
+    // 要恢复使用先点「恢复」。在回收站里看到明文，
+    // 会让人误以为「删掉」这件事没发生过。
+    in_trash: bool,
     intent: &mut MainIntent,
 ) {
     let p = theme::palette();
@@ -320,7 +328,10 @@ fn detail_panel(
         ui.add_space(16.0);
         ui.horizontal(|ui| {
             ui.label(theme::label("用户名"));
-            if !entry.username.is_empty()
+            // 回收站里连用户名也不给复制：与密码那条保持一致。
+            // 只封密码、留着账号，用户仍能把「已删除」的账号拿去登录。
+            if !in_trash
+                && !entry.username.is_empty()
                 && icons::button(ui, icons::Icon::User, "复制用户名").clicked()
             {
                 *intent = MainIntent::CopyUsername(entry.id.clone());
@@ -347,46 +358,64 @@ fn detail_panel(
             .filter(|(_, deadline)| *deadline > now)
             .map(|(pw, deadline)| (pw.to_string(), deadline.saturating_duration_since(now)));
 
-        ui.horizontal(|ui| {
-            match &showing {
-                Some((pw, left)) => {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(pw).size(14.0).monospace().color(p.text),
-                        )
-                        .truncate(),
-                    );
-                    ui.label(theme::caption(format!("{}s", left.as_secs())));
-                    if icons::button(ui, icons::Icon::EyeOff, "收起").clicked() {
-                        *intent = MainIntent::HideReveal;
+        if in_trash {
+            // 回收站里只显示占位符，不给「显示」也不给「复制」。
+            ui.label(
+                egui::RichText::new("•".repeat(entry.password.chars().count().clamp(6, 18)))
+                    .size(14.0)
+                    .color(p.muted),
+            );
+            ui.add_space(4.0);
+            ui.label(theme::caption(
+                "这一条在回收站里。要使用请先「恢复」——密码在回收站里不显示也不复制。",
+            ));
+        } else {
+            ui.horizontal(|ui| {
+                match &showing {
+                    Some((pw, left)) => {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(pw).size(14.0).monospace().color(p.text),
+                            )
+                            .truncate(),
+                        );
+                        ui.label(theme::caption(format!("{}s", left.as_secs())));
+                        if icons::button(ui, icons::Icon::EyeOff, "收起").clicked() {
+                            *intent = MainIntent::HideReveal;
+                        }
+                    }
+                    None => {
+                        ui.label(
+                            egui::RichText::new(
+                                "•".repeat(entry.password.chars().count().clamp(6, 18)),
+                            )
+                            .size(14.0)
+                            .color(p.muted),
+                        );
+                        if icons::button(ui, icons::Icon::Eye, "显示").clicked() {
+                            *intent = MainIntent::Reveal(entry.id.clone());
+                        }
                     }
                 }
-                None => {
-                    ui.label(
-                        egui::RichText::new(
-                            "•".repeat(entry.password.chars().count().clamp(6, 18)),
-                        )
-                        .size(14.0)
-                        .color(p.muted),
-                    );
-                    if icons::button(ui, icons::Icon::Eye, "显示").clicked() {
-                        *intent = MainIntent::Reveal(entry.id.clone());
-                    }
+                let (icon, tint) = if just_copied {
+                    (icons::Icon::CopyCheck, Some(p.success))
+                } else {
+                    (icons::Icon::Lock, None)
+                };
+                if icons::button_tinted(ui, icon, "复制密码", tint).clicked() {
+                    *intent = MainIntent::CopyPassword(entry.id.clone());
                 }
-            }
-            let (icon, tint) = if just_copied {
-                (icons::Icon::CopyCheck, Some(p.success))
-            } else {
-                (icons::Icon::Lock, None)
-            };
-            if icons::button_tinted(ui, icon, "复制密码", tint).clicked() {
-                *intent = MainIntent::CopyPassword(entry.id.clone());
-            }
-        });
+            });
+        } // end if !in_trash
     }
 
     // 动态验证码
-    if let Some(raw) = entry.totp.as_deref() {
+    //
+    // 回收站里同样不显示：TOTP 是**实时可用**的凭据，
+    // 把已删除条目的验证码摆在屏幕上，等于给了人一把还在生效的钥匙。
+    if in_trash {
+        // 什么都不渲染
+    } else if let Some(raw) = entry.totp.as_deref() {
         if let Ok(totp) = keynest_core::Totp::parse(raw) {
             ui.add_space(16.0);
             ui.label(theme::label("动态验证码"));
@@ -1165,7 +1194,15 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
                         .show(ui, |ui| {
                             ui.vertical(|ui| {
                                 ui.set_width(detail_w - 36.0);
-                                detail_panel(ui, entry, v.data, v.reveal, just_copied, &mut intent);
+                                detail_panel(
+                                    ui,
+                                    entry,
+                                    v.data,
+                                    v.reveal,
+                                    just_copied,
+                                    matches!(filter, Filter::Trash),
+                                    &mut intent,
+                                );
                             });
                         });
                 }

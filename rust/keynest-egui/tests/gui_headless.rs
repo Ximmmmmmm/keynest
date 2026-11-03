@@ -678,6 +678,109 @@ fn the_trash_list_never_offers_quick_copy() {
     assert!(leaked.is_empty(), "回收站里仍然存在快捷操作：{leaked:?}");
 }
 
+/// 回收站的**详情面板**同样不能显示或复制密码。
+///
+/// 上一轮修了列表行的快捷图标，但详情面板是另一条路径：
+/// 点中回收站里的条目，右侧面板照样有「显示」和「复制」按钮。
+///
+/// 这与列表行那个是同一个问题——用户把条目丢进回收站是因为
+/// 怀疑密码泄露，而这里还能一眼看到明文。
+#[test]
+fn the_trash_detail_panel_never_reveals_or_copies() {
+    use keynest_egui::views::main_view::{Filter, MainView, SortBy};
+
+    let mut data = data_with(1);
+    data.entries[0].deleted_at = Some("2026-01-01T00:00:00.000Z".into());
+    data.entries[0].password = "still-secret".into();
+    data.entries[0].username = "user".into();
+    data.entries[0].url = "https://example.test/".into();
+
+    let ctx = Context::default();
+    let mut search = String::new();
+    let mut filter = Filter::Trash;
+    let mut sort = SortBy::UpdatedDesc;
+    // 选中这一条，让详情面板显示出来
+    let mut selected = Some(data.entries[0].id.clone());
+    let mut reveal = None;
+    let mut new_cat = String::new();
+    let copy_banner: Option<(std::time::Instant, u32)> = None;
+
+    let mut run = |ctx: &Context, ev: Vec<egui::Event>| -> MainIntent {
+        let mut intent = MainIntent::None;
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                events: ev,
+                ..Default::default()
+            },
+            |ui: &mut Ui| {
+                intent = keynest_egui::views::main_view::show(
+                    ui,
+                    MainView {
+                        data: &data,
+                        search: &mut search,
+                        filter: &mut filter,
+                        sort: &mut sort,
+                        selected_id: &mut selected,
+                        reveal: &mut reveal,
+                        copy_banner: &copy_banner,
+                        new_category_buf: &mut new_cat,
+                        focus_search: false,
+                        idle_left_secs: 0,
+                        toast: None,
+                    },
+                );
+            },
+        );
+        out.textures_delta.clear();
+        intent
+    };
+
+    let _ = run(&ctx, vec![]);
+
+    // 扫整个窗口（详情面板在右侧）
+    let mut leaked: Vec<String> = Vec::new();
+    for y in (100..=760).step_by(16) {
+        for x in (300..=1270).step_by(16).map(|v| v as f32) {
+            let pos = egui::Pos2::new(x, y as f32);
+            let _ = run(&ctx, vec![egui::Event::PointerMoved(pos)]);
+            let _ = run(
+                &ctx,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                }],
+            );
+            let i = run(
+                &ctx,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+            );
+            match i {
+                MainIntent::Reveal(_) => leaked.push(format!("({x},{y}) 显示密码")),
+                MainIntent::CopyPassword(_) => leaked.push(format!("({x},{y}) 复制密码")),
+                MainIntent::CopyUsername(_) => leaked.push(format!("({x},{y}) 复制账号")),
+                MainIntent::CopyTotp(_) => leaked.push(format!("({x},{y}) 复制验证码")),
+                _ => {}
+            }
+        }
+    }
+
+    assert!(
+        leaked.is_empty(),
+        "回收站的详情面板仍然能拿到敏感内容：{leaked:?}"
+    );
+}
+
 /// 点击列表**下方**的空白区域不能选中任何条目。
 ///
 /// 命中测试写宽了（比如整块区域都算作行）就会出现
