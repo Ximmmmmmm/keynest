@@ -55,11 +55,14 @@ jobs:
 
       - name: Clippy
         working-directory: rust
-        run: cargo clippy -p keynest-core --all-targets -- -D warnings
+        run: cargo clippy -p keynest-core -p keynest-paths --all-targets -- -D warnings
 
       - name: 单元测试 + 集成测试（含健壮性/篡改测试）
         working-directory: rust
-        run: cargo test -p keynest-core --all-targets
+        # 带上 keynest-paths：它是**跨平台**的纯路径逻辑 crate，
+        # 它的测试理应在三个平台都跑，而不是只在 Windows 上跑。
+        # （keynest-bridge 依赖 Windows 命名管道，留给 gui-windows 作业。）
+        run: cargo test -p keynest-core -p keynest-paths --all-targets
 
   # ---------------------------------------------------------------- #
   # 桌面端：只保证 Windows 上的完整体验，这与发行目标一致
@@ -223,4 +226,23 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - name: 单元测试
-        run: node test/vault.test.js && node test/cli.test.js && node test/csv-discovery.test.js
+        # 跑**全部**测试文件，不是手写一串。
+        #
+        # 原来只跑了 vault / cli / csv-discovery 三个，
+        # 而 test/ 下其实有 7 个——import、export、import-view、launcher
+        # 全都没跑。其中导入导出是密码管理器的核心路径。
+        #
+        # 写成通配符以后，新增测试文件自动就被纳入检查，
+        # 不会再因为「忘了往清单里加一行」而漏跑。
+        run: |
+          set -euo pipefail
+          files=$(ls test/*.test.js)
+          count=$(ls test/*.test.js | wc -l)
+          if [ "$count" -lt 7 ]; then
+            echo "测试文件数量异常（$count 个）"; exit 1
+          fi
+          echo "运行 $count 个测试文件"
+          for f in $files; do
+            echo "--- $f"
+            node "$f"
+          done

@@ -146,6 +146,8 @@ for (const f of [
   'CONTINUATION.md',
   '.github/workflows/ci.yml',
   '.github/workflows/release.yml',
+  // 本地一键复现 CI 的脚本：改了 CI 顺手跑一遍，改坏了当场就知道。
+  'scripts/ci-local.sh',
 ]) {
   if (fs.existsSync(path.join(REPO, f))) {
     ok('必需文件存在', f);
