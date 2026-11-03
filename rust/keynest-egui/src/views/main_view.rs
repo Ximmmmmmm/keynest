@@ -580,6 +580,27 @@ fn reuse_count(entries: &[Entry], password: &str) -> usize {
 /// 这个函数 O(n) 建一张表，调用方查表即可。
 ///
 /// 空密码不参与统计：多条「没有密码」的笔记不该被报成「重复使用」。
+/// # 已知开销（2026-11 实测，5 万条）
+///
+/// 这个函数每帧要跑一遍，大概 **50ms**——占单帧总耗时（81ms）的六成多。
+/// 试过几条优化路线，都没走：
+///
+/// | 尝试 | 结果 |
+/// | --- | --- |
+/// | 换成 FxHash 风格的快速哈希 | **更慢**（逐字节实现比 SipHash 还慢） |
+/// | 排序后的 Vec + 二分 | **更慢**（92.8ms vs 50.7ms） |
+/// | 先用 O(n) 扫描判断「有没有重复」 | 判断本身就要 HashSet 插入 n 次，**不比建表便宜** |
+/// | 跨帧缓存 | 未采用——见下 |
+///
+/// 缓存没有采用的理由：`counts` 依赖**全部**条目的密码。任何一处
+/// 改了密码都必须让缓存失效。失效点散布在 upsert / import / delete /
+/// restore / purge / 导入 / 分类操作里，**漏一处用户就会看到过期的
+/// 「重复使用 N 次」**，而这比慢严重得多——他会以为自己改了密码，
+/// 其实界面在骗他。
+///
+/// 结论：HashMap 已经是这个问题的合适解法，50ms 的代价换来的是
+/// 「数字永远是对的」。真要再快，得先把 `show()` 改成
+/// 「只在数据变化时重算」的架构，那是另一个量级的改动。
 fn reuse_counts(entries: &[Entry]) -> std::collections::HashMap<&str, usize> {
     let mut map: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for e in entries {

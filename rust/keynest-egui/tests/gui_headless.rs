@@ -781,6 +781,58 @@ fn the_trash_detail_panel_never_reveals_or_copies() {
     );
 }
 
+/// 大密码库的**单帧渲染时间**必须有上界。
+///
+/// # 为什么这条值得存在
+///
+/// 前面几条测试证明「只渲染可视区域」，但那是结构性的断言。
+/// 用户真正感知的是**帧时间**：50 万分之一万条时，界面是不是还能用。
+///
+/// egui 的即时模式意味着每帧都要重跑整个 `show()`：
+/// 筛选、排序、布局、绘制。其中任何一环退化成 O(n) 的重复扫描，
+/// 界面就会卡——而结构断言（比如「渲染行数不变」）不会报警。
+///
+/// # 阈值怎么定
+///
+/// 60fps 的预算是 16.7ms。这里给 200ms 的宽限：
+/// 测试机是共享的、CI 更慢，而且这条测试是**抓退化**而不是
+/// 卡性能指标。真正该担心的是「从 5ms 变成 500ms」这种量级变化。
+///
+/// 时间相关的断言天然不稳定，所以只在明显退化时才失败。
+#[test]
+fn a_large_vault_renders_a_frame_quickly() {
+    let data = data_with(50_000);
+
+    // 先跑一帧预热（字体、图集、布局缓存）
+    let _ = render_and_count(&data);
+
+    let start = std::time::Instant::now();
+    let _ = render_and_count(&data);
+    let one_frame = start.elapsed();
+
+    println!("FRAME_50K_MS={}", one_frame.as_millis());
+    assert!(
+        one_frame.as_millis() < 200,
+        "5 万条时单帧渲染要 {one_frame:?}，超过 200ms 的宽限——         很可能某处退化成了「全量扫描」"
+    );
+}
+
+/// 第一次打开大库（无缓存、字体图集为空）也必须能在一秒内画出第一帧。
+///
+/// 首次渲染比稳态慢得多：要建字体图集、算全部布局。
+/// 如果这一步要好几秒，用户会以为程序卡死了。
+#[test]
+fn the_first_frame_of_a_large_vault_is_not_a_freeze() {
+    let data = data_with(50_000);
+    let start = std::time::Instant::now();
+    let _ = render_and_count(&data);
+    let first = start.elapsed();
+    assert!(
+        first.as_secs() < 1,
+        "5 万条的首次渲染要 {first:?}，用户会以为程序卡死了"
+    );
+}
+
 /// 点击列表**下方**的空白区域不能选中任何条目。
 ///
 /// 命中测试写宽了（比如整块区域都算作行）就会出现
