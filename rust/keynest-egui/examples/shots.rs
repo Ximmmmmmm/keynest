@@ -364,6 +364,7 @@ impl Harness {
                 dark: false,
                 leftovers: Vec::new(),
                 bridge_installed: false,
+                edit_unsaved: false,
             },
         );
         self.app.settings = Some(st);
@@ -433,6 +434,7 @@ impl Harness {
                             dark: false,
                             leftovers: Vec::new(),
                             bridge_installed: false,
+                            edit_unsaved: false,
                         },
                     ));
                     if let Some(st) = self.app.settings.as_mut() {
@@ -463,6 +465,7 @@ impl Harness {
                             dark: false,
                             leftovers: Vec::new(),
                             bridge_installed: false,
+                            edit_unsaved: false,
                         },
                     );
                     // 直接切到「数据」分区：验证导入/导出不再需要滚动才能看到

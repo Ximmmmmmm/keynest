@@ -77,6 +77,8 @@ pub struct SettingsState {
     /// 不能在这一步直接跳：用户可能选「继续编辑」，
     /// 那时他应该还在设置页。
     pub pending_jump: Option<Filter>,
+    /// 编辑框里有未保存内容（打开设置时取一次快照）。
+    pub edit_unsaved: bool,
     pub old_pw: Zeroizing<String>,
     pub new_pw: Zeroizing<String>,
     pub new_pw2: Zeroizing<String>,
@@ -151,6 +153,12 @@ pub struct SettingsContext {
     pub dark: bool,
     /// 浏览器桥接是否已安装（打开设置时查一次，只读）。
     pub bridge_installed: bool,
+    /// 编辑框里有没有未保存的内容。
+    ///
+    /// 「重新载入」会用磁盘内容覆盖内存，那会丢掉编辑框里的东西。
+    /// 没有未保存内容时不必吓唬用户——常驻警告会让人麻木，
+    /// 真正需要看的时候就不看了。
+    pub edit_unsaved: bool,
 }
 
 impl SettingsState {
@@ -185,6 +193,7 @@ impl SettingsState {
             orig: settings.clone(),
             confirm_discard: false,
             pending_jump: None,
+            edit_unsaved: ctx.edit_unsaved,
             old_pw: Zeroizing::new(String::new()),
             new_pw: Zeroizing::new(String::new()),
             new_pw2: Zeroizing::new(String::new()),
@@ -937,6 +946,18 @@ fn tab_data(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut SettingsInte
             *intent = SettingsIntent::ReloadFromDisk;
         }
     });
+    // 这个按钮会用磁盘上的内容**整体替换**内存里的库。
+    //
+    // 只在编辑框里真有未保存内容时才警告：常驻警告会让人麻木，
+    // 真正需要看的时候就不看了。
+    if st.edit_unsaved {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("注意：编辑框里有没保存的改动，「重新载入」会把它丢掉。")
+                .size(11.0)
+                .color(p.warn),
+        );
+    }
     ui.add_space(4.0);
     ui.label(theme::caption(
         "导入只新增条目：同名同账号的记录会跳过，绝不覆盖库里已有的密码。\
@@ -1118,6 +1139,7 @@ mod tests {
             font_note: None,
             dark: false,
             bridge_installed: false,
+            edit_unsaved: false,
         }
     }
 
@@ -1206,6 +1228,26 @@ mod tests {
             !should_block_close(st.is_dirty(), st.confirm_discard),
             "没有改动却要弹确认——按钮点下去没反应，用户会以为坏了"
         );
+    }
+
+    /// 「重新载入磁盘上的库」会用磁盘内容覆盖内存，丢掉编辑框里的内容。
+    ///
+    /// 这个按钮叫「重新载入」，听起来像「刷新」——用户不会想到它会丢东西。
+    /// 所以只在**真有未保存编辑**时才警告：常驻警告会让人麻木，
+    /// 真正需要看的时候就不看了。
+    #[test]
+    fn the_reload_warning_only_shows_when_there_is_unsaved_edit() {
+        let s = base();
+
+        let mut c1 = ctx();
+        c1.edit_unsaved = true;
+        let st1 = SettingsState::new(&s, c1);
+        assert!(st1.edit_unsaved, "有未保存编辑时应当警告");
+
+        let mut c2 = ctx();
+        c2.edit_unsaved = false;
+        let st2 = SettingsState::new(&s, c2);
+        assert!(!st2.edit_unsaved, "没有未保存编辑时不该吓唬用户");
     }
 
     /// 刚打开时不该是「脏」的。

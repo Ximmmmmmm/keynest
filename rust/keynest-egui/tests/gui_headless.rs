@@ -260,6 +260,7 @@ fn render_settings_tab(tab: keynest_egui::views::settings::Tab) {
         font_note: None,
         dark: false,
         bridge_installed: false,
+        edit_unsaved: false,
     };
 
     let mut st = SettingsState::new(&settings, ctx);

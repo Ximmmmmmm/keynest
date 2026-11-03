@@ -1659,7 +1659,10 @@ impl App {
                     let dark = crate::ui::theme::is_dark();
                     self.settings = Some(SettingsState::new(
                         &data.settings,
+                        // 编辑框里有没有未保存内容——用来决定
+                        // 「重新载入」那条警告要不要显示。
                         SettingsContext {
+                            edit_unsaved: self.edit.as_ref().map(|e| e.is_dirty()).unwrap_or(false),
                             categories: data.categories.clone(),
                             types: data.types.clone(),
                             legacy: vault.is_legacy(),
