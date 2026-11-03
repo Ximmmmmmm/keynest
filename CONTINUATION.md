@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 11:50 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`80bd423`
+> 最后更新：2026-11-03 12:00 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`7852f8a`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **291** | `cd rust && cargo test --workspace` |
+| Rust | **298** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **475** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -66,6 +66,7 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `cbaad9f` | 导入报告不统计「解析阶段就丢掉」的条目（用户看不到漏了什么） | P1 数据可发现性 |
 | `f201441` | 导出确认里的条数含回收站（说 500 实际 480） | P2 一致性 |
 | `80bd423` | 25 份阶段报告淹没真正的架构文档 | P2 文档组织 |
+| `28198d0` | 条目字段无长度上限（超长备注能让库再也写不进去） | **P1 数据完整性** |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
