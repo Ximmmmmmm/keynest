@@ -61,7 +61,14 @@ fn render_and_count(data: &VaultData) -> (usize, f32, f32) {
     let mut new_cat = String::new();
 
     let ctx = Context::default();
-    let mut out = ctx.run_ui(RawInput::default(), |ui: &mut Ui| {
+    let input = RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 800.0),
+        )),
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(input, |ui: &mut Ui| {
         let view = MainView {
             data,
             search: &mut search,
@@ -163,7 +170,14 @@ fn render_with_filter(data: &VaultData, filter: Filter, sort: SortBy) -> MainInt
     let mut intent = MainIntent::None;
 
     let ctx = Context::default();
-    let mut out = ctx.run_ui(RawInput::default(), |ui: &mut Ui| {
+    let input = RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1280.0, 800.0),
+        )),
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(input, |ui: &mut Ui| {
         let view = MainView {
             data,
             search: &mut search,
@@ -325,6 +339,15 @@ fn click_at(data: &VaultData, pos: egui::Pos2) -> MainIntent {
     let mut run_frame = |ctx: &Context, events: Vec<egui::Event>| -> MainIntent {
         let input = RawInput {
             events,
+            // **必须给定屏幕尺寸**：裸 `run_ui` 里 `available_width()` 是 10000
+            // （无界），于是行内的图标阈值（`right - 40` 之类）会被推到
+            // 屏幕外，任何点击都落在「选中」分支上。
+            //
+            // 不用真实窗口尺寸就测不到图标的命中盒。
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
             ..Default::default()
         };
         let mut intent = MainIntent::None;
@@ -453,6 +476,100 @@ fn clicking_down_the_list_walks_entries_in_order() {
     // 顺带确认纵向位置是递增的
     for w in hits.windows(2) {
         assert!(w[0].0 < w[1].0, "同一行的 id 出现在了更靠下的位置");
+    }
+}
+
+/// 行内的快捷复制图标是**手绘 + 按 x 坐标判定**的，没有独立 widget。
+///
+/// 代码里是这样：
+///
+/// ```text
+/// pass_x = right - 40     复制密码
+/// user_x = right - 74     复制用户名
+/// open_x = right - 108    在浏览器中打开
+/// ```
+///
+/// 这套阈值写反了、或者 `match` 的臂顺序调换了，
+/// 用户就会「点钥匙复制了用户名」——而这两件事后果完全不同：
+/// 一个是把密码送进剪贴板，另一个不是。
+///
+/// 这条测试把「x 位置 → 动作」的映射钉住。
+#[test]
+fn the_quick_copy_icons_map_x_position_to_the_right_action() {
+    let data = data_with(1); // 有密码、有账号、有网址
+
+    // 先找一个能点中这一行的 y
+    let mut row_y = None;
+    for y in (80..=700).step_by(8) {
+        if matches!(
+            click_at(&data, egui::Pos2::new(200.0, y as f32)),
+            MainIntent::Select(_)
+        ) {
+            row_y = Some(y as f32);
+            break;
+        }
+    }
+    let y = row_y.expect("找不到能点中的行");
+
+    // 在这一行上从左往右扫，记下每个 x 产生的意图
+    let mut seen: Vec<(f32, &'static str)> = Vec::new();
+    for x in (150..=1024).step_by(6) {
+        let intent = click_at(&data, egui::Pos2::new(x as f32, y));
+        let kind = match intent {
+            MainIntent::Select(_) => "select",
+            MainIntent::CopyPassword(_) => "password",
+            MainIntent::CopyUsername(_) => "user",
+            MainIntent::OpenUrl(_) => "open",
+            _ => continue,
+        };
+        if seen.last().map(|(_, k)| *k) != Some(kind) {
+            seen.push((x as f32, kind));
+        }
+    }
+
+    let kinds: Vec<&str> = seen.iter().map(|(_, k)| *k).collect();
+    // 从左到右必须是：选中 → 打开网址 → 复制用户名 → 复制密码
+    assert_eq!(
+        kinds,
+        vec!["select", "open", "user", "password"],
+        "行内图标的 x 映射不对（实际顺序：{kinds:?}，起点 {seen:?}）"
+    );
+
+    // 越靠右，动作越"敏感"：密码在最右侧
+    assert!(
+        seen.last().unwrap().0 > seen[1].0,
+        "复制密码的阈值不在打开网址右边"
+    );
+}
+
+/// 没有密码的条目（笔记/信用卡），最右侧的 x 不能变成「复制密码」。
+///
+/// 那个位置根本没有画钥匙图标。如果仍返回 CopyPassword，
+/// 用户点在一片空白上就把一个空字符串送进了剪贴板——
+/// 更糟的是：他可能以为复制成功了别的东西。
+#[test]
+fn entries_without_a_password_never_emit_copy_password() {
+    let mut data = data_with(1);
+    data.entries[0].password.clear();
+
+    let mut row_y = None;
+    for y in (80..=700).step_by(8) {
+        if matches!(
+            click_at(&data, egui::Pos2::new(200.0, y as f32)),
+            MainIntent::Select(_)
+        ) {
+            row_y = Some(y as f32);
+            break;
+        }
+    }
+    let y = row_y.expect("找不到能点中的行");
+
+    for x in (150..=1024).step_by(6) {
+        let intent = click_at(&data, egui::Pos2::new(x as f32, y));
+        assert!(
+            !matches!(intent, MainIntent::CopyPassword(_)),
+            "没有密码的条目在 x={x} 处仍然返回了 CopyPassword"
+        );
     }
 }
 
