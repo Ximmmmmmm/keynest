@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 20:45 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`909722a`
+> 最后更新：2026-11-03 21:30 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`10f4012`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -376,6 +376,18 @@ upsert / import / delete / restore / purge / 分类操作里。
 得把 `show()` 改成「只在数据变化时重算」的架构——另一个量级。
 
 **这条记下来是为了下一轮不再重复研究同一件事。**
+
+## 9h. 发布流程的固有风险：只能在 CI 上验
+
+这轮真跑了 `release.yml` 里的 PowerShell 打包脚本（用本机 PS 5.1，
+比 CI 的 pwsh 7 更严格），结果**能跑通**，产出 35 个文件。
+
+但发现一个可移植性问题：脚本若存成**无 BOM 的 UTF-8**，
+5.1 会按 ANSI 读，中文注释被读坏 → `ConvertFrom-Json` 失败 →
+报「扩展版本不一致：manifest  vs package.json 0.13.0」（manifest 读出来是空）。
+
+CI 用 pwsh 7（默认 UTF-8）碰不到。**这属于「发布流程只能在 CI 上验」
+的固有风险**，本地复现会得到假失败。
 
 ## 10. 审查方法记录（下一轮可复用）
 
