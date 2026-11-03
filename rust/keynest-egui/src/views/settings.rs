@@ -77,6 +77,14 @@ pub struct SettingsState {
     /// 当前库的 KDF 是否达到推荐下限；`None` 表示不判断。
     pub kdf_ok: Option<bool>,
     pub security: SecuritySummary,
+    /// 恢复留档（`vault.dat.corrupt-*`）的文件列表与总大小。
+    ///
+    /// 每次从备份恢复都会把原来那份挪到一边保留。此前界面完全看不到它们，
+    /// 反复恢复失败的用户会在磁盘上攒一堆几 MB 的留档。
+    pub leftovers: Vec<keynest_core::vault::RecoveryLeftover>,
+    pub leftovers_bytes: u64,
+    /// 清空留档的二次确认
+    pub confirm_clear_leftovers: bool,
     pub font_note: Option<String>,
     /// 深色模式开关（仅本次运行，不写入仓库）
     pub dark: bool,
@@ -98,6 +106,8 @@ pub struct SettingsContext {
     pub key_locked: Option<bool>,
     pub kdf_ok: Option<bool>,
     pub security: SecuritySummary,
+    /// 恢复留档（`vault.dat.corrupt-*`）的快照。打开设置时读一次。
+    pub leftovers: Vec<keynest_core::vault::RecoveryLeftover>,
     pub font_note: Option<String>,
     pub dark: bool,
 }
@@ -122,6 +132,7 @@ impl SettingsState {
             wipe_open: false,
             wipe_confirm_text: String::new(),
             legacy: ctx.legacy,
+            confirm_clear_leftovers: false,
             data_dir: keynest_core::paths::resolve_data_dir(),
             on_roaming: keynest_core::paths::is_on_roaming_profile(),
             kdf_algo: ctx.kdf_algo,
@@ -129,6 +140,8 @@ impl SettingsState {
             key_locked: ctx.key_locked,
             kdf_ok: ctx.kdf_ok,
             security: ctx.security,
+            leftovers_bytes: ctx.leftovers.iter().map(|l| l.bytes).sum(),
+            leftovers: ctx.leftovers,
             font_note: ctx.font_note,
             dark: ctx.dark,
             closing: false,
@@ -179,6 +192,8 @@ pub enum SettingsIntent {
     ExportBackup,
     /// 从 CSV / JSON 文件导入
     ImportFile,
+    /// 清空恢复留档（`vault.dat.corrupt-*`）。
+    ClearLeftovers,
     /// 放弃本地未保存的改动，重新载入磁盘上的库。
     ///
     /// 用于「库文件被别处改过」之后——那是网盘同步/多机使用的常见情况，

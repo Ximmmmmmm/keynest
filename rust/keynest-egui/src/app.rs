@@ -1124,6 +1124,53 @@ impl App {
     ///
     /// 失败时**不破坏当前会话**——`reload()` 内部保证磁盘内容先被证明可用，
     /// 才动内存状态。
+    /// 清空恢复留档，然后刷新设置页里那份列表。
+    ///
+    /// 只删 `vault.dat.corrupt-*`，不动库与备份——
+    /// 用户想清的是垃圾文件，不该顺手把数据一起删了。
+    fn apply_clear_leftovers(&mut self) {
+        enum Outcome {
+            Cleared(usize),
+            Failed(String),
+        }
+
+        let outcome = {
+            let AppState::Unlocked { vault, .. } = &self.state else {
+                return;
+            };
+            match vault.clear_recovery_leftovers() {
+                Ok(n) => Outcome::Cleared(n),
+                Err(e) => Outcome::Failed(e.to_string()),
+            }
+        };
+
+        // 列表与提示都要刷；两者都需要 &mut self，所以放在借用结束之后
+        let left = {
+            let AppState::Unlocked { vault, .. } = &self.state else {
+                return;
+            };
+            vault.list_recovery_leftovers()
+        };
+
+        match outcome {
+            Outcome::Cleared(n) => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.leftovers_bytes = left.iter().map(|l| l.bytes).sum();
+                    st.leftovers = left;
+                    st.confirm_clear_leftovers = false;
+                    st.notice = Some(format!("已清空 {n} 个恢复留档"));
+                    st.error = None;
+                }
+            }
+            Outcome::Failed(msg) => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.error = Some(format!("清理失败：{msg}"));
+                    st.confirm_clear_leftovers = false;
+                }
+            }
+        }
+    }
+
     fn apply_reload_from_disk(&mut self) {
         // 结果先在窄作用域里算出来，避免与 &mut self 的其它部分同时借用。
         enum Outcome {
@@ -1449,6 +1496,7 @@ impl App {
                             key_locked: vault.key_memory_locked(),
                             kdf_ok: vault.kdf_meets_floor(),
                             security,
+                            leftovers: vault.list_recovery_leftovers(),
                             font_note: font,
                             dark,
                         },
@@ -1647,6 +1695,7 @@ impl App {
             SettingsIntent::Close => self.settings = None,
             SettingsIntent::Save => self.apply_settings_save(),
             SettingsIntent::ReloadFromDisk => self.apply_reload_from_disk(),
+            SettingsIntent::ClearLeftovers => self.apply_clear_leftovers(),
             SettingsIntent::ChangeMaster => self.apply_change_master(),
             SettingsIntent::Upgrade => self.apply_upgrade(),
             SettingsIntent::OpenWipe => {

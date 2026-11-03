@@ -1601,6 +1601,19 @@ pub struct BackupInfo {
     pub updated_at: String,
 }
 
+/// 一份「恢复留档」：从备份恢复时把原来那份挪到一边留下的文件。
+///
+/// 里面的内容可能是损坏的库，也可能是用户手工改坏的版本。
+/// 保留它是为了"还能抢救"，但不是让人一直攒着——
+/// 所以设置页要能看到并能清理。
+#[derive(Clone, Debug)]
+pub struct RecoveryLeftover {
+    pub path: PathBuf,
+    pub bytes: u64,
+    /// 文件修改时间（RFC3339，秒精度）。取不到时为空串。
+    pub modified: String,
+}
+
 pub struct Vault {
     pub path: PathBuf,
     /// 派生密钥。`SecretKey` 负责放进锁定的页并在 drop 时清零 + 解锁。
@@ -2714,6 +2727,83 @@ impl Vault {
         Ok(())
     }
 
+    /// 列出所有「恢复留档」文件（`vault.dat.corrupt-*`）。
+    ///
+    /// # 为什么需要它
+    ///
+    /// 每次从备份恢复都会把原来那份（可能是损坏的）留档到一边，而不是删除——
+    /// 这是对的：用户可能还想抢救它。
+    ///
+    /// 但此前**没有任何途径看到这些文件**。反复恢复失败的用户会在磁盘上
+    /// 攒下一堆几百 KB 的留档，既占空间又让人困惑（"这些到底是什么？"），
+    /// 而界面上完全无迹可寻。
+    ///
+    /// 返回按修改时间倒序（最新的在前），便于用户判断哪一份是刚才那次。
+    pub fn list_recovery_leftovers(&self) -> Vec<RecoveryLeftover> {
+        let Some(dir) = self.path.parent() else {
+            return Vec::new();
+        };
+        let Some(name) = self.path.file_name() else {
+            return Vec::new();
+        };
+        let prefix = format!("{}.{}", name.to_string_lossy(), CORRUPT_PREFIX);
+
+        let Ok(rd) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+
+        let mut out: Vec<RecoveryLeftover> = rd
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+            .filter_map(|e| {
+                let meta = e.metadata().ok()?;
+                if !meta.is_file() {
+                    return None;
+                }
+                Some(RecoveryLeftover {
+                    path: e.path(),
+                    bytes: meta.len(),
+                    // 时间取修改时间；取不到就留空，不编造。
+                    modified: meta
+                        .modified()
+                        .ok()
+                        .map(|t| {
+                            let dt: chrono::DateTime<chrono::Utc> = t.into();
+                            dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                        })
+                        .unwrap_or_default(),
+                })
+            })
+            .collect();
+
+        // 新的在前：用户最可能想处理的是刚才那次留下的
+        out.sort_by(|a, b| b.modified.cmp(&a.modified));
+        out
+    }
+
+    /// 删除所有恢复留档，返回删除的数量。
+    ///
+    /// 只在用户**明确要求**时调用（设置页里那个按钮）。
+    /// 与 `wipe()` 不同：这里不动库、不动备份，只清留档。
+    pub fn clear_recovery_leftovers(&self) -> Result<usize> {
+        let items = self.list_recovery_leftovers();
+        let mut removed = 0usize;
+        let mut first_err: Option<std::io::Error> = None;
+        for it in items {
+            match fs::remove_file(&it.path) {
+                Ok(()) => removed += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(VaultError::Io(e)),
+            None => Ok(removed),
+        }
+    }
+
     /// 彻底删除仓库、所有备份代、恢复留档与临时文件。
     ///
     /// 返回第一个真实失败（`NotFound` 不算失败）——原实现全部 `let _ =`，
@@ -3500,6 +3590,82 @@ mod tests {
         assert!(
             body.contains("for f in self.fields.iter_mut()") && body.contains("f.value.zeroize()"),
             "Entry::drop 没有清零自定义字段（可能存卡号/证件号）"
+        );
+    }
+
+    /// 恢复留档必须能被**列出来**。
+    ///
+    /// 此前只有 `wipe()` 会碰这些文件（全部删掉）。用户反复从备份恢复失败时，
+    /// 磁盘上会攒下一堆 `vault.dat.corrupt-*`，界面上却完全看不到——
+    /// 既占空间，也让人困惑「这些到底是什么」。
+    #[test]
+    fn recovery_leftovers_are_listed() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+        v.upsert_entry(entry("A", "p")).unwrap();
+
+        // 手工造两个留档（正常路径要用 restore 触发，这里直接放文件更直观）
+        let base = v.path.to_string_lossy().to_string();
+        std::fs::write(format!("{base}.corrupt-1000"), b"old-one").unwrap();
+        std::fs::write(format!("{base}.corrupt-2000"), b"old-two-longer").unwrap();
+
+        let items = v.list_recovery_leftovers();
+        assert_eq!(items.len(), 2, "应当列出两份留档: {items:?}");
+        // 大小如实反映
+        assert!(items
+            .iter()
+            .any(|i| i.bytes == b"old-two-longer".len() as u64));
+    }
+
+    /// 没有留档时返回空列表，不报错。
+    #[test]
+    fn no_leftovers_yields_empty_list() {
+        let dir = tmp();
+        let v = fast_vault(dir.path());
+        assert!(v.list_recovery_leftovers().is_empty());
+    }
+
+    /// 清理只删留档，**不动库与备份**。
+    ///
+    /// 这是与 `wipe()` 的关键区别：用户想清掉垃圾文件，
+    /// 不该顺便把自己的库和备份一起删了。
+    #[test]
+    fn clearing_leftovers_keeps_vault_and_backups() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+        v.upsert_entry(entry("A", "p")).unwrap();
+        v.upsert_entry(entry("B", "p")).unwrap(); // 触发一次备份
+
+        let base = v.path.to_string_lossy().to_string();
+        std::fs::write(format!("{base}.corrupt-1000"), b"junk").unwrap();
+        std::fs::write(format!("{base}.corrupt-2000"), b"junk").unwrap();
+
+        let removed = v.clear_recovery_leftovers().unwrap();
+        assert_eq!(removed, 2);
+        assert!(v.list_recovery_leftovers().is_empty());
+
+        // 库还在，备份还在
+        assert!(v.path.exists(), "库文件不该被删");
+        assert!(v.backup_slot(1).exists(), "备份不该被删");
+
+        // 库仍然可用
+        v.lock();
+        let mut v2 = Vault::new(&v.path);
+        assert_eq!(v2.unlock("master-password-123").unwrap().entries.len(), 2);
+    }
+
+    /// 留档之外的文件（比如备份）不能被误当成留档列出来。
+    #[test]
+    fn backups_are_not_listed_as_leftovers() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+        v.upsert_entry(entry("A", "p")).unwrap();
+        v.upsert_entry(entry("B", "p")).unwrap();
+        assert!(v.backup_slot(1).exists(), "前提：应当已有备份");
+
+        assert!(
+            v.list_recovery_leftovers().is_empty(),
+            "备份不该被当成恢复留档"
         );
     }
 
