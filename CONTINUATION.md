@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-02 22:15 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`1d8c5d9`
+> 最后更新：2026-11-03 10:30 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`75b9ce8`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **259** | `cd rust && cargo test --workspace` |
+| Rust | **270** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **453** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -42,6 +42,11 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `f035b92` | 手动锁定静默丢弃未保存的编辑 | P1 数据丢失 |
 | `b701ae2` | Ctrl+L 绕过未保存确认（与按钮行为不一致） | P2 一致性 |
 | `1d8c5d9` | 明文导出文件在 unix 上同机其他账号可读 | P1 安全 |
+| `588f677` | 库里重复条目 id 会让「改 A 结果 B 变了」 | P1 数据正确性 |
+| `7f29bc4` | 危险设置值（auto_lock=0 等）让程序解锁即锁死 | P0 可用性 |
+| `7990311` | 明文导出把回收站条目一起写进文件 | P1 数据外泄 |
+| `e4f82df` | 复制密码/账号用裸 String，内容留在堆上 | P1 安全 |
+| `75b9ce8` | bridge 响应序列化缓冲区含明文密码未清零 | P1 安全 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
@@ -53,6 +58,12 @@ Rust workspace 根是 `rust/`；Windows 上需要
 - `views::edit::tests::*`（9 项，覆盖 `is_dirty` 判定）
 - `plaintext_export_is_owner_only`（unix 专属，本机跳过）
 - `plaintext_export_roundtrips`
+- `entry_drop_zeroizes_sensitive_fields`（守卫：`impl Drop for Entry` 被删会红）
+- `reply_body_is_zeroized`（守卫：bridge 响应缓冲区的 Zeroizing 被去掉会红）
+- `update_settings_clamps_dangerous_values` / `..._caps_huge_values` / `..._keeps_valid_values`
+- `opening_legacy_vault_clamps_settings_in_memory`
+- `duplicate_entry_ids_are_detected` / `unique_ids_report_nothing`
+- `export_skips_deleted_entries`
 
 ---
 
