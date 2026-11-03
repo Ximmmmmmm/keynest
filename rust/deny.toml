@@ -66,3 +66,10 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# 显式声明"一个 git 依赖都不允许"。
+#
+# `unknown-git = "deny"` 已经能拒绝未声明的 git 来源，
+# 但把 allow-git 显式写成空列表，意图更清楚：
+# 将来有人想加 git 依赖时，这一行会直接告诉他"先改这里，并且想清楚"。
+# 空列表 = 不允许任何 git 来源。
+allow-git = []
