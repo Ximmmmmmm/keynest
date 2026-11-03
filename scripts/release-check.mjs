@@ -735,6 +735,91 @@ function listAfter(text, marker, stop) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 4h) manifest 权限与代码实际用到的 API 对账                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 两个方向都查：
+ *
+ * - **声明了但代码从没用过** → 权限审查时是坏信号
+ *   （审扩展的人会问「你为什么要这个权限」），而且是最小权限原则的退化。
+ * - **用到了但没声明** → 那段代码在浏览器里直接抛异常，
+ *   而且是运行时才抛——装上之后某个功能点了才坏。
+ *
+ * # 口径
+ *
+ * 只扫 `chrome.<域>.` 的调用（去掉注释行不算）。
+ * `tabs` / `permissions` 域有**特权豁免**：
+ * `tabs.sendMessage` / `tabs.query`（只拿 id）不需要 `tabs` 权限，
+ * 本项目刻意不申请它（`activeTab` + 运行时申请的 host 权限就够）——
+ * 这是最小权限设计的一部分，豁免列表写在这里，理由也在 permissions.js。
+ */
+{
+  const extRoot = path.join(REPO, 'browser-extension');
+  try {
+    const mf = JSON.parse(fs.readFileSync(path.join(extRoot, 'manifest.json'), 'utf8'));
+    const declared = new Set(mf.permissions || []);
+
+    const files = [];
+    (function walk(dir) {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (['node_modules', 'tests', 'scripts', '.git'].includes(e.name)) continue;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) walk(full);
+        else files.push(full);
+      }
+    })(extRoot);
+
+    const used = new Set();
+    for (const f of files) {
+      // 只看非注释行：`// chrome.tabs.get(...)` 这类示例不算使用
+      const src = fs
+        .readFileSync(f, "utf8")
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('//'))
+        .join('\n');
+      for (const m of src.matchAll(/chrome\.([a-zA-Z]+)/g)) {
+        used.add(m[1]);
+      }
+    }
+
+    // 需要 `tabs` 权限的只有「读 url/title」——本项目不这么做，豁免。
+    const EXEMPT = new Set(['tabs', 'permissions', 'runtime']);
+
+    const undeclared = [...used].filter((u) => !declared.has(u) && !EXEMPT.has(u));
+    if (undeclared.length) {
+      fail('代码用到了 manifest 未声明的权限域（运行时会抛异常）', undeclared.join(', '));
+    }
+
+    const API_DOMAINS = new Set([
+      'permissions',
+      'nativeMessaging',
+      'tabs',
+      'storage',
+      'scripting',
+      'webNavigation',
+      'declarativeNetRequest',
+      'runtime',
+      'action',
+    ]);
+        // `nativeMessaging` 权限的使用形态是 `chrome.runtime.connectNative`，
+    // 走的是 `runtime` 域——按域名字面比对会误报。
+    const IMPLICIT = new Set(['nativeMessaging', 'activeTab']);
+    const unused = [...declared].filter((d) => !used.has(d) && !IMPLICIT.has(d) &&
+      // chrome.cookies 之类不在已知域列表里的权限，声明了但代码没碰也算未使用
+      true);
+    if (unused.length) {
+      fail('manifest 声明了但从没用过的权限域（最小权限退化）', unused.join(', '));
+    }
+    if (!undeclared.length && !unused.length) {
+      ok('manifest 权限与代码实际用量对账一致', `${declared.size} 项声明`);
+    }
+  } catch (e) {
+    fail('manifest 权限对账检查自身失败', String(e && e.message).slice(0, 120));
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 5) 仓库里不能有敏感或调试文件                                        */
 /* ------------------------------------------------------------------ */
 
