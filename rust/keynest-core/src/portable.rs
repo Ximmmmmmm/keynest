@@ -660,6 +660,75 @@ mod tests {
         assert_eq!(items[0].title, "login.example.com");
     }
 
+    /// CSV 导出必须能正确处理字段里的逗号、引号与换行。
+    ///
+    /// # 为什么
+    ///
+    /// 密码里出现逗号（`a,b`）、引号（`say "hi"`）、换行都很常见。
+    /// 如果导出时不转义，导出的文件就**结构损坏**了：
+    /// 用户把文件导进别的密码管理器，字段会错位——
+    /// 密码跑到备注里、备注跑到网址里。
+    ///
+    /// 这是**静默的数据损坏**：文件看起来正常，打开也不报错，
+    /// 只是内容错了。等到用户发现时，原来的密码已经找不回来。
+    ///
+    /// `csv` crate 会自己处理转义，但「用了正确的库」和
+    /// 「导出的字节真的能原样回来」是两件事——这条测试守住后者。
+    #[test]
+    fn csv_export_escapes_commas_quotes_and_newlines() {
+        let nasty = Entry {
+            id: "id-1".into(),
+            title: "标题,带逗号".into(),
+            username: "user\"带引号\"".into(),
+            password: "pw,with,\"everything\"
+and-newline"
+                .into(),
+            url: "https://example.test/?a=1&b=2".into(),
+            category: "分类,也有逗号".into(),
+            notes: "备注第一行
+备注第二行
+第三行"
+                .into(),
+            favorite: true,
+            kind: "账号".into(),
+            fields: Vec::new(),
+            totp: None,
+            password_changed_at: None,
+            deleted_at: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+        };
+
+        let csv = export_csv(std::slice::from_ref(&nasty)).unwrap();
+        let (back, invalid) = import_csv(csv.as_str()).expect("自己导出的 CSV 必须能导回来");
+
+        assert_eq!(invalid, 0, "不该有无法解析的行");
+        assert_eq!(back.len(), 1, "应当导入 1 条");
+        let b = &back[0];
+        assert_eq!(b.title, nasty.title, "标题里的逗号被吃掉了");
+        assert_eq!(b.username, nasty.username, "账号里的引号被吃掉了");
+        assert_eq!(b.password, nasty.password, "密码里的特殊字符被吃掉了");
+        assert_eq!(b.url, nasty.url);
+        assert_eq!(b.category, nasty.category);
+        assert_eq!(b.notes, nasty.notes, "备注里的换行被吃掉了");
+        assert!(b.favorite, "收藏状态丢了");
+    }
+
+    /// CSV 里出现 Excel 公式注入字符时不能被当成公式。
+    ///
+    /// 这不是本程序的问题（存的是用户自己的数据），
+    /// 但导出给别人的文件如果以 `=` 开头，Excel 会当公式执行——
+    /// 经典的 CSV injection。这里只确认**数据本身不被改动**，
+    /// 具体防护由使用方决定。
+    #[test]
+    fn csv_export_keeps_leading_equals_as_data() {
+        let e = entry("=SUM(A1:A2)", "@user", "1+1");
+        let csv = export_csv(std::slice::from_ref(&e)).unwrap();
+        assert!(csv.contains("=SUM(A1:A2)"), "导出把等号开头的标题改掉了");
+        let (back, _) = import_csv(csv.as_str()).unwrap();
+        assert_eq!(back[0].title, "=SUM(A1:A2)");
+    }
+
     /// Firefox 导出的 CSV 必须能导入。
     ///
     /// # 缺陷背景

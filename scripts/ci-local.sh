@@ -113,7 +113,11 @@ run "cargo test --workspace" cargo_in cargo test --workspace
 if [ "$FAST" != "1" ]; then
   step "gui-windows / 发布构建"
   # CI 里带 RUSTFLAGS=-D warnings，release profile 的 warning 也要当错误
-  run "cargo build --release" env RUSTFLAGS="-D warnings" cargo_in cargo build --release -p keynest-egui
+  # 注意顺序：`env` 必须在 `cargo_in` **里面**。
+  #
+  # 写成 `env RUSTFLAGS=... cargo_in ...` 会永远失败——
+  # `env` 需要一个可执行文件，而 `cargo_in` 是 shell 函数。
+  run "cargo build --release" cargo_in env RUSTFLAGS="-D warnings" cargo build --release -p keynest-egui
 
   step "coverage / 行覆盖率门槛 85%"
   if command -v cargo-llvm-cov >/dev/null 2>&1; then
