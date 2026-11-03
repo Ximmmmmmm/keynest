@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 14:35 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`1848871`
+> 最后更新：2026-11-03 15:10 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`aa6b25f`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,9 +17,9 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **320** | `cd rust && cargo test --workspace` |
+| Rust | **321** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
-| 扩展单元 | **491** | `cd browser-extension && node --test tests/*.test.js` |
+| 扩展单元 | **494** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
 | 真实 Chrome 验收 | **46** | `node test/acceptance/run.mjs`（需启动浏览器） |
 
@@ -83,6 +83,9 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `3e51973` | `keynest-paths` 测试只在 Windows 跑；legacy 作业漏跑 4 个测试文件 | P2 工程 |
 | `5bc3f67` | 本地 CI 复现脚本与 ci.yml 会悄悄漂移 | P2 工程 |
 | `1848871` | **Firefox 的 CSV 实际导不进来**（README 声称支持） | P1 功能 |
+| `61904cc` | 改主密码后不提醒「旧备份仍需旧密码」（用户以为备份废了） | P1 数据可恢复性 |
+| `9f78d8c` | **看不到自己记住了哪些站点**，也没法关掉某一个 | P1 可用性 |
+| `aa6b25f` | 阅读模式同样缺站点管理（与夜间模式对称） | P1 可用性 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
