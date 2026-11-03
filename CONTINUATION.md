@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-04 01:00 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`45751f7`
+> 最后更新：2026-11-04 02:00 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`a18cfb5`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,6 +17,8 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
+| 无头验收：扩展 | **11** | `node test/acceptance/extension-headless.mjs` |
+| 无头验收：填充页面侧 | **6** | `node test/acceptance/fill-headless.mjs` |
 | Rust | **372** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **494** | `cd browser-extension && node --test tests/*.test.js` |
@@ -458,8 +460,16 @@ sha256sum 列表 / 敏感检查白名单 / Release 附件列表必须互相覆�
   但 GUI、剪贴板、内存锁定只在 Windows 验证过。
 - **没有第三方安全审计**：README 与 THREAT_MODEL 都明写。
 
-**结论**：代码层面的产品候选标准已达成；
-**唯一阻塞发布的是 GUI 端到端验收**——那需要有人在机器空闲时实际跑一次。
+**结论**：代码层面的产品候选标准已达成。
+
+填充链路的**页面侧**安全属性（origin 精确匹配、防重放、
+明文不残留）现在有了 headless 真实验收（6 项），
+加上授权状态机的 20+ 项单元测试与桥接协议的三项跨端检查，
+「无人值守时能自动守住的」已经覆盖到桥接链路的绝大部分。
+
+**GUI 端到端验收仍需要有人在机器空闲时实际跑一次**——
+它验证的是真实窗口下的字体、高 DPI、输入法与真实剪贴板行为，
+这些自动化替代不了。
 
 ## 10. 审查方法记录（下一轮可复用）
 
