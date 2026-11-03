@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 13:10 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`5750aa3`
+> 最后更新：2026-11-03 13:25 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`02c362e`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **312** | `cd rust && cargo test --workspace` |
+| Rust | **318** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **491** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -77,6 +77,8 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `07b9800` | 桥接安装缺端到端测试（各步拼起来对不对没人验） | P2 测试 |
 | `08aeea8` | 扩展分不清「宿主没装」与「桌面程序没跑」 | P1 可用性 |
 | `e3159bb` | 让宿主主动报告连不上的原因（启动消息机制） | P1 可用性 |
+| `16668ae` | **系统空闲未知时自动锁定永久失效**（密码库一直开着） | **P1 安全** |
+| `02c362e` | 删掉只改内存不落盘的死 API `replace_data` | P3 代码健康 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
