@@ -843,6 +843,26 @@ impl Drop for Entry {
         self.password.zeroize();
         self.url.zeroize();
         self.notes.zeroize();
+
+        // TOTP 密钥与密码**同等敏感**：拿到它就能无限生成有效的动态验证码，
+        // 二次验证因此完全失效。此前漏在清零范围之外。
+        if let Some(t) = self.totp.as_mut() {
+            t.zeroize();
+        }
+
+        // 自定义字段里可能存卡号、证件号（`secret: true`），
+        // 全部擦除——非敏感字段多擦一遍的成本可以忽略。
+        for f in self.fields.iter_mut() {
+            f.value.zeroize();
+            f.label.zeroize();
+        }
+    }
+}
+
+impl Drop for Field {
+    fn drop(&mut self) {
+        self.label.zeroize();
+        self.value.zeroize();
     }
 }
 
@@ -3419,19 +3439,68 @@ mod tests {
     /// 有人重构时把那个 impl 去掉，测试不会失败，但在真实使用中
     /// 密码会留在堆上。为了防止这种情况，这里同时检查源码里
     /// 那五个字段都被显式 zeroize 了——用 include_str! 读自己的源文件。
+    /// `Entry` 被丢弃时必须清零敏感字段。
+    ///
+    /// 直接验"drop 之后内存是 0"不可行——那块内存已经归还给分配器，
+    /// 再去读是未定义行为。所以盯源码：这个测试的价值是**挡住
+    /// "重构时顺手删掉某个 zeroize"**。
+    ///
+    /// # 截取范围必须精确到函数体
+    ///
+    /// 第一次写这条时用 `src.split("impl Drop for Entry").nth(1)`，
+    /// 得到的是**从这里到文件末尾**的全部内容——里面包含下面这个测试自己，
+    /// 于是"源码里有没有 self.totp"永远为真，守卫完全失效（实测过两次）。
+    ///
+    /// 现在按行截到第一个行首 `}`，并断言范围里确实有 `fn drop`，
+    /// 防止将来锚点改名后测试悄悄变成空断言。
     #[test]
     fn entry_drop_zeroizes_sensitive_fields() {
         let src = include_str!("vault.rs");
-        let drop_impl = src
-            .split("impl Drop for Entry")
+        let after_sig = src
+            .split("impl Drop for Entry {")
             .nth(1)
             .expect("Entry 必须实现 Drop（否则密码不会清零）");
+
+        // 截到**第 0 缩进**的 `}`（即 impl 块自己的结尾）。
+        // 只用 `trim() != "}"` 会停在函数里第一个内层块（if/for）的右花括号上，
+        // 于是后面的字段检查全部落空——守卫看起来通过，实际什么都没验。
+        let body = after_sig
+            .lines()
+            .take_while(|l| *l != "}")
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+
+        assert!(
+            body.contains("fn drop"),
+            "截取范围里没有 drop 函数体，测试锚点失效"
+        );
+        // 自检：截取范围必须覆盖到函数体结尾，否则所有字段断言都在空范围内
+        assert!(
+            body.contains("self.notes.zeroize()"),
+            "截取范围过短，守卫测试已失效"
+        );
+
         for field in ["title", "username", "password", "url", "notes"] {
             assert!(
-                drop_impl.contains(&format!("self.{field}.zeroize()")),
+                body.contains(&format!("self.{field}.zeroize()")),
                 "Entry::drop 没有清零字段 {field}"
             );
         }
+        // TOTP 密钥拿到就能无限生成动态码，二次验证因此失效——
+        // 与密码同等敏感，必须在清零范围内。
+        // 只检查 "含 self.totp" 不够：`let _ = &self.totp;` 也能通过，
+        // 而它什么都没清零。要检查"取出来之后确实调了 zeroize"。
+        assert!(
+            body.contains("self.totp.as_mut()") && body.contains("t.zeroize()"),
+            "Entry::drop 没有清零 totp（TOTP 密钥可生成所有未来的验证码）"
+        );
+        assert!(
+            body.contains("for f in self.fields.iter_mut()") && body.contains("f.value.zeroize()"),
+            "Entry::drop 没有清零自定义字段（可能存卡号/证件号）"
+        );
     }
 
     /// 设置项必须被夹紧到安全范围，否则库会变成「打不开也用不了」。
