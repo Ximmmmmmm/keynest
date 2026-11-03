@@ -223,4 +223,76 @@
   } catch {
     /* 环境异常时放弃自动应用，不影响手动填充 */
   }
+
+  /* ------------------------------------------------------------------ */
+  /* 单页应用（SPA）的路由变化                                           */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * SPA 换页不重新加载文档，`load` 只触发一次，于是自动应用也只在第一次生效。
+   *
+   * 用户的实际经历：在列表页开了夜间模式，点进一篇文章——页面变回亮色。
+   * 他不会想到「因为是单页应用」，只会觉得这个功能时灵时不灵。
+   *
+   * 监听两种信号：
+   *   1. `popstate` —— 浏览器前进/后退
+   *   2. 对 `history.pushState` / `replaceState` 打补丁 —— 框架内部跳转
+   *
+   * # 为什么要节流
+   *
+   * 有些框架一次导航会连着调好几次 `pushState`（先放占位再替换），
+   * 每次都触发一次自动应用等于连发好几条消息，而结果完全一样。
+   * 250ms 足够合并这些抖动，又不至于让用户感到延迟。
+   */
+  function watchRouteChanges() {
+    let timer = null;
+    const schedule = () => {
+      if (timer !== null) return;
+      timer = setTimeout(() => {
+        timer = null;
+        requestAutoApply();
+      }, 250);
+    };
+
+    try {
+      window.addEventListener('popstate', schedule);
+      window.addEventListener('hashchange', schedule);
+
+      // 打补丁：框架用的是 history API，不会触发上面两个事件。
+      // 语义与 lib/spa-router.js 的 patchHistory 一致——
+      // 内容脚本不能 import，所以这里内联一份。
+      // 三个必须做对的点：
+      //   1. 转发原函数并返回它的返回值
+      //   2. 保留 this（用 apply）
+      //   3. 单个失败不影响另一个
+      for (const name of ['pushState', 'replaceState']) {
+        try {
+          const original = history[name];
+          if (typeof original !== 'function') continue;
+          if (original.__keynestPatched) continue; // 别套两层
+          const wrapper = function patched(...args) {
+            const out = original.apply(this, args);
+            try {
+              schedule();
+            } catch {
+              /* 回调的错不该让导航失败 */
+            }
+            return out;
+          };
+          wrapper.__keynestPatched = true;
+          history[name] = wrapper;
+        } catch {
+          /* 属性只读：跳过这个，另一个仍然尝试 */
+        }
+      }
+    } catch {
+      // 页面可能冻结了 history（少见），那就只保留首次应用
+    }
+  }
+
+  try {
+    watchRouteChanges();
+  } catch {
+    /* 同上：失败只是失去 SPA 支持，不影响首次应用 */
+  }
 })();
