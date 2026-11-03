@@ -985,6 +985,23 @@ fn tmp_path(path: &Path) -> PathBuf {
 /// 相比原实现补上了 `sync_all()`：
 /// 没有 fsync 时，rename 只保证目录项改名，文件内容可能还在页缓存里，
 /// 断电会留下「文件名对、内容是半截」的库。
+/// 构造「写失败且旧文件也没能挪回来」时的错误文案。
+///
+/// 单独抽出来是为了能测：真实的双重失败在文件系统上很难稳定复现，
+/// 但这句文案是用户唯一的线索——必须包含留档文件的**完整名字**，
+/// 否则他不知道该把哪个文件改回 `vault.dat`。
+fn rollback_failure_message(write_err: &str, aside: &Path) -> String {
+    let name = aside
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| aside.display().to_string());
+    format!(
+        "写入失败（{write_err}），且旧库文件无法还原。
+你的数据仍在「{name}」里（与 vault.dat 同一目录）。
+请手工把它改回 vault.dat 后再打开钥巢。"
+    )
+}
+
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = tmp_path(path);
     {
@@ -2024,8 +2041,18 @@ impl Vault {
         // —— 到这里备份已被证明可用，才开始动磁盘 ——
         let aside = self.set_aside_current()?;
         if let Err(e) = write_atomic(&self.path, &bytes) {
+            // 写新文件失败：把旧文件挪回原位。
+            //
+            // **还原失败必须让用户知道**。原来这里是 `let _ = fs::rename(...)`，
+            // 失败了也照样只报「写入失败」——而实际上库文件已经不在原位，
+            // 只剩一份 `vault.dat.corrupt-*`。用户会以为库还在，重启后
+            // 才发现打不开，而且不知道该去找哪个文件。
             if let Some(aside) = aside.as_ref() {
-                let _ = fs::rename(aside, &self.path);
+                if fs::rename(aside, &self.path).is_err() {
+                    return Err(VaultError::Io(std::io::Error::other(
+                        rollback_failure_message(&e.to_string(), aside),
+                    )));
+                }
             }
             return Err(e);
         }
@@ -3593,7 +3620,35 @@ mod tests {
         );
     }
 
-    /// 恢复留档必须能被**列出来**。
+    /// 还原失败时的错误信息必须**指明数据在哪**。
+    ///
+    /// 原来那一步是 `let _ = fs::rename(aside, &self.path)`：失败了也照样
+    /// 只报「写入失败」。而实际上库文件已经不在原位，只剩一份
+    /// `vault.dat.corrupt-*`——用户以为库还在，重启才发现打不开，
+    /// 而且不知道该去找哪个文件。
+    ///
+    /// # 为什么直接测错误构造，而不是构造真实的双重失败
+    ///
+    /// 要让「写新文件」和「把留档挪回来」**同时**失败，需要精确控制文件系统
+    /// 状态；而 `set_aside_current` 会先把目标挪走，目标路径空出来后
+    /// 写入往往反而成功（试过：把 vault.dat 换成目录，恢复照样成功）。
+    ///
+    /// 这种测试即使写出来也是在与平台行为博弈，很容易变成"看起来在测、
+    /// 实际没测到"。所以退一步：直接验错误信息的构造，保证一旦真的发生，
+    /// 用户能看懂该去哪个文件。
+    #[test]
+    fn rollback_failure_message_points_at_the_aside_file() {
+        let aside = PathBuf::from("vault.dat.corrupt-1700000000");
+        let msg = rollback_failure_message("磁盘已满", &aside);
+        assert!(msg.contains("无法还原"), "没说明还原失败: {msg}");
+        assert!(
+            msg.contains("vault.dat.corrupt-1700000000"),
+            "没给出留档文件名，用户无从下手: {msg}"
+        );
+        assert!(msg.contains("磁盘已满"), "没保留原始错误原因: {msg}");
+    }
+
+    /// 恢复留档必须能被**列出来**。    /// 恢复留档必须能被**列出来**。
     ///
     /// 此前只有 `wipe()` 会碰这些文件（全部删掉）。用户反复从备份恢复失败时，
     /// 磁盘上会攒下一堆 `vault.dat.corrupt-*`，界面上却完全看不到——
