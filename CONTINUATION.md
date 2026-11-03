@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 10:30 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`75b9ce8`
+> 最后更新：2026-11-03 10:45 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`bb9a89a`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -47,6 +47,7 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `7990311` | 明文导出把回收站条目一起写进文件 | P1 数据外泄 |
 | `e4f82df` | 复制密码/账号用裸 String，内容留在堆上 | P1 安全 |
 | `75b9ce8` | bridge 响应序列化缓冲区含明文密码未清零 | P1 安全 |
+| `bb9a89a` | `Entry::drop` 漏清 TOTP 密钥与自定义字段（TOTP 泄漏=二次验证失效） | P1 安全 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
@@ -60,6 +61,7 @@ Rust workspace 根是 `rust/`；Windows 上需要
 - `plaintext_export_roundtrips`
 - `entry_drop_zeroizes_sensitive_fields`（守卫：`impl Drop for Entry` 被删会红）
 - `reply_body_is_zeroized`（守卫：bridge 响应缓冲区的 Zeroizing 被去掉会红）
+- `entry_drop_zeroizes_sensitive_fields`（覆盖 totp / fields）
 - `update_settings_clamps_dangerous_values` / `..._caps_huge_values` / `..._keeps_valid_values`
 - `opening_legacy_vault_clamps_settings_in_memory`
 - `duplicate_entry_ids_are_detected` / `unique_ids_report_nothing`
@@ -129,7 +131,22 @@ mtime 2026-11-01 23:19:17。
 
 ---
 
-## 7. 审查方法记录（下一轮可复用）
+## 7. 一条反复踩到的坑：守卫测试必须先自验
+
+「盯源码」型的守卫测试（用 `include_str!` 读自己的源文件，断言某个调用还在）
+很容易写成**永远通过**的样子。本会话踩了三次：
+
+| 写法 | 为什么失效 |
+| --- | --- |
+| `src.split("锚点").nth(1)` 然后直接断言 | 拿到的是从锚点到**文件末尾**，里面包含测试自己 → 永远为真 |
+| `take_while(\|l\| l.trim() != "}")` | 停在函数里第一个**内层块**的右花括号，后面的检查落空 |
+| `body.contains("self.totp")` | `let _ = &self.totp;` 也能通过，但它什么都没清零 |
+
+正确做法：截取到**与锚点同缩进层级**的 `}`，加一条自检断言
+（"范围里必须含某个必然存在的语句"），断言写到**关键调用**而非关键标识符。
+写完必须实测一次退化：把目标代码改坏，确认测试真的红。
+
+## 8. 审查方法记录（下一轮可复用）
 
 本轮 6 个缺陷都不是靠读代码「看」出来的，而是靠问三个问题：
 
