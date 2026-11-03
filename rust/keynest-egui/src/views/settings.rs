@@ -5,6 +5,8 @@ use zeroize::Zeroizing;
 
 use keynest_core::vault::Settings;
 
+use crate::views::main_view::Filter;
+
 use crate::ui::{icons, theme};
 
 /// 打开设置时算好的一份安全概况。
@@ -70,6 +72,11 @@ pub struct SettingsState {
     pub orig: Settings,
     /// 用户在有未保存改动时点了关闭 —— 现在等他确认。
     pub confirm_discard: bool,
+    /// 确认之后要跳去的筛选（点「查看弱密码」时记下）。
+    ///
+    /// 不能在这一步直接跳：用户可能选「继续编辑」，
+    /// 那时他应该还在设置页。
+    pub pending_jump: Option<Filter>,
     pub old_pw: Zeroizing<String>,
     pub new_pw: Zeroizing<String>,
     pub new_pw2: Zeroizing<String>,
@@ -177,6 +184,7 @@ impl SettingsState {
             draft: settings.clone(),
             orig: settings.clone(),
             confirm_discard: false,
+            pending_jump: None,
             old_pw: Zeroizing::new(String::new()),
             new_pw: Zeroizing::new(String::new()),
             new_pw2: Zeroizing::new(String::new()),
@@ -433,11 +441,23 @@ pub fn show(ctx: &egui::Context, st: &mut SettingsState) -> SettingsIntent {
                             if theme::primary_button(ui, "继续编辑", 96.0).clicked() {
                                 intent = SettingsIntent::CancelDiscard;
                             }
-                            if theme::ghost_button(ui, "放弃改动并关闭").clicked() {
+                            let discard_label = if st.pending_jump.is_some() {
+                                "放弃改动并跳转"
+                            } else {
+                                "放弃改动并关闭"
+                            };
+                            if theme::ghost_button(ui, discard_label).clicked() {
                                 intent = SettingsIntent::DiscardConfirmed;
                             }
-                            if theme::ghost_button(ui, "保存并关闭").clicked() {
-                                // 先保存；保存成功后再关。
+                            // 按钮文案跟着「确认之后要做什么」变：
+                            // 是关窗还是跳去筛选。
+                            let save_label = if st.pending_jump.is_some() {
+                                "保存并跳转"
+                            } else {
+                                "保存并关闭"
+                            };
+                            if theme::ghost_button(ui, save_label).clicked() {
+                                // 先保存；保存成功后再关（或再跳）。
                                 // 直接复用 Save 意图会让 app.rs 保存后仍把窗口留着，
                                 // 所以这里给出一个明确的组合意图。
                                 intent = SettingsIntent::SaveAndClose;
@@ -537,11 +557,30 @@ fn tab_security(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut Settings
     });
     ui.add_space(8.0);
     ui.horizontal(|ui| {
+        // 这两个按钮会**关掉设置页**并跳到列表筛选。
+        //
+        // 有未保存的改动时不能直接跳：`app.rs` 那边是
+        // `SettingsIntent::ShowWeak => self.settings = None`，
+        // 改动会静默丢掉。走一遍确认，确认后再跳。
+        //
+        // 目标是记在 `pending_jump` 里，确认（或放弃改动）之后由
+        // `app.rs` 执行——不在这里直接跳，否则用户点了「继续编辑」
+        // 也已经在列表页了。
         if sec.weak > 0 && theme::ghost_button(ui, "查看弱密码").clicked() {
-            *intent = SettingsIntent::ShowWeak;
+            if should_block_close(st.is_dirty(), st.confirm_discard) {
+                st.confirm_discard = true;
+                st.pending_jump = Some(Filter::Weak);
+            } else {
+                *intent = SettingsIntent::ShowWeak;
+            }
         }
         if sec.reused > 0 && theme::ghost_button(ui, "查看重复").clicked() {
-            *intent = SettingsIntent::ShowReused;
+            if should_block_close(st.is_dirty(), st.confirm_discard) {
+                st.confirm_discard = true;
+                st.pending_jump = Some(Filter::Reused);
+            } else {
+                *intent = SettingsIntent::ShowReused;
+            }
         }
     });
     ui.add_space(4.0);
@@ -1107,6 +1146,66 @@ mod tests {
         // 已经在问了 → 不要再拦（否则点了「放弃」还会被拦，出不去）
         assert!(!should_block_close(true, true));
         assert!(!should_block_close(false, true));
+    }
+
+    /// 「查看弱密码 / 查看重复」这两个按钮会**关掉设置页**。
+    ///
+    /// 原来它们直接 `SettingsIntent::ShowWeak`，`app.rs` 那边是
+    /// `self.settings = None` —— 有未保存改动时会静默丢掉。
+    ///
+    /// 修法是：脏的时候先记下要跳去哪（`pending_jump`），走确认流程，
+    /// 确认之后再跳。这条测试守住「记下来了」这件事。
+    #[test]
+    fn jumping_to_a_filter_while_dirty_is_deferred_until_confirmed() {
+        let s = base();
+        let mut st = SettingsState::new(&s, ctx());
+        st.draft.auto_lock_minutes = 5;
+        assert!(st.is_dirty());
+
+        // 模拟点「查看弱密码」时走的判定
+        if should_block_close(st.is_dirty(), st.confirm_discard) {
+            st.confirm_discard = true;
+            st.pending_jump = Some(Filter::Weak);
+        }
+
+        assert!(st.confirm_discard, "应当进入确认状态");
+        assert!(
+            matches!(st.pending_jump, Some(Filter::Weak)),
+            "要跳去的地方没记下来——确认之后用户就不知道该去哪了"
+        );
+        // 还没有关闭：用户可能选「继续编辑」
+        assert!(!st.closing);
+    }
+
+    /// 选「继续编辑」后，那次跳转的意图要作废。
+    ///
+    /// 不作废的话：用户改了设置、点了查看弱密码、再点继续编辑，
+    /// 关窗时可能会莫名其妙跳到弱密码列表。
+    #[test]
+    fn cancelling_the_confirmation_forgets_the_pending_jump() {
+        let s = base();
+        let mut st = SettingsState::new(&s, ctx());
+        st.draft.auto_lock_minutes = 5;
+        st.confirm_discard = true;
+        st.pending_jump = Some(Filter::Weak);
+
+        // 模拟 CancelDiscard 的处理
+        st.confirm_discard = false;
+        st.pending_jump = None;
+
+        assert!(!st.confirm_discard);
+        assert!(st.pending_jump.is_none(), "继续编辑后跳转意图应当作废");
+    }
+
+    /// 没改动时点「查看弱密码」应当直接跳，不弹确认。
+    #[test]
+    fn jumping_without_changes_does_not_ask() {
+        let s = base();
+        let st = SettingsState::new(&s, ctx());
+        assert!(
+            !should_block_close(st.is_dirty(), st.confirm_discard),
+            "没有改动却要弹确认——按钮点下去没反应，用户会以为坏了"
+        );
     }
 
     /// 刚打开时不该是「脏」的。

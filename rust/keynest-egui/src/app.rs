@@ -1902,12 +1902,26 @@ impl App {
             SettingsIntent::CancelDiscard => {
                 if let Some(st) = self.settings.as_mut() {
                     st.confirm_discard = false;
+                    // 用户选「继续编辑」：那次跳转的意图作废，留在设置页。
+                    st.pending_jump = None;
                 }
             }
             SettingsIntent::DiscardConfirmed => {
                 // 用户明确选择放弃改动：直接丢掉整份状态。
                 // 不做「自动保存」——他要的就是不要这些改动。
+                //
+                // 如果这次确认是被「查看弱密码 / 查看重复」触发的，
+                // 放弃之后要接着跳到那个筛选——用户点那两个按钮的
+                // 本意就是去看列表，不该因为中途跳了个确认框就作废。
+                let jump = self
+                    .settings
+                    .as_ref()
+                    .and_then(|st| st.pending_jump.clone());
                 self.settings = None;
+                if let Some(f) = jump {
+                    self.filter = f;
+                    self.search.clear();
+                }
             }
             SettingsIntent::SaveAndClose => {
                 self.apply_settings_save();
@@ -1919,7 +1933,15 @@ impl App {
                     .map(|st| st.error.is_none())
                     .unwrap_or(false);
                 if ok {
+                    let jump = self
+                        .settings
+                        .as_ref()
+                        .and_then(|st| st.pending_jump.clone());
                     self.settings = None;
+                    if let Some(f) = jump {
+                        self.filter = f;
+                        self.search.clear();
+                    }
                 }
             }
             SettingsIntent::Closed => self.settings = None,
