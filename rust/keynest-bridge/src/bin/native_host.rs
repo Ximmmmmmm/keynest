@@ -60,8 +60,33 @@ fn load_secret() -> Result<SharedSecret, BridgeError> {
 }
 
 fn run() -> Result<(), BridgeError> {
-    // 先连 GUI：连不上立刻退出，让浏览器显示"扩展未连接"
-    let mut pipe = connect_client()?;
+    // 先连 GUI：连不上要让浏览器显示"扩展未连接"。
+    //
+    // # 但不能只是"立刻退出"
+    //
+    // 宿主没安装 与 宿主在但桌面程序没跑，这两件事在扩展那边
+    // **看起来一模一样**：Chrome 找不到宿主时，`connectNative` 不抛错，
+    // 只是返回一个立即断开的端口。
+    //
+    // 扩展因此分不清「该去装桥接」还是「该去开钥巢」——
+    // 而用户看到的是同一句话。���是扩展第一次装上时最常遇到的情况，
+    // 引导给错方向，用户就会得出「这软件有问题」的结论。
+    //
+    // 所以这里先把原因告诉扩展，再退出。
+    let mut pipe = match connect_client() {
+        Ok(p) => p,
+        Err(e) => {
+            // 注意：这条消息走的是**浏览器 → 扩展**的方向（stdout），
+            // 所以扩展能收到它，并据此给出正确的引导。
+            let boot = br#"{"v":1,"id":"__boot__","ok":false,"error":"GUI_NOT_RUNNING"}"#;
+            let _ = write_frame(&mut io::stdout(), boot);
+            // 给扩展一点时间把这个消息送到——写完立刻退出会让扩展
+            // 先收到「断开」再收到「原因」，顺序反了它就分不清了。
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            let _ = e;
+            return Ok(());
+        }
+    };
     let shared = load_secret()?;
 
     // ---- 握手：challenge → proof → ok ----

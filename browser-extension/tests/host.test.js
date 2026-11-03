@@ -477,3 +477,115 @@ test('FAIL-SAFE: 额外模块的坏定义在启动时就炸，不带病运行', 
     createHost(f.chrome, { extraModules: [{ id: 'Bad', title: 'x' }] })
   );
 });
+
+/* ============================ 启动消息 ============================ */
+
+/**
+ * 宿主在、桌面程序没跑：宿主会先发一条启动消息说明原因。
+ *
+ * # 为什么需要这个机制
+ *
+ * 宿主**没安装**时，Chrome 不会启动任何进程，只是返回一个立即断开的
+ * 端口——扩展分不出「没装」与「桌面程序没跑」这两件事。
+ * 而这两种情况要给用户**完全不同**的引导：
+ *
+ * - 没装 → 「去安装浏览器桥接」
+ * - 桌面程序没跑 → 「去打开钥巢」
+ *
+ * 所以宿主启动后要主动告诉扩展原因。
+ */
+test('PASS: 启动消息让在途请求以 GUI_NOT_RUNNING 失败', async () => {
+  const f = fakeChrome();
+  const host = createNativePort(f.chrome, { timeoutMs: 1000 });
+
+  const p = host.request('status', {});
+  await waitPosted(f, 1);
+
+  // 宿主发来启动消息
+  f.reply({ v: 1, id: '__boot__', ok: false, error: 'GUI_NOT_RUNNING' });
+
+  await assert.rejects(p, (e) => {
+    assert.equal(e.code, 'GUI_NOT_RUNNING');
+    return true;
+  });
+});
+
+/**
+ * 启动消息之后端口断开，错误码要**保持** GUI_NOT_RUNNING。
+ *
+ * 否则断连事件会把原因覆盖成 HOST_DISCONNECTED，
+ * 扩展又分不出两种情况了——那这条消息就白发了。
+ */
+test('PASS: 启动消息后断连，原因不被覆盖', async () => {
+  const f = fakeChrome();
+  const host = createNativePort(f.chrome, { timeoutMs: 1000 });
+
+  const p = host.request('status', {});
+  await waitPosted(f, 1);
+
+  f.reply({ v: 1, id: '__boot__', ok: false, error: 'GUI_NOT_RUNNING' });
+  f.disconnect();
+
+  await assert.rejects(p, (e) => {
+    assert.equal(e.code, 'GUI_NOT_RUNNING');
+    return true;
+  });
+});
+
+/**
+ * 没有启动消息就断开 → 错误码是 HOST_DISCONNECTED。
+ *
+ * 这代表宿主**根本没被启动**：浏览器找不到它（没安装或没登记）。
+ */
+test('PASS: 没有启动消息就断开是 HOST_DISCONNECTED', async () => {
+  const f = fakeChrome();
+  const host = createNativePort(f.chrome, { timeoutMs: 1000 });
+
+  const p = host.request('status', {});
+  await waitPosted(f, 1);
+  f.disconnect();
+
+  await assert.rejects(p, (e) => {
+    assert.equal(e.code, 'HOST_DISCONNECTED');
+    return true;
+  });
+});
+
+/**
+ * 启动消息里的 error 可能是对象（与普通响应同形）。
+ *
+ * 两种形状都要认，否则换一种写法就退化成 HOST_DISCONNECTED。
+ */
+test('PASS: 启动消息的 error 是对象形状也能识别', async () => {
+  const f = fakeChrome();
+  const host = createNativePort(f.chrome, { timeoutMs: 1000 });
+
+  const p = host.request('status', {});
+  await waitPosted(f, 1);
+  f.reply({ v: 1, id: '__boot__', ok: false, error: { code: 'GUI_NOT_RUNNING' } });
+
+  await assert.rejects(p, (e) => {
+    assert.equal(e.code, 'GUI_NOT_RUNNING');
+    return true;
+  });
+});
+
+/** 重连时要重置原因：上次的原因不适用于这次。 */
+test('PASS: 重连会重置上一次的原因', async () => {
+  const f = fakeChrome();
+  const host = createNativePort(f.chrome, { timeoutMs: 1000 });
+
+  let p = host.request('status', {});
+  await waitPosted(f, 1);
+  f.reply({ v: 1, id: '__boot__', ok: false, error: 'GUI_NOT_RUNNING' });
+  await assert.rejects(p, (e) => e.code === 'GUI_NOT_RUNNING');
+
+  // 宿主发完启动消息就退出了，端口随之断开
+  f.disconnect();
+
+  // 重新连一次，这次宿主直接断开（没装宿主的情形）
+  p = host.request('status', {});
+  await waitPosted(f, 2);
+  f.disconnect();
+  await assert.rejects(p, (e) => e.code === 'HOST_DISCONNECTED');
+});

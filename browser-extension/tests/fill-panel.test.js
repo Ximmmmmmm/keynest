@@ -48,8 +48,8 @@ async function renderFill(sendResult, getTabId = () => 1) {
   return host.texts;
 }
 
-test('PASS: 宿主缺失时提示「浏览器桥接未安装」', async () => {
-  const texts = await renderFill({ ok: false, error: 'NATIVE_HOST_MISSING' });
+test('PASS: 宿主没被启动时提示「浏览器桥接没有就绪」', async () => {
+  const texts = await renderFill({ ok: false, error: 'HOST_DISCONNECTED' });
   const all = texts.map((t) => t.text).join(' | ');
   assert.ok(
     all.includes('浏览器桥接') || all.includes('设置'),
@@ -61,10 +61,14 @@ test('PASS: 宿主缺失时提示「浏览器桥接未安装」', async () => {
   );
 });
 
-test('PASS: 连接断开时提示「KeyNest 未运行」', async () => {
-  const texts = await renderFill({ ok: false, error: 'HOST_DISCONNECTED' });
+test('PASS: 桌面程序没跑时提示「钥巢没有运行」', async () => {
+  const texts = await renderFill({ ok: false, error: 'GUI_NOT_RUNNING' });
   const all = texts.map((t) => t.text).join(' | ');
-  assert.ok(all.includes('请先打开钥巢'), `应当提示打开桌面程序：${all}`);
+  assert.ok(all.includes('钥巢'), `应当提示打开桌面程序：${all}`);
+  assert.ok(
+    !all.includes('浏览器桥接'),
+    `宿主在，不该让用户去装桥接：${all}`
+  );
 });
 
 test('PASS: 其它失败给通用提示，不崩溃', async () => {

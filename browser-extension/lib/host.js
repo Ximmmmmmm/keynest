@@ -59,9 +59,38 @@ export function createNativePort(chromeImpl, opts = {}) {
   /** @type {Set<() => void>} 断连回调（让上层清掉授权等状态） */
   const onDisconnect = new Set();
 
+  /**
+   * 启动消息的 id。
+   *
+   * 由 native host 在「连不上桌面程序」时发出：
+   * `{"id":"__boot__","ok":false,"error":"GUI_NOT_RUNNING"}`。
+   */
+  const BOOT_MESSAGE_ID = '__boot__';
+
+  /**
+   * 最近一次启动消息报的原因。
+   *
+   * `null` 表示**没收到**启动消息——也就是宿主根本没被启动，
+   * 即浏览器找不到它（没安装或没登记）。
+   */
+  let bootError = null;
+
+  /** 让所有在途请求以指定错误失败。 */
+  function failInflight(code) {
+    for (const [, p] of inflight) {
+      clearTimeout(p.timer);
+      const e = new Error(code);
+      e.code = code;
+      p.reject(e);
+    }
+    inflight.clear();
+  }
+
   function connect() {
     if (port) return port;
     try {
+      // 每次重连都要重置：上次的原因不适用于这次。
+      bootError = null;
       port = chromeImpl.runtime.connectNative(HOST_NAME);
     } catch {
       port = null;
@@ -71,6 +100,16 @@ export function createNativePort(chromeImpl, opts = {}) {
     }
 
     port.onMessage.addListener((msg) => {
+      // 启动消息：宿主在，但桌面程序没跑。
+      //
+      // 宿主**没安装**时 Chrome 不会启动任何进程，只是返回一个
+      // 立即断开的端口——扩展分不出「没装」与「桌面程序没跑」。
+      // 宿主启动后主动告诉我们原因，才能给出正确的引导。
+      if (msg && msg.id === BOOT_MESSAGE_ID) {
+        bootError = String((msg.error && msg.error.code) || msg.error || 'GUI_NOT_RUNNING');
+        failInflight(bootError);
+        return;
+      }
       const pending = inflight.get(msg && msg.id);
       if (!pending) return; // 未知 id：丢弃，绝不当成有效响应
       inflight.delete(msg.id);
@@ -85,14 +124,13 @@ export function createNativePort(chromeImpl, opts = {}) {
 
     port.onDisconnect.addListener(() => {
       port = null;
-      // 断连时在途请求一律失败：不能让调用方等到 5 秒超时
-      for (const [, p] of inflight) {
-        clearTimeout(p.timer);
-        const e = new Error('HOST_DISCONNECTED');
-        e.code = 'HOST_DISCONNECTED';
-        p.reject(e);
-      }
-      inflight.clear();
+      // 断连时在途请求一律失败：不能让调用方等到 5 秒超时。
+      //
+      // 错误码优先用启动消息报的原因（GUI_NOT_RUNNING）——
+      // 那说明宿主在、只是桌面程序没跑，与「宿主根本没被启动」
+      // 是两回事，扩展要据此给出不同的引导。
+      const code = bootError || 'HOST_DISCONNECTED';
+      failInflight(code);
       // 通知上层：授权一律作废
       for (const fn of onDisconnect) {
         try {

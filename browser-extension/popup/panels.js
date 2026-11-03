@@ -37,12 +37,19 @@ export function createFillPanel(deps) {
         // 两者都提示「KeyNest 未运行」的话，用户会去开钥巢——
         // 而开了也没用，因为真正缺的是桥接登记。
         const code = status && status.error;
-        if (code === 'NATIVE_HOST_MISSING') {
-          host.el('p', 'note error', '浏览器桥接未安装。请在钥巢的「设置 → 浏览器」里安装。');
+        if (code === 'GUI_NOT_RUNNING') {
+          // 宿主在、桌面程序没跑。
+          host.el('p', 'note', '钥巢没有运行。请先打开钥巢。');
         } else if (code === 'HOST_DISCONNECTED') {
-          host.el('p', 'note', 'KeyNest 未运行。请先打开钥巢。');
+          // 宿主**根本没被启动**——浏览器找不到它。
+          // 绝大多数情况是桥接还没登记（扩展刚装好时的常态）。
+          host.el(
+            'p',
+            'note error',
+            '浏览器桥接没有就绪。请在钥巢的「设置 → 浏览器」里填入上面的扩展 ID 并点「安装」。'
+          );
         } else {
-          host.el('p', 'note', 'KeyNest 未运行。请先打开钥巢。');
+          host.el('p', 'note', '连不上钥巢。请确认它已运行，并已安装浏览器桥接。');
         }
         return;
       }
