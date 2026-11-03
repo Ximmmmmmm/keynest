@@ -16,6 +16,7 @@
 pub mod auth;
 pub mod error;
 pub mod framing;
+pub mod hostinstall;
 pub mod keyfile;
 pub mod limits;
 pub mod pipe;

@@ -19,6 +19,13 @@ pub enum BridgeError {
     UnknownCommand,
     /// 请求结构不合法（缺字段、多字段、类型不对）。
     InvalidRequest(&'static str),
+
+    /// 请求里的某个字段值不合法。
+    ///
+    /// 与 `InvalidRequest` 分开：那个只接受 `&'static str`，
+    /// 而"扩展 ID abc 不合法"这种信息必须把**实际的值**带出来，
+    /// 用户才知道自己填错了什么。
+    InvalidValue(String),
     /// 某个字符串字段超长。只报字段名与上限，不报内容。
     FieldTooLong { field: &'static str, max: usize },
     /// 握手失败。
@@ -50,6 +57,7 @@ impl BridgeError {
             BridgeError::VersionMismatch { .. } => "VERSION",
             BridgeError::UnknownCommand => "UNKNOWN_COMMAND",
             BridgeError::InvalidRequest(_) => "INVALID_REQUEST",
+            BridgeError::InvalidValue(_) => "INVALID_VALUE",
             BridgeError::FieldTooLong { .. } => "FIELD_TOO_LONG",
             BridgeError::HandshakeFailed(_) => "HANDSHAKE",
             BridgeError::NoSession => "NO_SESSION",
@@ -76,6 +84,7 @@ impl fmt::Display for BridgeError {
             }
             BridgeError::UnknownCommand => write!(f, "未知命令"),
             BridgeError::InvalidRequest(what) => write!(f, "请求不合法：{what}"),
+            BridgeError::InvalidValue(what) => write!(f, "请求不合法：{what}"),
             BridgeError::FieldTooLong { field, max } => {
                 write!(f, "字段 {field} 超过 {max} 字符")
             }
