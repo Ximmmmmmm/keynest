@@ -36,7 +36,9 @@ Three design rules:
 
 - Master-password unlock, idle auto-lock (uses the shorter of app-idle and system-idle)
 - Entries with title, username, password, URL, category, notes
-- Entry types: login, note, card, identity — and user-defined types with field templates
+- Entry types: login, note, card, identity, **API key** — plus user-defined types with
+  field templates. The API key type manages AI service credentials (provider, the key
+  itself masked, base URL, org, quota, expiry); existing vaults get it on next open
 - Custom fields (user-defined key/value pairs, each length-bounded with a live
   character counter), each can be individually masked
 - Search across title, username, URL, notes, category, type and custom field values
