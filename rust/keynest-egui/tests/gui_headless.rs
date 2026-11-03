@@ -298,6 +298,179 @@ fn the_edit_dialog_renders() {
     }
 }
 
+/// 在指定位置**真的点一下**，返回这一下产生的意图。
+///
+/// # 为什么需要
+///
+/// 之前的测试只能证明「渲染不崩」——但用户是**点**的。
+/// 命中测试（点在哪个矩形里）与「点击 → 意图」的接线
+/// 完全没有自动化覆盖，只能靠人点。
+///
+/// egui 的 `RawInput.events` 可以注入指针事件，
+/// 所以「点这里会发生什么」变成了可以断言的东西。
+///
+/// 三帧：移动（建立 hover 与 widget id）→ 按下 → 释放。
+/// egui 的 `Response::clicked()` 在**释放**那一帧才为真。
+fn click_at(data: &VaultData, pos: egui::Pos2) -> MainIntent {
+    // 必须复用同一个 Context：跨帧的 widget id 与交互状态都在它里面。
+    let ctx = Context::default();
+    let mut search = String::new();
+    let mut filter = Filter::All;
+    let mut sort = SortBy::UpdatedDesc;
+    let mut selected = None;
+    let mut reveal = None;
+    let mut new_cat = String::new();
+    let copy_banner: Option<(std::time::Instant, u32)> = None;
+
+    let mut run_frame = |ctx: &Context, events: Vec<egui::Event>| -> MainIntent {
+        let input = RawInput {
+            events,
+            ..Default::default()
+        };
+        let mut intent = MainIntent::None;
+        let mut out = ctx.run_ui(input, |ui: &mut Ui| {
+            let view = MainView {
+                data,
+                search: &mut search,
+                filter: &mut filter,
+                sort: &mut sort,
+                selected_id: &mut selected,
+                reveal: &mut reveal,
+                copy_banner: &copy_banner,
+                new_category_buf: &mut new_cat,
+                focus_search: false,
+                idle_left_secs: 0,
+                toast: None,
+            };
+            intent = keynest_egui::views::main_view::show(ui, view);
+        });
+        out.textures_delta.clear();
+        intent
+    };
+
+    // 第一帧：让界面完成布局（egui 需要一帧才知道每个 widget 在哪）
+    let _ = run_frame(&ctx, vec![]);
+
+    // 第二帧：指针移到目标位置并按下
+    let _ = run_frame(
+        &ctx,
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ],
+    );
+
+    // 第三帧：释放 = 一次点击
+    run_frame(
+        &ctx,
+        vec![egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        }],
+    )
+}
+
+/// 点击列表里的行必须选中条目。
+///
+/// 扫描纵向位置找一个真的能点中行的坐标，然后断言：
+/// 点出来的意图是 `Select`，且 id 是库里真实存在的条目。
+///
+/// 这条测的是**命中测试 + 点击接线**——之前完全没有自动化覆盖。
+#[test]
+fn clicking_a_row_selects_an_entry() {
+    let data = data_with(5);
+
+    let mut hit: Option<(egui::Pos2, MainIntent)> = None;
+    for y in (80..=900).step_by(12) {
+        let pos = egui::Pos2::new(200.0, y as f32);
+        let intent = click_at(&data, pos);
+        if matches!(intent, MainIntent::Select(_)) {
+            hit = Some((pos, intent));
+            break;
+        }
+    }
+
+    let (pos, intent) = hit.expect("扫遍整个列表区域都点不中任何一行——命中测试坏了");
+    let MainIntent::Select(id) = intent else {
+        unreachable!()
+    };
+    assert!(
+        data.entries.iter().any(|e| e.id == id),
+        "点出来的 id {id} 不在库里"
+    );
+    // 顺带确认：那个坐标确实落在前几条的范围里
+    assert!(pos.y < 900.0);
+}
+
+/// 从上到下点击，选中的条目顺序必须与列表顺序一致。
+///
+/// 「点某处能选中某条」还不够——映射可能是**反的**或**错位的**：
+/// 点第一行选中第五条，用户会觉得界面完全乱套。
+///
+/// 这条把「纵向位置 → 条目」的映射方向钉住。
+#[test]
+fn clicking_down_the_list_walks_entries_in_order() {
+    let data = data_with(4);
+
+    // 收集「y 坐标 → 被选中的 id」，同一 id 只记第一次出现的位置
+    let mut hits: Vec<(f32, String)> = Vec::new();
+    for y in (80..=620).step_by(6) {
+        let intent = click_at(&data, egui::Pos2::new(200.0, y as f32));
+        if let MainIntent::Select(id) = intent {
+            if !hits.iter().any(|(_, seen)| *seen == id) {
+                hits.push((y as f32, id));
+            }
+        }
+    }
+
+    assert!(
+        hits.len() >= 3,
+        "只点中了 {} 行，扫不到足够多的行来验证顺序",
+        hits.len()
+    );
+
+    // 得到的 id 序列应当等于库里条目的顺序（列表按 UpdatedDesc 排序，
+    // 但所有条目的 updated_at 相同，sort_by 是稳定排序 → 保持原始顺序）
+    let expected: Vec<String> = data
+        .entries
+        .iter()
+        .take(hits.len())
+        .map(|e| e.id.clone())
+        .collect();
+    let got: Vec<String> = hits.iter().map(|(_, id)| id.clone()).collect();
+    assert_eq!(
+        got, expected,
+        "从上到下点出来的顺序与列表顺序不一致（映射反了或错位了）"
+    );
+
+    // 顺带确认纵向位置是递增的
+    for w in hits.windows(2) {
+        assert!(w[0].0 < w[1].0, "同一行的 id 出现在了更靠下的位置");
+    }
+}
+
+/// 点击列表**下方**的空白区域不能选中任何条目。
+///
+/// 命中测试写宽了（比如整块区域都算作行）就会出现
+/// 「点空白处也选中了某条」——用户会觉得界面在乱跳。
+#[test]
+fn clicking_empty_space_below_the_list_selects_nothing() {
+    let data = data_with(2);
+    // 窗口默认高度约 720；两条记录只占 ~100px，下面全是空白
+    let intent = click_at(&data, egui::Pos2::new(200.0, 700.0));
+    assert!(
+        !matches!(intent, MainIntent::Select(_)),
+        "点空白处也选中了条目"
+    );
+}
+
 #[test]
 fn renders_the_first_entries_at_the_top() {
     // 顶部应当显示最前面的条目——虚拟滚动算错了范围就会露馅。

@@ -196,12 +196,21 @@ values.
 - TOTP secrets must be pasted; there is no QR-code scanning.
 - Custom fields are exported to JSON but **not** to CSV (Bitwarden's `fields` column uses a
   private serialisation format).
-- No browser autofill.
+- Browser autofill is **manually triggered**: pick an entry in the extension popup. There is
+  no "fill on page load", deliberately — silent filling would hand a password to a page the
+  user never confirmed.
+- The extension ships four modules: password filling, ad/tracker blocking, reader mode, and
+  dark mode.
 - Rollback attacks (replacing `vault.dat` with an older copy) cannot be detected.
 - Plaintext exports are unencrypted by nature; the program can warn, but cannot protect the
   file afterwards.
-- The UI has no end-to-end click tests; behaviour is covered by unit tests and by rendering
-  screenshots, not by GUI automation.
+- UI automation runs egui headlessly (`Context::run_ui`): it asserts that rendering does not
+  panic, that every filter/sort combination renders, that all settings tabs and the edit
+  dialog render, and that **click hit-testing selects the row you clicked**. It runs inside
+  the test harness, not a real window — font rasterisation, high-DPI scaling and IME
+  behaviour still need manual confirmation.
+- The full chain "unlock → bridge → fill" still requires a GUI acceptance run
+  (`test/acceptance/run.mjs`), which needs headed Chrome.
 
 ---
 
