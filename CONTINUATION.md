@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 11:20 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`b202ac0`
+> 最后更新：2026-11-03 11:40 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`200ab9d`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **282** | `cd rust && cargo test --workspace` |
+| Rust | **288** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **475** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -61,6 +61,8 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `35d4538` | README「已知限制」三处与代码实际状态不符 | P1 文档 |
 | `f1712cb` | 中文 README 缺回滚攻击这条限制（英文版有） | P2 文档 |
 | `b202ac0` | **SPA 路由监听从未真正工作**（隔离世界与主世界不相通） | **P1 功能性** |
+| `7f7e450` | 扩展的 475 项测试**从未进过 CI** | P1 工程 |
+| `200ab9d` | 对端断开被报成 IO 错误（正常连接结束却像故障） | P1 健壮性 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
@@ -109,6 +111,10 @@ Rust workspace 根是 `rust/`；Windows 上需要
 **仍未验证**（必须启动 GUI，会抢焦点与键鼠，需机器空闲时做）：
 
 - 解锁 → 桥接 → 密码填充的完整链路（`node test/acceptance/run.mjs`，46 项）
+
+桥接的**密码学与管道接线**已经用进程级集成测试覆盖了
+（`tests/process_bridge.rs`：真实命名管道、真实握手、真实请求往返、
+错误的 key 在处理任何请求之前被拒），不依赖 GUI。
 
 ### P2：审查中观察到但未处理
 
