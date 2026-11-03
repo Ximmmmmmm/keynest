@@ -157,6 +157,60 @@ jobs:
 
           Get-ChildItem $stage | Select-Object Name, Length
 
+      # ---------------------------------------------------------------- #
+      # 浏览器扩展（Chromium 系）
+      # ---------------------------------------------------------------- #
+      # 扩展是产品的一半功能，不进发布包就等于没发布。
+      #
+      # 用**显式白名单**打包，不用通配符——理由与 Windows 产物相同：
+      # 避免哪天误把测试文件、私钥、开发者本地的 vault.dat 一起塞进去。
+      - name: 打包浏览器扩展
+        shell: pwsh
+        run: |
+          $ext = "ext-stage"
+          New-Item -ItemType Directory -Force -Path $ext | Out-Null
+
+          $files = @(
+            "manifest.json",
+            "background/service-worker.js",
+            "content/content-script.js",
+            "popup/popup.html", "popup/popup.js", "popup/popup.css",
+            "popup/panel-host.js", "popup/panels.js",
+            "options/options.html", "options/options.js", "options/options.css",
+            "lib/host.js", "lib/modules.js", "lib/config.js", "lib/permissions.js",
+            "lib/errors.js", "lib/inject.js", "lib/auto-apply.js",
+            "lib/site-memory.js", "lib/spa-router.js",
+            "lib/filters/domain.js", "lib/filters/rules.js", "lib/filters/allowlist.js",
+            "lib/modules/vault.js", "lib/modules/registry.js",
+            "lib/modules/adblock.js", "lib/modules/reader.js", "lib/modules/dark.js",
+            "lib/reader/core.js",
+            # 密码填充链路的必需模块：授权状态机、origin 规范化、
+            # 兑换、来源分类、存储。漏任何一个，扩展在浏览器里直接白屏。
+            "lib/auth-store.js", "lib/origin.js", "lib/redeem.js",
+            "lib/sender.js", "lib/storage.js",
+            "package.json"
+          )
+          foreach ($f in $files) {
+            $src = Join-Path "browser-extension" $f
+            if (-not (Test-Path $src)) { throw "扩展缺少文件: $f" }
+            $dst = Join-Path $ext $f
+            New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+            Copy-Item $src $dst
+          }
+
+          # 版本必须与桌面程序一致，否则用户装到两个不同版本会看到
+          # 「扩展说协议 v1、桌面程序说 v2」这种没法排查的问题。
+          $mf = Get-Content "browser-extension/manifest.json" -Raw | ConvertFrom-Json
+          $pkg = Get-Content "browser-extension/package.json" -Raw | ConvertFrom-Json
+          $ver = "${env:REF_NAME}".TrimStart("v")
+          if ($mf.version -ne $ver) { throw "扩展 manifest 版本 $($mf.version) 与标签 $ver 不一致" }
+          if ($pkg.version -ne $ver) { throw "扩展 package.json 版本 $($pkg.version) 与标签 $ver 不一致" }
+
+          # 装成一个 zip：用户在 Chrome/Edge 的「加载已解压的扩展程序」
+          # 里直接指向解压后的目录即可，不需要这个 zip；
+          # zip 是给需要归档/分发的人用的。
+          Compress-Archive -Path "$ext/*" -DestinationPath "release-stage/KeyNest-Extension-$ver.zip"
+
       - name: 上传构建产物
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
@@ -196,7 +250,7 @@ jobs:
           # 覆盖全部随包发布的文件，而不是只算 exe——
           # 用户要能确认自己拿到的 README/LICENSE 也没被替换过。
           sha256sum KeyNest.exe INSTALL.txt README.md README_EN.md SECURITY.md \
-                    LICENSE-MIT LICENSE-APACHE > SHA256SUMS
+                    LICENSE-MIT LICENSE-APACHE KeyNest-Extension-*.zip > SHA256SUMS
           cat SHA256SUMS
 
       # Release Notes 直接取 CHANGELOG 里对应版本那一节，避免"发布说明和实际改动对不上"。
