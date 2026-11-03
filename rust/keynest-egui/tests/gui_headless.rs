@@ -20,7 +20,7 @@
 use egui::{Context, RawInput, Ui};
 
 use keynest_core::vault::{Entry, VaultData};
-use keynest_egui::views::main_view::{Filter, MainView, SortBy};
+use keynest_egui::views::main_view::{Filter, MainIntent, MainView, SortBy};
 
 /// 造一个「像真的一样」的条目。
 fn entry(i: usize) -> Entry {
@@ -128,6 +128,93 @@ fn a_huge_vault_still_renders_something() {
         max_y >= min_y,
         "画出的内容上下界不对：min={min_y} max={max_y}"
     );
+}
+
+#[test]
+fn renders_an_empty_vault_without_panicking() {
+    // 空库是**首次运行**的必经状态。
+    // 渲染路径里到处是索引与 `unwrap`，空库是最容易崩的地方——
+    // 而崩了整个程序就起不来了。
+    let empty = VaultData::default();
+    let (texts, _, _) = render_and_count(&empty);
+    // 空库会画出「还没有条目」之类的空状态提示，所以有文字是正常的；
+    // 关键是**不崩**（渲染 panic = 整个程序起不来）。
+    assert!(texts > 0, "空库应当画出空状态提示，texts={texts}");
+}
+
+#[test]
+fn renders_a_single_entry_without_panicking() {
+    let one = data_with(1);
+    let (texts, _, _) = render_and_count(&one);
+    assert!(texts > 0, "一条记录也该画出来");
+}
+
+/// 在给定的筛选/排序下渲染，返回意图。
+fn render_with_filter(data: &VaultData, filter: Filter, sort: SortBy) -> MainIntent {
+    let mut search = String::new();
+    let mut filter = filter;
+    let mut sort = sort;
+    let mut selected = None;
+    let mut reveal = None;
+    let mut new_cat = String::new();
+    let copy_banner: Option<(std::time::Instant, u32)> = None;
+
+    // `run_ui` 的闭包必须返回 ()，所以用意图变量把结果带出来。
+    let mut intent = MainIntent::None;
+
+    let ctx = Context::default();
+    let mut out = ctx.run_ui(RawInput::default(), |ui: &mut Ui| {
+        let view = MainView {
+            data,
+            search: &mut search,
+            filter: &mut filter,
+            sort: &mut sort,
+            selected_id: &mut selected,
+            reveal: &mut reveal,
+            copy_banner: &copy_banner,
+            new_category_buf: &mut new_cat,
+            focus_search: false,
+            idle_left_secs: 0,
+            toast: None,
+        };
+        intent = keynest_egui::views::main_view::show(ui, view);
+    });
+    out.textures_delta.clear();
+    intent
+}
+
+/// 每个筛选与排序组合都要能渲染。
+///
+/// 这些分支各有各的代码路径（收藏筛选、弱密码筛选、复用筛选、回收站…），
+/// 很容易在某一条上留下一个越界索引。
+/// 渲染 panic = 整个程序崩掉，用户连错误提示都看不到。
+#[test]
+fn every_filter_and_sort_combination_renders() {
+    let mut data = data_with(30);
+    // 造出各种状态：收藏、弱密码、已删除、复用
+    data.entries[0].favorite = true;
+    data.entries[1].password = "123".into(); // 弱
+    data.entries[2].password = data.entries[3].password.clone(); // 复用
+    data.entries[4].deleted_at = Some("2026-01-01T00:00:00.000Z".into());
+    data.categories = vec!["网站".into(), "银行卡".into()];
+    data.types = vec![keynest_core::vault::TypeDef::new("账号", vec![])];
+
+    let filters = [
+        Filter::All,
+        Filter::Trash,
+        Filter::Favorites,
+        Filter::Weak,
+        Filter::Reused,
+        Filter::Category("网站".into()),
+    ];
+    // 用 `SortBy::ALL` 而不是手写一份：将来新增排序方式时
+    // 这条测试自动覆盖，不用回来改这里。
+    for f in &filters {
+        for s in &SortBy::ALL {
+            // 不 panic 就是通过
+            let _ = render_with_filter(&data, f.clone(), *s);
+        }
+    }
 }
 
 #[test]
