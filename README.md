@@ -288,7 +288,7 @@ cargo run -p keynest-core --example security_check
 ## 参与贡献
 
 见 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题的报告方式见 [SECURITY.md](SECURITY.md)。
-文档索引：[ARCHITECTURE.md](docs/ARCHITECTURE.md) · [THREAT_MODEL.md](docs/THREAT_MODEL.md) · [CHANGELOG.md](CHANGELOG.md)
+文档索引：[docs/README.md](docs/README.md) · [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [THREAT_MODEL.md](docs/THREAT_MODEL.md) · [CHANGELOG.md](CHANGELOG.md)
 
 ## 许可证
 

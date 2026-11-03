@@ -216,7 +216,7 @@ record('T11', '用例标题', r && r.ok ? 'PASS' : 'FAIL', JSON.stringify(r));
 
 ## 11. 当前覆盖与未覆盖
 
-**覆盖**（详见 `docs/KeyNest-Browser-Bridge-Phase2.7.4-Report.md`）：
+**覆盖**（详见 `docs/archive/phase-reports/KeyNest-Browser-Bridge-Phase2.7.4-Report.md`）：
 GUI 解锁、status、query 不含密码、空闲不超时、跨 origin 查询、100 并发兑换、
 重复兑换、真实填充、username 传递、Tab 关闭失效、主世界无 storage、错误 entryId、HTTP 拒绝。
 
