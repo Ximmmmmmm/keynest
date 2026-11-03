@@ -171,11 +171,8 @@ if [ "${2:-}" = "--gui" ] || [ "${1:-}" = "--gui" ]; then
   run "gui-acceptance" node test/acceptance/run.mjs
 fi
 
-# ---- legacy-electron 作业（非阻塞，但本地也要跑一遍）----
-if [ -f package.json ]; then
-  step "legacy-electron / 单元测试"
-  run "node test/*.test.js" bash_in . 'set -euo pipefail; files=$(ls test/*.test.js); count=$(ls test/*.test.js | wc -l); if [ "$count" -lt 7 ]; then echo "测试文件数量异常（$count 个）"; exit 1; fi; for f in $files; do echo "--- $f"; node "$f" >/dev/null; done'
-fi
+# legacy Electron 实现已归档到 legacy/，不再参与 CI。
+# 见 .github/workflows/ci.yml 与 docs/AUDIT.md 待办第 2 条。
 
 printf '\n'
 if [ "$FAILED" = "0" ]; then
