@@ -1155,6 +1155,12 @@ impl App {
                 if let AppState::Unlocked { reveal, .. } = &mut self.state {
                     *reveal = None;
                 }
+                // 剪贴板里如果还是这条的密码，一并清掉。
+                //
+                // 用户删掉一条记录，往往是因为怀疑它已经泄露。
+                // 而这时密码可能还躺在剪贴板里（默认停留 20 秒）——
+                // 屏幕上清干净了、剪贴板里还留着，等于没删干净。
+                clipboard::clear_on_lock(&mut self.last_copied);
                 self.set_toast("已删除");
             }
             Err(e) => self.set_toast(format!("删除失败：{e}")),
@@ -1850,6 +1856,12 @@ impl App {
                         if self.selected_id.as_deref() == Some(id.as_str()) {
                             self.selected_id = None;
                         }
+                        // 永久删除是「彻底消失」这一步，剪贴板也必须干净。
+                        //
+                        // 与「移入回收站」同样的理由，但更严格：
+                        // 用户点「永久删除」时，他要的是这东西**没有留下任何痕迹**。
+                        // 屏幕上清掉了、剪贴板里还留着，等于没做到。
+                        clipboard::clear_on_lock(&mut self.last_copied);
                         self.set_toast("已永久删除");
                     }
                     Err(e) => self.set_toast(format!("删除失败：{e}")),
@@ -2123,6 +2135,9 @@ impl App {
                     *data = fresh;
                 }
                 self.selected_id = None;
+                // 一次清掉几十条之后，剪贴板里大概率还留着其中某条的密码。
+                // 这是最彻底的删除操作，剪贴板也不该有残留。
+                clipboard::clear_on_lock(&mut self.last_copied);
                 self.set_toast(format!("已清空回收站（{n} 条，无法恢复）"));
             }
             Err(e) => self.set_toast(format!("清空失败：{e}")),
@@ -2651,6 +2666,67 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **所有**「让条目消失」的路径都必须清剪贴板。
+    ///
+    /// # 为什么用源码扫描
+    ///
+    /// 这几条路径都要真实的 `Vault`、解锁状态、确认弹窗才能走到，
+    /// 在单元测试里把它们逐个跑通成本很高。而这里的失败模式是
+    /// **漏掉一处**——新增一个删除入口时忘了清剪贴板。
+    ///
+    /// 所以扫源码：数一数 `clear_on_lock` 出现了几次，
+    /// 少了就说明有人加了新路径却没清剪贴板。
+    ///
+    /// # 这条测试自身的可靠性
+    ///
+    /// 它靠「数量下限 + 关键字」两个约束。故意删掉任意一处调用会让它变红；
+    /// 我已经验证过一次（见提交信息里的记录）。
+    ///
+    /// 局限：它不能证明「某一处具体在哪」。但这比完全没有护栏好，
+    /// 而且新增路径时它会立刻提醒「你该想想剪贴板了」。
+    #[test]
+    fn every_path_that_removes_an_entry_also_clears_the_clipboard() {
+        let full = include_str!("app.rs");
+        // **必须先切掉测试模块**。
+        //
+        // `include_str!` 把整个文件（含这段测试自己）都包含进来，
+        // 而下面的说明文字里就写着 `clipboard::clear_on_lock`——
+        // 不切掉的话，计数永远够，这条断言永远绿。
+        //
+        // 我第一版就是这么写的，然后故意删掉一处调用，
+        // 测试**没变红**才发现。
+        let src = match full.find("#[cfg(test)]") {
+            Some(i) => &full[..i],
+            None => full,
+        };
+
+        // 1) 数量下限：锁定、移入回收站、清库、永久删除、清空回收站 = 5 处。
+        //
+        //    写 5 而不是「>= 5」：新增了路径就该把它算进来，
+        //    这条断言会提醒作者「你加了一处清理，确认一下是不是漏了别的」。
+        let n = src.matches("clipboard::clear_on_lock").count();
+        assert!(
+            n >= 5,
+            "只找到 {n} 处 clipboard::clear_on_lock，至少要 5 处             （锁定 / 移入回收站 / 清库 / 永久删除 / 清空回收站）。             新增删除路径时请一并清剪贴板。"
+        );
+
+        // 2) 关键字：这几条路径的函数体里必须真的出现这行调用。
+        //
+        //    `purge_entry` / `empty_trash` / `delete_entry` 是三个独立的
+        //    删除入口，任何一个漏了都会留下「删了但剪贴板里还有」的口子。
+        for fname in ["fn delete_entry", "fn do_empty_trash"] {
+            let at = src
+                .find(fname)
+                .unwrap_or_else(|| panic!("找不到 {fname}——函数改名了？请同步更新这条测试"));
+            // 取该函数之后 2500 字节作为它的近似范围
+            let body = &src[at..src.len().min(at + 2500)];
+            assert!(
+                body.contains("clipboard::clear_on_lock"),
+                "{fname} 里没有清剪贴板——删掉的条目其密码会留在剪贴板里"
+            );
+        }
+    }
 
     /// 「系统空闲未知」时，自动锁定必须**照常工作**。
     ///

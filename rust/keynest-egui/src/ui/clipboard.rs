@@ -48,6 +48,26 @@ pub fn clear_on_lock(last_copied: &mut Option<Zeroizing<String>>) {
 mod tests {
     use super::*;
 
+    /// `clear_on_lock` 必须把「记住的那份值」也清掉。
+    ///
+    /// 只清系统剪贴板、不清 `last_copied` 的话，下一次锁定会把
+    /// 旧的期望值再拿去比对一遍——虽然不会清错东西，
+    /// 但「我们以为剪贴板里是什么」这件事就错了。
+    #[test]
+    fn clear_on_lock_forgets_the_remembered_value() {
+        let mut last: Option<Zeroizing<String>> = Some(Zeroizing::new("secret".into()));
+        clear_on_lock(&mut last);
+        assert!(last.is_none(), "记住的旧值没被清掉");
+    }
+
+    /// 没有复制过时调用也不能 panic。
+    #[test]
+    fn clear_on_lock_with_nothing_remembered_is_a_noop() {
+        let mut last: Option<Zeroizing<String>> = None;
+        clear_on_lock(&mut last);
+        assert!(last.is_none());
+    }
+
     #[test]
     fn banner_counts_down() {
         let banner = (Instant::now(), 20u32);
