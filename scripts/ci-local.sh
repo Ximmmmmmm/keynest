@@ -148,6 +148,15 @@ run "node scripts/release-check.mjs" node scripts/release-check.mjs
 step "extension / 清单可解析"
 run "manifest" bash_in browser-extension 'node -e "const m=require(\"fs\").readFileSync(\"manifest.json\",\"utf8\");JSON.parse(m);console.log(\"manifest ok\")"'
 
+# ---- 扩展的 headless 真实验收（需要 Chrome，可选）----
+if [ "$FAST" != "1" ] && [ -x "/c/Program Files/Google/Chrome/Application/chrome.exe" ]; then
+  step "扩展 / headless 真实验收（夜间模式、广告规则、站点记忆、SPA）"
+  run "extension-headless" node test/acceptance/extension-headless.mjs
+
+  step "填充 / headless 真实验收（origin 精确匹配、防重放）"
+  run "fill-headless" node test/acceptance/fill-headless.mjs
+fi
+
 # ---- legacy-electron 作业（非阻塞，但本地也要跑一遍）----
 if [ -f package.json ]; then
   step "legacy-electron / 单元测试"
