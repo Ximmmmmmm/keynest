@@ -52,6 +52,22 @@ pub fn validate_new_master(master: &str, confirm: &str) -> Result<(), String> {
 /// 计算「应用闲置」与「系统闲置」中较小的那个，再与阈值比较。
 ///
 /// 抽成纯函数是为了能脱离 egui 单测：自动锁定的正确性不该依赖窗口是否可见。
+/// 「空闲了多久」= 应用内空闲与系统空闲里**较短**的那个。
+///
+/// # 为什么取 min
+///
+/// - 系统空闲 5 分钟 → 用户离开了电脑 → **该锁**
+/// - 应用内空闲 5 分钟但系统不空闲 → 用户正在别的程序里忙活
+///   （可能正在把密码填到别处）→ **不该锁**
+///
+/// # 为什么要防「系统空闲未知」
+///
+/// `system_idle()` 在拿不到系统状态时返回 `Duration::MAX` 而不是 0。
+/// 若返回 0，`min` 会让结果恒为 0，**自动锁定永远不触发**——
+/// 密码库就这么一直开着。所以「未知」必须往保守方向倒。
+///
+/// 这个函数因此也是本项目里最容易悄悄失效的一个：它没有异常、没有日志，
+/// 失效的表现只是「好像不锁了」。
 pub fn idle_since(app_idle: Duration, sys_idle: Duration) -> Duration {
     app_idle.min(sys_idle)
 }
@@ -2564,6 +2580,69 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「系统空闲未知」时，自动锁定必须**照常工作**。
+    ///
+    /// 这是本轮修的一个真实缺陷：`system_idle()` 拿不到系统状态时
+    /// 返回 0，而 `idle_since` 取的是 min —— 结果恒为 0，
+    /// **自动锁定永远不触发**，密码库一直开着。
+    #[test]
+    fn auto_lock_still_works_when_system_idle_is_unknown() {
+        let app_idle = Duration::from_secs(600); // 应用内已空闲 10 分钟
+        let sys_unknown = Duration::MAX; // 系统状态拿不到
+
+        // 应当按应用内空闲算 → 超过 5 分钟上限 → 该锁
+        assert!(
+            should_auto_lock(5, app_idle, sys_unknown),
+            "系统空闲未知时，自动锁定必须照常触发"
+        );
+    }
+
+    /// 系统空闲未知但应用刚用过 → 不该锁。
+    #[test]
+    fn no_lock_when_app_just_used_even_if_system_idle_unknown() {
+        let app_idle = Duration::from_secs(2);
+        assert!(!should_auto_lock(5, app_idle, Duration::MAX));
+    }
+
+    /// 用户在别的程序里忙活（系统不空闲）→ 不该锁。
+    #[test]
+    fn no_lock_when_system_is_busy_but_app_is_idle() {
+        let app_idle = Duration::from_secs(600);
+        let sys_busy = Duration::from_secs(1);
+        assert!(
+            !should_auto_lock(5, app_idle, sys_busy),
+            "用户正在别的程序里操作，不该把他锁在外面"
+        );
+    }
+
+    /// 用户离开了电脑（两边都空闲）→ 该锁。
+    #[test]
+    fn locks_when_both_are_idle() {
+        let idle = Duration::from_secs(600);
+        assert!(should_auto_lock(5, idle, idle));
+    }
+
+    /// 应用刚被用过 → 不锁。
+    ///
+    /// 注意：`app_idle` 小而 `sys_idle` 大在物理上不会同时出现
+    /// （在 app 里点一下，系统输入时间也是那一刻）。
+    /// 但真出现了也要按 `min` 语义走：刚用过就不锁。
+    #[test]
+    fn no_lock_when_app_was_just_used() {
+        assert!(!should_auto_lock(
+            5,
+            Duration::from_secs(1),
+            Duration::from_secs(600)
+        ));
+    }
+
+    /// 剩余时间在系统空闲未知时也要算得出来，不能变成负数或溢出。
+    #[test]
+    fn remaining_seconds_is_sane_when_system_idle_unknown() {
+        let left = idle_remaining_secs(5, Duration::from_secs(60), Duration::MAX);
+        assert!(left > 0 && left <= 300, "实际 {left}");
+    }
 
     #[test]
     fn rejects_short_master() {

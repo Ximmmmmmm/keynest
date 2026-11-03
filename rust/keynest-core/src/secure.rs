@@ -232,7 +232,16 @@ mod imp {
                 dwTime: 0,
             };
             if !GetLastInputInfo(&mut info).as_bool() {
-                return Duration::ZERO;
+                // 拿不到系统空闲时长时，返回一个**极大**的值，而不是 0。
+                //
+                // 调用方算的是 `app_idle.min(sys_idle)`：
+                // 返回 0 会让结果恒为 0，于是**自动锁定永远不触发**——
+                // 密码库就这么一直开着。`GetLastInputInfo` 失败很罕见，
+                // 但后果是灾难性的，所以这里必须往「保守」的方向倒。
+                //
+                // 返回极大值 → `min` 退回到应用自己的计时，
+                // 自动锁定照常工作。
+                return Duration::MAX;
             }
             // GetTickCount 是 32 位毫秒计数，会回绕；用 wrapping_sub 处理
             let now = GetTickCount();
@@ -263,7 +272,11 @@ mod imp {
     }
 
     pub fn system_idle() -> Duration {
-        Duration::ZERO
+        // 非 Windows 上没有系统级闲置时长。
+        //
+        // 返回 0 会让 `app_idle.min(sys_idle)` 恒为 0，
+        // **自动锁定永远不触发**。返回极大值则退回到应用自己的计时。
+        Duration::MAX
     }
 }
 
@@ -333,9 +346,21 @@ pub fn system_idle() -> Duration {
 }
 
 /// 是否已超过闲置阈值。
+///
+/// # 「系统空闲未知」时返回 false
+///
+/// `system_idle()` 拿不到系统状态时返回 `Duration::MAX`。
+/// 若直接拿它比大小，`MAX >= threshold` 恒为真——会得出
+/// 「系统一直很空闲」的结论，正好与事实相反。
+///
+/// 所以这里显式排除「未知」这一情形：拿不到就别下结论。
 pub fn is_idle_beyond(minutes: u32) -> bool {
     let threshold = Duration::from_secs(minutes as u64 * 60);
-    system_idle() >= threshold
+    let idle = system_idle();
+    if idle == Duration::MAX {
+        return false;
+    }
+    idle >= threshold
 }
 
 #[cfg(test)]
