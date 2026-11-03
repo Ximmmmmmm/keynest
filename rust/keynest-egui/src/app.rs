@@ -1486,12 +1486,16 @@ impl App {
         let text =
             String::from_utf8(bytes).map_err(|_| VaultError::Import("文件不是 UTF-8 文本"))?;
 
-        let (entries, _invalid) = portable::detect_and_import(&text)?;
+        let (entries, invalid) = portable::detect_and_import(&text)?;
+        // 源文件里识别出的候选条数 = 解析成功的 + 解析阶段就丢掉的
+        let parsed_total = entries.len() + invalid;
 
         let AppState::Unlocked { vault, data, .. } = &mut self.state else {
             return Err(VaultError::Locked);
         };
-        let report = vault.import_entries(entries)?;
+        // 把解析阶段的统计一起带进报告——否则"源文件里有 N 条、
+        // 其中 M 条格式不对"这件事用户永远看不到。
+        let report = vault.import_entries_with_stats(entries, parsed_total, invalid)?;
         if let Ok(fresh) = vault.snapshot() {
             *data = fresh;
         }

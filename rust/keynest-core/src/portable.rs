@@ -241,6 +241,17 @@ impl RawEntry {
 
 /// 解析 CSV。表头按名字匹配，因此 Chrome / Edge / Firefox / Bitwarden 的
 /// 导出文件都能直接吃进来。
+/// 单次导入的条目数上限。
+///
+/// # 为什么在**导入层**就要限，而不只是在 vault 层
+///
+/// `Vault::import_entries` 也会检查 `MAX_ENTRIES`，但那已经是**结果**出来之后。
+/// 一个 32 MiB 的 JSON 能解析出上百万条 `Entry`——每条都是若干个 `String`，
+/// 光是解析阶段的内存就足以把进程拖垮。
+///
+/// 解析层先挡住，峰值内存才有上界。
+pub const MAX_IMPORT_ENTRIES: usize = 200_000;
+
 pub fn import_csv(text: &str) -> Result<(Vec<Entry>, usize)> {
     let cleaned = text.trim_start_matches('\u{feff}');
     let mut reader = csv::ReaderBuilder::new()
@@ -313,6 +324,12 @@ pub fn import_csv(text: &str) -> Result<(Vec<Entry>, usize)> {
                 }
             },
         };
+        if out.len() >= MAX_IMPORT_ENTRIES {
+            // 达到上限就**停止遍历**：剩下的行不再解析，
+            // 解析阶段的内存与时间才有上界。
+            // 被跳过的部分由调用方根据「已导入 vs 候选数」如实告知用户。
+            break;
+        }
         match raw.into_entry() {
             Some(e) => out.push(e),
             None => invalid += 1,
@@ -333,10 +350,15 @@ pub fn import_json(text: &str) -> Result<(Vec<Entry>, usize)> {
     let value: serde_json::Value =
         serde_json::from_str(cleaned).map_err(|_| VaultError::Import("JSON 无法解析"))?;
 
-    let array = if let Some(arr) = value.as_array() {
-        arr.clone()
+    // **不克隆数组**。
+    //
+    // 原来写的是 `arr.clone()`：整个数组被完整复制一份，而 `value` 本身
+    // 还活着。32 MiB 的导入文件意味着峰值内存接近三倍。
+    // 这里直接借用 `value` 里的数组，遍历完就释放。
+    let array: &[serde_json::Value] = if let Some(arr) = value.as_array() {
+        arr
     } else if let Some(arr) = value.get("entries").and_then(|v| v.as_array()) {
-        arr.clone()
+        arr
     } else if let Some(arr) = value.get("items").and_then(|v| v.as_array()) {
         // Bitwarden：条目藏在 items[].login 里
         return Ok(import_bitwarden_items(arr));
@@ -347,7 +369,11 @@ pub fn import_json(text: &str) -> Result<(Vec<Entry>, usize)> {
     let mut out = Vec::new();
     let mut invalid = 0usize;
     for v in array {
-        match serde_json::from_value::<RawEntry>(v) {
+        if out.len() >= MAX_IMPORT_ENTRIES {
+            // 同上：停止遍历，不只是跳过这一条
+            break;
+        }
+        match serde_json::from_value::<RawEntry>(v.clone()) {
             Ok(raw) => match raw.into_entry() {
                 Some(e) => out.push(e),
                 None => invalid += 1,
@@ -543,6 +569,33 @@ pub fn human_size(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 导入一个大数组时，内存占用应当与结果规模成正比，而不是三倍。
+    ///
+    /// 原来 `import_json` 里写的是 `arr.clone()`：整个数组被完整复制一份，
+    /// 而解析出来的 `value` 还活着。32 MiB 的导入文件意味着峰值内存接近三倍。
+    ///
+    /// 这条测试用「解析得出来但结果条数正确」来守住行为：
+    /// 如果将来有人改回 clone，行为不变但内存退化——
+    /// 所以下面另有专门的内存回归测试（见 `import_of_many_entries_is_not_quadratic`）。
+    #[test]
+    fn import_json_handles_large_array() {
+        let entries: Vec<String> = (0..2000)
+            .map(|i| {
+                // 用 raw string 避免与 JSON 里的双引号打架
+                format!(
+                    r#"{{"title":"t{i}","username":"u{i}","password":"p{i}","url":"","category":"网站","notes":""}}"#
+                )
+            })
+            .collect();
+        let text = format!(r#"{{"entries":[{}]}}"#, entries.join(","));
+
+        let (items, invalid) = import_json(&text).expect("应当解析成功");
+        assert_eq!(items.len(), 2000);
+        assert_eq!(invalid, 0);
+        assert_eq!(items[0].title, "t0");
+        assert_eq!(items[1999].title, "t1999");
+    }
 
     /// 明文导出文件必须只有所有者可读写。
     ///

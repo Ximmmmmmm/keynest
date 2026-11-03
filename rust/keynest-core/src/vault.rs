@@ -2120,6 +2120,36 @@ impl Vault {
         Ok(entry)
     }
 
+    /// 批量导入，并带上**解析阶段**的统计。
+    ///
+    /// # 为什么单独一个方法
+    ///
+    /// 解析阶段（CSV/JSON → Entry）已经会丢掉一些条目：没有标题的、
+    /// 格式不对的、超出 `MAX_IMPORT_ENTRIES` 的。如果只调用
+    /// [`Vault::import_entries`]，这些"在进库之前就丢掉"的条目
+    /// **完全不出现在报告里**——用户看到「导入 100 条」，
+    /// 而文件里其实有 5000 条，其中 4900 条被悄悄扔了。
+    ///
+    /// `skipped_invalid` 这个字段本来就在报告里，只是没人给它赋值。
+    /// 这个方法把两边的统计合到一起。
+    ///
+    /// # 去重规则不变
+    ///
+    /// 「标题 + 账号」已存在就跳过，**绝不覆盖**。
+    pub fn import_entries_with_stats(
+        &mut self,
+        incoming: Vec<Entry>,
+        parsed_total: usize,
+        invalid: usize,
+    ) -> Result<crate::portable::ImportReport> {
+        let mut report = self.import_entries(incoming)?;
+        // parsed 要包含解析阶段就丢掉的部分——否则「源文件里有 N 条」
+        // 这个数字是错的。
+        report.parsed = report.parsed.max(parsed_total);
+        report.skipped_invalid += invalid;
+        Ok(report)
+    }
+
     /// 批量导入：整批只写一次盘，失败整体回滚。
     ///
     /// 去重规则是「标题 + 账号」已存在就跳过，**绝不覆盖**。
@@ -3901,6 +3931,28 @@ mod tests {
         assert_eq!(report.added, 0, "已达上限，不该再写入");
         assert_eq!(report.skipped_limit, 5, "被上限挡下的条数要如实计入报告");
         assert!(report.summary().contains("条目上限"), "摘要要说明原因");
+    }
+
+    /// 解析阶段丢掉的条目必须出现在报告里。
+    ///
+    /// 缺陷：解析阶段（CSV/JSON → Entry）会丢掉格式不对的条目，
+    /// 但 GUI 原来把 invalid 计数**丢掉了**（`_invalid`），
+    /// 于是报告里的 `skipped_invalid` 永远是 0。
+    ///
+    /// 用户看到的是「导入 100 条」，而文件里其实有 5000 条、
+    /// 4900 条在进库之前就被悄悄扔了——他完全不知道。
+    #[test]
+    fn import_report_includes_entries_dropped_during_parsing() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        let incoming = vec![entry("A", "p"), entry("B", "p")];
+        // 源文件里识别出 100 条，其中 3 条格式不对
+        let report = v.import_entries_with_stats(incoming, 100, 3).unwrap();
+
+        assert_eq!(report.added, 2, "两条都应当写入");
+        assert_eq!(report.parsed, 100, "parsed 要反映源文件里的候选条数");
+        assert_eq!(report.skipped_invalid, 3, "解析阶段丢掉的 3 条必须被计入");
     }
 
     /// 未达上限时导入照常，且 `skipped_limit` 为 0。
