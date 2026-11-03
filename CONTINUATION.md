@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 18:05 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`0299eca`
+> 最后更新：2026-11-03 18:40 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`175146b`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **359** | `cd rust && cargo test --workspace` |
+| Rust | **363** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **494** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -315,7 +315,10 @@ clippy 失败（`let mut` 但没修改）。
 共同点：状态只存在于界面里、还没落盘，而关闭路径直接 `state = None`。
 危险在于**没有任何提示**——用户以为改好了/存上了。
 
-排查方法：搜所有 `= None` 的状态清理点，逐个问「这里丢了什么」。
+排查方法：**搜所有 `= None` 的状态清理点，逐个问「这里丢了什么」**。
+本次按这个方法又找到两处（ShowWeak/ShowReused 绕过检查、重新载入无提示），
+其余各点（锁定、清库、整库替换）丢弃界面状态是正确的——
+库本身已经变了，残留草稿没有意义。
 
 ## 10. 审查方法记录（下一轮可复用）
 
