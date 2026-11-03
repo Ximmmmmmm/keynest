@@ -148,7 +148,15 @@ jobs:
         with:
           manifest-path: rust/Cargo.toml
           command: check
-          arguments: --all-features
+          # `cargo-deny check` 只接受 [WHICH]（advisories/bans/licenses/sources/all），
+          # **没有 `--all-features` 这个参数**。
+          #
+          # 原来写的是 `--all-features`，跑起来直接：
+          #   error: unexpected argument '--all-features' found
+          # 也就是说这个作业即使 CI 正常触发也会**立刻失败**。
+          #
+          # 本地实测 `check all` → advisories ok, bans ok, licenses ok, sources ok。
+          arguments: all
 
   # ---------------------------------------------------------------- #
   # 浏览器扩展（Manifest V3）

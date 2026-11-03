@@ -127,6 +127,14 @@ if [ "$FAST" != "1" ]; then
   fi
 fi
 
+step "deny / 依赖审计（漏洞 / 许可证 / 来源）"
+if command -v cargo-deny >/dev/null 2>&1; then
+  run "cargo deny check" cargo_in cargo deny check all
+else
+  printf '  [33m跳过：未安装 cargo-deny[0m
+'
+fi
+
 # ---- extension 作业 ----
 step "extension / 单元与集成测试"
 run "node --test" bash_in browser-extension 'set -euo pipefail; files=$(ls tests/*.test.js); count=$(printf "%s\n" "$files" | wc -l); if [ "$count" -lt 5 ]; then echo "测试文件数量异常（$count 个）"; exit 1; fi; node --test $files'
