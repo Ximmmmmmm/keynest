@@ -75,6 +75,18 @@ pub fn totp_clipboard_ttl(configured: u32, remaining: u32) -> Option<u32> {
     Some(configured.clamp(3, 300).min(remaining))
 }
 
+/// 清空所有筛选条件（含搜索词）并回到「全部」。
+///
+/// 抽成纯函数是为了能测：`App` 的构造需要 `eframe::CreationContext`，
+/// 单元测试里造不出来。而这几个字段的联动恰恰是容易出错的地方
+/// （原来的实现只重置了 filter，忘了 search）。
+pub fn clear_all_filters(search: &mut String, filter: &mut Filter, focus_search: &mut bool) {
+    *filter = Filter::All;
+    search.clear();
+    // 不要把焦点抢到搜索框：用户点的是「清除」，不是「开始搜索」
+    *focus_search = false;
+}
+
 pub fn should_auto_lock(limit_minutes: u32, app_idle: Duration, sys_idle: Duration) -> bool {
     let limit = Duration::from_secs(limit_minutes as u64 * 60);
     idle_since(app_idle, sys_idle) >= limit
@@ -1528,6 +1540,12 @@ impl App {
                 self.filter = f;
                 self.hide_reveal();
             }
+            MainIntent::ClearAllFilters => {
+                // 搜索词也要清：只重置 filter 的话，用户点了「清除搜索与筛选」
+                // 仍然看到空列表，会以为按钮坏了。
+                clear_all_filters(&mut self.search, &mut self.filter, &mut self.focus_search);
+                self.hide_reveal();
+            }
             MainIntent::SetSort(s) => {
                 self.sort = s;
             }
@@ -2337,6 +2355,40 @@ mod tests {
         let sys = Duration::from_secs(60);
         assert_eq!(idle_since(app, sys), Duration::from_secs(60));
         assert_eq!(idle_since(sys, app), Duration::from_secs(60));
+    }
+
+    /// 「清除搜索与筛选」必须**同时**清掉搜索词与筛选条件。
+    ///
+    /// 缺陷：原来那个按钮只发 `SetFilter(Filter::All)`，不动 `search`。
+    /// 用户搜了关键词、看到「没有匹配的条目」，点按钮后仍然空着——
+    /// 因为搜索词还在输入框里。按钮的名字承诺了它做不到的事，
+    /// 而用户只会觉得「这个按钮坏了」。
+    ///
+    /// 这里测的是纯函数 `clear_all_filters`：`App` 的构造需要
+    /// `eframe::CreationContext`，测试里造不出来，所以把行为抽出来测。
+    #[test]
+    fn clear_all_filters_resets_both_search_and_filter() {
+        let mut search = "招商".to_string();
+        let mut filter = Filter::Weak;
+        let mut focus = true;
+
+        clear_all_filters(&mut search, &mut filter, &mut focus);
+
+        assert_eq!(filter, Filter::All, "筛选没重置");
+        assert!(search.is_empty(), "搜索词没清空: {search:?}");
+        assert!(!focus, "不该把焦点抢到搜索框");
+    }
+
+    /// 「清除搜索与筛选」对已经干净的状态是幂等的。
+    #[test]
+    fn clear_all_filters_is_idempotent() {
+        let mut search = String::new();
+        let mut filter = Filter::All;
+        let mut focus = false;
+        clear_all_filters(&mut search, &mut filter, &mut focus);
+        assert!(search.is_empty());
+        assert_eq!(filter, Filter::All);
+        assert!(!focus);
     }
 
     /// 验证码的剪贴板 TTL 不得**超过**当前时间步剩余秒数。

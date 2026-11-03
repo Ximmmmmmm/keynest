@@ -16,7 +16,7 @@ use keynest_core::vault::{Entry, VaultData};
 use crate::ui::{icons, theme};
 
 /// 列表筛选。
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Filter {
     All,
     Category(String),
@@ -62,6 +62,12 @@ pub enum MainIntent {
     Reveal(String),
     HideReveal,
     SetFilter(Filter),
+    /// 清空**所有**筛选条件（含搜索词）并回到「全部」。
+    ///
+    /// 与 `SetFilter(Filter::All)` 不同：那个只改筛选。
+    /// 用户搜了关键词、看到「没有匹配的条目」，点「清除筛选」却仍然空着——
+    /// 因为搜索词还在。按钮的名字承诺了它做不到的事。
+    ClearAllFilters,
     SetSort(SortBy),
     NewCategory(String),
     /// 选中某条
@@ -742,8 +748,8 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
             } else {
                 ui.label(theme::caption("换个关键词或筛选条件"));
                 ui.add_space(6.0);
-                if theme::ghost_button(ui, "清除筛选").clicked() {
-                    intent = MainIntent::SetFilter(Filter::All);
+                if theme::ghost_button(ui, "清除搜索与筛选").clicked() {
+                    intent = MainIntent::ClearAllFilters;
                 }
             }
         });
