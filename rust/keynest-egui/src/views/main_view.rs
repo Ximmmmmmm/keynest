@@ -167,6 +167,8 @@ fn detail_panel(
     // 强度 / 重复 / 熵：只对账号类型有意义
     if is_login {
         let bits = password::estimate_strength(&entry.password);
+        // 这里可以扫全表：详情面板每帧只渲染**一个**条目，
+        // 是 O(n) 而不是 O(n²)。列表筛选那边才是热点，已改成查表。
         let reused = reuse_count(&data.entries, &entry.password);
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
@@ -403,6 +405,28 @@ fn reuse_count(entries: &[Entry], password: &str) -> usize {
     entries.iter().filter(|e| e.password == password).count()
 }
 
+/// 一次遍历算出「每个密码被多少条条目使用」。
+///
+/// # 为什么需要它
+///
+/// 原来筛选「重复」和统计侧栏数字时，对**每条条目**都调一次 `reuse_count`，
+/// 而它每次扫全表 —— O(n²)。5000 条时是每帧 2500 万次字符串比较，
+/// 界面会明显卡住；而这只是画一帧的成本。
+///
+/// 这个函数 O(n) 建一张表，调用方查表即可。
+///
+/// 空密码不参与统计：多条「没有密码」的笔记不该被报成「重复使用」。
+fn reuse_counts(entries: &[Entry]) -> std::collections::HashMap<&str, usize> {
+    let mut map: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for e in entries {
+        if e.password.is_empty() {
+            continue;
+        }
+        *map.entry(e.password.as_str()).or_insert(0) += 1;
+    }
+    map
+}
+
 fn is_weak(password: &str) -> bool {
     password::estimate_strength(password) < 60.0
 }
@@ -419,6 +443,10 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
     // ---------- 筛选 + 排序（详情与列表共用同一份结果）----------
     let needle = v.search.trim().to_lowercase();
     let filter = v.filter.clone();
+
+    // 一次遍历算好复用次数，供筛选与侧栏统计共用。
+    // 放在筛选之前：否则筛选闭包里每条都要扫全表（O(n²)）。
+    let counts = reuse_counts(&v.data.entries);
 
     let mut visible: Vec<usize> = v
         .data
@@ -448,7 +476,8 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
                         }
                     }
                     Filter::Reused => {
-                        if reuse_count(&v.data.entries, &e.password) < 2 {
+                        // 查预先算好的表，不在这里扫全表
+                        if counts.get(e.password.as_str()).copied().unwrap_or(0) < 2 {
                             return false;
                         }
                     }
@@ -632,7 +661,7 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
                 let weak_n = active.iter().filter(|e| is_weak(&e.password)).count();
                 let reused_n = active
                     .iter()
-                    .filter(|e| reuse_count(&v.data.entries, &e.password) > 1)
+                    .filter(|e| counts.get(e.password.as_str()).copied().unwrap_or(0) > 1)
                     .count();
                 let fav_n = active.iter().filter(|e| e.favorite).count();
                 let trash_n = v.data.entries.iter().filter(|e| e.is_deleted()).count();
@@ -1009,7 +1038,51 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
 
 #[cfg(test)]
 mod tests {
-    use super::openable_url;
+    use super::{openable_url, reuse_count, reuse_counts};
+    use keynest_core::vault::Entry;
+
+    fn e(title: &str, pw: &str) -> Entry {
+        let mut x = Entry::default();
+        x.id = title.to_string();
+        x.title = title.to_string();
+        x.password = pw.to_string();
+        x
+    }
+
+    /// 查表结果必须与逐个扫描完全一致。
+    ///
+    /// 这个改动把 O(n²) 换成了 O(n)，代价是多了一份实现。
+    /// 两份实现分叉的表现是「侧栏说重复 3 条，点进去筛出 2 条」——
+    /// 用户会以为筛选坏了。
+    #[test]
+    fn reuse_counts_matches_naive_scan() {
+        let entries = vec![
+            e("a", "same"),
+            e("b", "same"),
+            e("c", "same"),
+            e("d", "other"),
+            e("note1", ""),
+            e("note2", ""),
+        ];
+        let map = reuse_counts(&entries);
+        for x in &entries {
+            let naive = reuse_count(&entries, &x.password);
+            let via_map = if x.password.is_empty() {
+                0 // 空密码不进表
+            } else {
+                map.get(x.password.as_str()).copied().unwrap_or(0)
+            };
+            assert_eq!(naive, via_map, "条目 {} 的统计不一致", x.title);
+        }
+    }
+
+    /// 空密码不参与统计：多条「没有密码」的笔记不该被报成「重复使用」。
+    #[test]
+    fn empty_passwords_are_not_counted_as_reuse() {
+        let entries = vec![e("note1", ""), e("note2", ""), e("note3", "")];
+        let map = reuse_counts(&entries);
+        assert!(map.is_empty(), "空密码不该进表: {map:?}");
+    }
 
     #[test]
     fn normalizes_bare_domains() {
