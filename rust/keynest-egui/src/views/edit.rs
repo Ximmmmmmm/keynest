@@ -62,6 +62,35 @@ pub struct EditState {
     pub original: Option<EditOriginal>,
 }
 
+/// 某个字段是否超长。
+///
+/// # 为什么是「提示」而不是「禁止输入」
+///
+/// egui 的 `char_limit` 会**阻止**输入超过上限。对粘贴超长内容的用户来说，
+/// 那意味着内容被**静默截断**——他以为粘贴成功了，实际上尾部没了。
+/// 截断比拒绝更难发现。
+///
+/// 所以这里只**提示**：输入照常接受，保存时才由 core 拒绝，
+/// 而且拒绝时的错误信息直说「哪个字段太长、上限多少」。
+pub fn field_over_limit(value: &str, max: usize) -> bool {
+    value.chars().count() > max
+}
+
+/// 在输入框下面显示「已用 / 上限」，超限时标红。
+fn length_hint(ui: &mut egui::Ui, value: &str, max: usize) {
+    let used = value.chars().count();
+    if used == 0 {
+        return; // 没输入就不显示，避免界面上多一行噪音
+    }
+    let over = used > max;
+    let text = format!("{used} / {max}");
+    ui.label(egui::RichText::new(text).size(10.5).color(if over {
+        ui.visuals().error_fg_color
+    } else {
+        ui.visuals().weak_text_color()
+    }));
+}
+
 impl EditState {
     /// 把编辑草稿转成待入库的字段集合（清洗交给 `Vault`）。
     pub fn fields(&self) -> Vec<Field> {
@@ -342,6 +371,7 @@ pub fn show(
                         [ui.available_width(), 32.0],
                         egui::TextEdit::singleline(&mut st.title).hint_text("例如 GitHub"),
                     );
+                    length_hint(ui, &st.title, keynest_core::vault::MAX_TITLE_CHARS);
                     ui.add_space(10.0);
 
                     // 用户名
@@ -350,6 +380,7 @@ pub fn show(
                         [ui.available_width(), 32.0],
                         egui::TextEdit::singleline(&mut st.username).hint_text("账号 / 邮箱"),
                     );
+                    length_hint(ui, &st.username, keynest_core::vault::MAX_USERNAME_CHARS);
                     ui.add_space(10.0);
 
                     // 密码
@@ -529,6 +560,7 @@ pub fn show(
                                 [200.0, 32.0],
                                 egui::TextEdit::singleline(&mut st.url).hint_text("https://"),
                             );
+                            length_hint(ui, &st.url, keynest_core::vault::MAX_URL_CHARS);
                         });
                         ui.add_space(8.0);
                         ui.vertical(|ui| {
@@ -586,6 +618,7 @@ pub fn show(
                         [ui.available_width(), 64.0],
                         egui::TextEdit::multiline(&mut st.notes).hint_text("任意备注"),
                     );
+                    length_hint(ui, &st.notes, keynest_core::vault::MAX_NOTES_CHARS);
 
                     if let Some(err) = &st.error {
                         ui.add_space(8.0);
@@ -641,6 +674,43 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn detects_over_limit_fields() {
+        assert!(!field_over_limit(
+            "正常标题",
+            keynest_core::vault::MAX_TITLE_CHARS
+        ));
+        assert!(field_over_limit(
+            &"x".repeat(keynest_core::vault::MAX_TITLE_CHARS + 1),
+            keynest_core::vault::MAX_TITLE_CHARS
+        ));
+    }
+
+    /// 长度按**字符数**算，不是字节数。
+    ///
+    /// 中文一个字占 3 字节——按字节算的话，中文用户在标题里能输入的字数
+    /// 只有预期的三分之一，而且没有任何提示。
+    #[test]
+    fn length_check_counts_characters_not_bytes() {
+        let cjk = "中".repeat(keynest_core::vault::MAX_TITLE_CHARS);
+        assert!(
+            cjk.len() > keynest_core::vault::MAX_TITLE_CHARS,
+            "前提：字节数确实超了"
+        );
+        assert!(
+            !field_over_limit(&cjk, keynest_core::vault::MAX_TITLE_CHARS),
+            "按字节算会误判中文输入超限"
+        );
+    }
+
+    /// 恰好在上限上不算超限（别把边界卡死）。
+    #[test]
+    fn exactly_at_limit_is_not_over() {
+        let max = keynest_core::vault::MAX_NOTES_CHARS;
+        assert!(!field_over_limit(&"x".repeat(max), max));
+        assert!(field_over_limit(&"x".repeat(max + 1), max));
     }
 
     /// 打开编辑框但一字未改 → 不算脏。
