@@ -87,6 +87,15 @@ pub fn clear_all_filters(search: &mut String, filter: &mut Filter, focus_search:
     *focus_search = false;
 }
 
+/// 明文导出实际会写入的条数（**不含回收站**）。
+///
+/// 确认框与导出后的提示都要用这个数字——用 `entries.len()` 的话，
+/// 用户看到「导出 500 条」而文件里只有 480 条，数字对不上，
+/// 用户会以为导出出了问题。
+pub fn plaintext_export_count(data: &keynest_core::vault::VaultData) -> usize {
+    data.entries.iter().filter(|e| !e.is_deleted()).count()
+}
+
 pub fn should_auto_lock(limit_minutes: u32, app_idle: Duration, sys_idle: Duration) -> bool {
     let limit = Duration::from_secs(limit_minutes as u64 * 60);
     idle_since(app_idle, sys_idle) >= limit
@@ -1876,8 +1885,11 @@ impl App {
         let Some(kind) = self.pending_export else {
             return;
         };
+        // 条数要按**实际导出的数量**算：回收站里的条目不进导出文件。
+        // 用 data.entries.len()（含回收站）会让用户看到「导出 500 条」，
+        // 而文件里只有 480 条——数字对不上，用户会以为导出出了问题。
         let count = match &self.state {
-            AppState::Unlocked { data, .. } => data.entries.len(),
+            AppState::Unlocked { data, .. } => plaintext_export_count(data),
             _ => {
                 self.pending_export = None;
                 return;
@@ -2515,6 +2527,31 @@ mod tests {
 
         st.changing_master = false;
         assert!(st.upgrading, "清 changing_master 不该清 upgrading");
+    }
+
+    /// 明文导出的条数必须**不含回收站**。
+    ///
+    /// 确认框里写着「导出 N 条」，文件里就应当真的有 N 条。
+    /// 用 `entries.len()`（含回收站）会出现「说 500、实际 480」，
+    /// 用户会以为导出出了问题。
+    #[test]
+    fn plaintext_export_count_excludes_trashed_entries() {
+        let mut data = keynest_core::vault::VaultData::default();
+        let mut a = keynest_core::vault::Entry::default();
+        a.id = "a".into();
+        a.title = "A".into();
+        let mut b = a.clone();
+        b.id = "b".into();
+        b.title = "B".into();
+        b.deleted_at = Some("2026-01-01T00:00:00.000Z".into());
+        data.entries = vec![a, b];
+
+        assert_eq!(data.entries.len(), 2, "前提：库里有两条（含一条已删除）");
+        assert_eq!(
+            plaintext_export_count(&data),
+            1,
+            "导出条数不应把回收站里的算进去"
+        );
     }
 
     /// 「清除搜索与筛选」必须**同时**清掉搜索词与筛选条件。
