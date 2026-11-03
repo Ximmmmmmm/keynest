@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 21:30 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`10f4012`
+> 最后更新：2026-11-03 22:15 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`66caf14`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -388,6 +388,23 @@ upsert / import / delete / restore / purge / 分类操作里。
 
 CI 用 pwsh 7（默认 UTF-8）碰不到。**这属于「发布流程只能在 CI 上验」
 的固有风险**，本地复现会得到假失败。
+
+## 9i. 「CI 里写的东西能不能真的执行」——两个都坏了
+
+| 问题 | 后果 |
+| --- | --- |
+| `ci.yml` 因一行引号变成非法 YAML | **整个 CI 一次都没跑过** |
+| `cargo-deny` 作业传 `--all-features` | 该作业一跑就失败（参数不存在） |
+
+两次都是**从未被执行过**的代码。本地跑 `cargo deny check all` 实际是通过的
+（advisories/bans/licenses/sources 全 ok），说明依赖审计本身没问题，
+坏的是调用方式。
+
+修完把 deny 也加进了 `scripts/ci-local.sh`（第 8 步），本地 CI 12→13 步。
+
+**下一轮该继续查**：workflow 里还没被本地验证过的东西。
+共享的 action SHA 已用 GitHub API 逐个核实（9 个全部存在），
+并用发布自检钉住「必须 pin 到 40 位 SHA」。
 
 ## 10. 审查方法记录（下一轮可复用）
 
