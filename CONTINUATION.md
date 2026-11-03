@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 10:50 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`e2bbfa3`
+> 最后更新：2026-11-03 11:00 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`f1712cb`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **281** | `cd rust && cargo test --workspace` |
+| Rust | **282** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **468** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -57,6 +57,9 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `6df4278` | 「清除筛选」不清搜索词，按钮名不副实 | P2 可用性 |
 | `e2bbfa3` | 单条「永久删除」无确认（紧挨「恢复」，误点即丢失） | P1 误操作 |
 | `e2bbfa3` | 普通删除的文案写「无法撤销」，与实际（可恢复）不符 | P2 文案 |
+| `9c95a01` | 改主密码/升级格式无防重入（窗口冻结期间可连点） | P1 正确性 |
+| `35d4538` | README「已知限制」三处与代码实际状态不符 | P1 文档 |
+| `f1712cb` | 中文 README 缺回滚攻击这条限制（英文版有） | P2 文档 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
