@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 17:20 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`a58c5bf`
+> 最后更新：2026-11-03 18:05 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`0299eca`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **346** | `cd rust && cargo test --workspace` |
+| Rust | **359** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **494** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -301,6 +301,21 @@ egui 的 `Context::run_ui` 可以在**没有窗口、没有 GPU** 的情况下�
 clippy 失败（`let mut` 但没修改）。
 
 **每次改完代码，跑完整脚本，不要只跑测试。**
+
+## 9d. 一类反复出现的缺陷：**关闭时不问就丢**
+
+同一类问题在本项目里出现了三次：
+
+| 路径 | 之前 | 现在 |
+| --- | --- | --- |
+| 手动锁定 | 静默丢编辑框 | `pending_lock_confirm` 确认 |
+| 关设置页 | **静默丢设置** | `confirm_discard` 确认 |
+| 关编辑框 | **静默丢内容** | `confirm_discard` 确认 |
+
+共同点：状态只存在于界面里、还没落盘，而关闭路径直接 `state = None`。
+危险在于**没有任何提示**——用户以为改好了/存上了。
+
+排查方法：搜所有 `= None` 的状态清理点，逐个问「这里丢了什么」。
 
 ## 10. 审查方法记录（下一轮可复用）
 
