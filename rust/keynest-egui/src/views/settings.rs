@@ -27,17 +27,25 @@ pub enum Tab {
     Appearance,
     Security,
     Data,
+    Browser,
     Danger,
 }
 
 impl Tab {
-    const ALL: [Tab; 4] = [Tab::Appearance, Tab::Security, Tab::Data, Tab::Danger];
+    const ALL: [Tab; 5] = [
+        Tab::Appearance,
+        Tab::Security,
+        Tab::Data,
+        Tab::Browser,
+        Tab::Danger,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Tab::Appearance => "外观",
             Tab::Security => "安全",
             Tab::Data => "数据",
+            Tab::Browser => "浏览器",
             Tab::Danger => "危险",
         }
     }
@@ -98,6 +106,16 @@ pub struct SettingsState {
 
     /// 正在升级格式。同样是 Argon2id 派生 + 重写整个库，会阻塞。
     pub upgrading: bool,
+
+    /// 用户填的扩展 ID（从扩展 popup 里复制来的）。
+    ///
+    /// 未发布到商店的扩展 ID 由安装路径的哈希决定，**每台机器不同**，
+    /// 所以桌面程序没法自己猜，只能让用户填。
+    pub bridge_ext_id: String,
+    /// 浏览器桥接的安装状态提示。
+    pub bridge_status: Option<String>,
+    /// 浏览器桥接是否已安装（打开设置时查一次）。
+    pub bridge_installed: bool,
     /// 正在播放关闭动画
     pub closing: bool,
 }
@@ -120,6 +138,8 @@ pub struct SettingsContext {
     pub leftovers: Vec<keynest_core::vault::RecoveryLeftover>,
     pub font_note: Option<String>,
     pub dark: bool,
+    /// 浏览器桥接是否已安装（打开设置时查一次，只读）。
+    pub bridge_installed: bool,
 }
 
 impl SettingsState {
@@ -156,6 +176,9 @@ impl SettingsState {
             dark: ctx.dark,
             changing_master: false,
             upgrading: false,
+            bridge_ext_id: String::new(),
+            bridge_status: None,
+            bridge_installed: ctx.bridge_installed,
             closing: false,
         }
     }
@@ -196,6 +219,10 @@ pub enum SettingsIntent {
     CancelWipe,
     Wipe,
     SetTheme(bool),
+    /// 安装 / 重新安装浏览器桥接
+    InstallBridge,
+    /// 卸载浏览器桥接
+    UninstallBridge,
     /// 导出明文 CSV（需要二次确认）
     ExportCsv,
     /// 导出明文 JSON（需要二次确认）
@@ -286,6 +313,7 @@ pub fn show(ctx: &egui::Context, st: &mut SettingsState) -> SettingsIntent {
                     Tab::Appearance => tab_appearance(ui, st, &mut intent),
                     Tab::Security => tab_security(ui, st, &mut intent),
                     Tab::Data => tab_data(ui, st, &mut intent),
+                    Tab::Browser => tab_browser(ui, st, &mut intent),
                     Tab::Danger => tab_danger(ui, st, &mut intent),
                 });
 
@@ -757,6 +785,80 @@ fn tab_data(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut SettingsInte
                 *intent = SettingsIntent::Upgrade;
             }
         });
+    }
+}
+
+/// 浏览器桥接：安装 / 卸载 Native Messaging 宿主。
+///
+/// # 为什么需要这一页
+///
+/// 扩展与桌面程序之间的全部通信都要经过浏览器启动的
+/// `keynest-native-host.exe`，而浏览器只在**注册表**里找它。
+/// 没有这一步，扩展装上了也**连不上**——握手根本起不了步，
+/// 用户看到的只是「KeyNest 未运行」。
+///
+/// # 扩展 ID 为什么必须用户填
+///
+/// 清单里的 `allowed_origins` 要写**精确的扩展 ID**。未发布到商店的
+/// 扩展 ID 由安装路径的哈希决定，**每台机器都不一样**，
+/// 桌面程序没法自己猜。扩展的 popup 里有一块专门显示它，复制过来即可。
+fn tab_browser(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut SettingsIntent) {
+    let p = theme::palette();
+
+    theme::section(ui, "浏览器桥接");
+    ui.label(theme::caption(
+        r"扩展与本程序之间的通信要经过一个本地宿主进程。安装它会在
+%LOCALAPPDATA%\KeyNestin\ 放一份宿主程序，并在当前用户下写两条注册表项（不需要管理员权限）。",
+    ));
+    ui.add_space(8.0);
+
+    if st.bridge_installed {
+        ui.label(egui::RichText::new("已安装").size(12.0).color(p.success));
+    } else {
+        ui.label(egui::RichText::new("尚未安装").size(12.0).color(p.warn));
+    }
+    ui.add_space(10.0);
+
+    theme::section(ui, "扩展 ID");
+    ui.label(theme::caption(
+        "打开浏览器扩展的弹窗，复制显示的扩展 ID 粘贴到这里。
+未发布到商店的扩展 ID 每台机器都不同，所以必须由你填。",
+    ));
+    ui.add_space(6.0);
+    ui.add(
+        egui::TextEdit::singleline(&mut st.bridge_ext_id)
+            .hint_text("32 个 a–p 的小写字母")
+            .desired_width(f32::INFINITY),
+    );
+    ui.add_space(10.0);
+
+    let id_ok = keynest_bridge::hostinstall::is_valid_extension_id(st.bridge_ext_id.trim());
+    if !st.bridge_ext_id.trim().is_empty() && !id_ok {
+        ui.label(
+            egui::RichText::new("扩展 ID 看起来不对：应当是 32 个 a–p 的小写字母")
+                .size(11.0)
+                .color(p.danger),
+        );
+        ui.add_space(6.0);
+    }
+
+    ui.horizontal(|ui| {
+        let btn = egui::Button::new(if st.bridge_installed {
+            "重新安装"
+        } else {
+            "安装"
+        });
+        if ui.add_enabled(id_ok, btn).clicked() {
+            *intent = SettingsIntent::InstallBridge;
+        }
+        if st.bridge_installed && theme::ghost_button(ui, "卸载").clicked() {
+            *intent = SettingsIntent::UninstallBridge;
+        }
+    });
+
+    if let Some(msg) = &st.bridge_status {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(msg).size(11.5).color(p.muted));
     }
 }
 

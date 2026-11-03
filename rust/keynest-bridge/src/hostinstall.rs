@@ -129,6 +129,36 @@ pub fn is_valid_extension_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))
 }
 
+/// 查桥接当前是否已安装（**只读**，不写任何东西）。
+///
+/// # 为什么需要只读的版本
+///
+/// 设置页每次打开都要显示「已安装 / 尚未安装」。
+/// 如果复用 `install()` 来查，就会**每次打开设置都重写一遍注册表**——
+/// 那既没必要，也会让用户在不知情的情况下被修改系统状态。
+pub fn is_installed(data_dir: &Path) -> bool {
+    // 宿主 exe 在，且清单在——两者齐了才算装好。
+    if !host_exe_path(data_dir).exists() {
+        return false;
+    }
+    if !manifest_path(data_dir).exists() {
+        return false;
+    }
+    // 清单里写的路径要与我们算的一致——用户换了目录重装的话，
+    // 清单会指向旧路径，那份是失效的。
+    let Ok(text) = std::fs::read_to_string(manifest_path(data_dir)) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let want = host_exe_path(data_dir).to_string_lossy().to_string();
+    v.get("path")
+        .and_then(|p| p.as_str())
+        .map(|p| p == want)
+        .unwrap_or(false)
+}
+
 /// 安装浏览器桥接宿主。
 ///
 /// # 参数
@@ -613,6 +643,52 @@ mod tests {
         // 清理测试键本身（RegDeleteValueW 只删值，键还在）
         let _ = reg::delete_key(path);
         assert_eq!(reg::read_value(path), None, "测试不应在注册表里留下痕迹");
+    }
+
+    /// 未安装时 `is_installed` 必须是 false——**只读**，不写任何东西。
+    ///
+    /// 这条守住「打开设置不会改动系统状态」。
+    /// 如果这里偷偷调用了 `install()`，用户每次打开设置页
+    /// 都会被写一遍注册表——而他什么也没要求。
+    #[test]
+    fn is_installed_is_false_before_installing() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path();
+        assert!(!is_installed(data_dir));
+
+        // 放一个假的宿主 exe，但还没有清单 —— 仍然算没装
+        std::fs::create_dir_all(data_dir.join(HOST_BIN_DIR)).unwrap();
+        std::fs::write(host_exe_path(data_dir), b"fake").unwrap();
+        assert!(!is_installed(data_dir), "缺清单时不算已安装");
+    }
+
+    /// 清单里的路径与实际路径不一致时不算已安装。
+    ///
+    /// 用户换了目录重装，清单还指着旧路径——那份是失效的，
+    /// 显示「已安装」会让用户以为装好了，其实连不上。
+    #[test]
+    fn is_installed_requires_the_manifest_to_point_at_the_current_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path();
+        std::fs::create_dir_all(data_dir.join(HOST_BIN_DIR)).unwrap();
+        std::fs::write(host_exe_path(data_dir), b"fake").unwrap();
+
+        // 清单指向别处
+        let manifest = manifest_path(data_dir);
+        std::fs::write(
+            &manifest,
+            br#"{"name":"com.keynest.bridge","path":"C:\\old\\host.exe","type":"stdio","allowed_origins":[]}"#,
+        )
+        .unwrap();
+        assert!(!is_installed(data_dir), "路径不符时不该算已安装");
+
+        // 改成当前路径
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+        v["path"] =
+            serde_json::Value::String(host_exe_path(data_dir).to_string_lossy().to_string());
+        std::fs::write(&manifest, serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(is_installed(data_dir), "路径一致时才算已安装");
     }
 
     /// 缺宿主 exe 时要给出**能照着做**的错误。

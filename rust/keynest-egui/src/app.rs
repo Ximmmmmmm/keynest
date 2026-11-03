@@ -1440,6 +1440,88 @@ impl App {
         Ok((active.len(), bytes))
     }
 
+    /// 宿主 exe 的来源：与 GUI 同目录（发布包里的布局）。
+    ///
+    /// 找不到就返回 None——调用方要给出可操作的提示，
+    /// 而不是「安装失败」。
+    fn native_host_exe(&self) -> Option<std::path::PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let dir = exe.parent()?;
+        let candidate = dir.join(keynest_bridge::hostinstall::HOST_EXE_NAME);
+        if candidate.exists() {
+            Some(candidate)
+        } else {
+            None
+        }
+    }
+
+    /// 安装浏览器桥接宿主。
+    fn install_bridge(&mut self) {
+        let Some(id_text) = self
+            .settings
+            .as_ref()
+            .map(|s| s.bridge_ext_id.trim().to_string())
+        else {
+            return;
+        };
+        let Some(exe) = self.native_host_exe() else {
+            if let Some(st) = self.settings.as_mut() {
+                st.bridge_status = Some(format!(
+                    "找不到 {}。它应当与本程序在同一个目录里。",
+                    keynest_bridge::hostinstall::HOST_EXE_NAME
+                ));
+            }
+            return;
+        };
+
+        let data_dir = keynest_paths::resolve_data_dir();
+        match keynest_bridge::hostinstall::install(&data_dir, &exe, &[id_text]) {
+            Ok(report) => {
+                let msg = report.summary();
+                if let Some(st) = self.settings.as_mut() {
+                    st.bridge_installed = true;
+                    st.bridge_status = Some(msg.clone());
+                }
+                self.set_toast(msg);
+            }
+            Err(e) => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.bridge_installed = false;
+                    st.bridge_status = Some(format!("安装失败：{e}"));
+                }
+                self.set_toast(format!("安装失败：{e}"));
+            }
+        }
+    }
+
+    /// 卸载浏览器桥接宿主。
+    fn uninstall_bridge(&mut self) {
+        let data_dir = keynest_paths::resolve_data_dir();
+        match keynest_bridge::hostinstall::uninstall(&data_dir) {
+            Ok(report) => {
+                let msg = if report.registered_browsers.is_empty() {
+                    "已卸载浏览器桥接".to_string()
+                } else {
+                    format!(
+                        "已从 {} 卸载浏览器桥接",
+                        report.registered_browsers.join("、")
+                    )
+                };
+                if let Some(st) = self.settings.as_mut() {
+                    st.bridge_installed = false;
+                    st.bridge_status = Some(msg.clone());
+                }
+                self.set_toast(msg);
+            }
+            Err(e) => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.bridge_status = Some(format!("卸载失败：{e}"));
+                }
+                self.set_toast(format!("卸载失败：{e}"));
+            }
+        }
+    }
+
     fn do_plaintext_export(&mut self, kind: ExportKind) {
         let Some(path) = rfd::FileDialog::new()
             .set_title("选择明文导出的保存位置")
@@ -1564,6 +1646,9 @@ impl App {
                             leftovers: vault.list_recovery_leftovers(),
                             font_note: font,
                             dark,
+                            bridge_installed: keynest_bridge::hostinstall::is_installed(
+                                &keynest_paths::resolve_data_dir(),
+                            ),
                         },
                     ));
                 }
@@ -1840,6 +1925,8 @@ impl App {
                 self.settings = None;
                 self.filter = Filter::Reused;
             }
+            SettingsIntent::InstallBridge => self.install_bridge(),
+            SettingsIntent::UninstallBridge => self.uninstall_bridge(),
             SettingsIntent::ExportCsv => self.pending_export = Some(ExportKind::Csv),
             SettingsIntent::ExportJson => self.pending_export = Some(ExportKind::Json),
             SettingsIntent::ExportBackup => self.do_export_backup(),
