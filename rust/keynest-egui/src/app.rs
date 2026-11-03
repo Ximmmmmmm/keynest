@@ -273,6 +273,13 @@ pub struct App {
     pub edit: Option<EditState>,
     pub settings: Option<SettingsState>,
     pub confirm_delete: Option<String>,
+    /// 「永久删除」的确认。
+    ///
+    /// 与 `confirm_empty_trash` 同样的理由：这是不可撤销的操作。
+    /// 原来单条永久删除**没有任何确认**，点了就执行——用户本想点旁边的
+    /// 「恢复」，手一抖就永久没了。而「清空回收站」反倒是有确认的，
+    /// 两处标准不一致。
+    pub confirm_purge: Option<String>,
     /// 明文导出前的确认弹窗。明文导出是不可逆的数据外流，必须显式确认。
     pub pending_export: Option<ExportKind>,
     /// 「清空回收站」的确认弹窗。这是一次性永久删除，不能一键就做。
@@ -350,6 +357,7 @@ impl App {
             edit: None,
             settings: None,
             confirm_delete: None,
+            confirm_purge: None,
             pending_export: None,
             confirm_empty_trash: false,
             new_category_buf: String::new(),
@@ -632,6 +640,7 @@ impl App {
         self.edit = None;
         self.settings = None;
         self.confirm_delete = None;
+        self.confirm_purge = None;
         self.confirm_empty_trash = false;
         self.pending_export = None;
         self.selected_id = None;
@@ -1670,6 +1679,9 @@ impl App {
                 }
             }
             MainIntent::Purge(id) => {
+                self.confirm_purge = Some(id);
+            }
+            MainIntent::PurgeConfirmed(id) => {
                 let AppState::Unlocked { vault, data, .. } = &mut self.state else {
                     return;
                 };
@@ -2041,6 +2053,76 @@ impl App {
         self.set_toast("已保存并锁定");
     }
 
+    /// 「永久删除这一条？」的确认。
+    ///
+    /// 与「清空回收站」同样的理由：不可撤销的操作必须二次确认。
+    /// 回收站里每行都有「恢复」和「永久删除」两个按钮，挨得很近，
+    /// 手一抖就从「想恢复」变成「永久没了」。
+    fn draw_confirm_purge(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.confirm_purge.clone() else {
+            return;
+        };
+
+        let title = match &self.state {
+            AppState::Unlocked { data, .. } => data
+                .entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.title.clone())
+                .unwrap_or_else(|| "该条目".to_string()),
+            _ => return,
+        };
+
+        #[allow(deprecated)]
+        let resp = egui::Modal::new(egui::Id::new("confirm-purge")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(egui::RichText::new("永久删除").size(16.0).strong());
+            ui.add_space(8.0);
+            ui.label(format!("「{title}」将被彻底删除，无法恢复。"));
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("如果只是想先放一边，可以用「恢复」把它放回列表。")
+                    .size(11.0)
+                    .color(ui.visuals().weak_text_color()),
+            );
+            ui.add_space(12.0);
+
+            let mut action = 0u8; // 0=不动 1=确认 2=取消
+            ui.horizontal(|ui| {
+                if ui
+                    .button(
+                        egui::RichText::new("永久删除").color(egui::Color32::from_rgb(190, 60, 60)),
+                    )
+                    .clicked()
+                {
+                    action = 1;
+                }
+                if ui.button("取消").clicked() {
+                    action = 2;
+                }
+            });
+            action
+        });
+
+        // 点遮罩也算取消：没明确选择时不该删任何东西
+        let action = if resp.inner != 0 {
+            resp.inner
+        } else if resp.should_close() {
+            2
+        } else {
+            0
+        };
+
+        match action {
+            1 => {
+                self.confirm_purge = None;
+                self.apply_main_intent(MainIntent::PurgeConfirmed(id));
+            }
+            2 => self.confirm_purge = None,
+            _ => {}
+        }
+    }
+
     fn draw_confirm_delete(&mut self, ctx: &egui::Context) {
         let Some(id) = self.confirm_delete.clone() else {
             return;
@@ -2061,7 +2143,21 @@ impl App {
             ui.set_width(360.0);
             ui.label(egui::RichText::new("确认删除").size(16.0).strong());
             ui.add_space(8.0);
-            ui.label(format!("确定要删除「{title}」吗？此操作无法撤销。"));
+            // 文案必须与实际行为一致。
+            //
+            // 删除是**软删除**：条目进回收站，随时可以恢复（`delete_entry`
+            // 只设置 deleted_at）。原来这里写「此操作无法撤销」，既不准确，
+            // 也会让用户以为没有回收站而不敢用删除——
+            // 或者反过来，在真正需要谨慎的「永久删除」时以为还能恢复。
+            ui.label(format!("把「{title}」移到回收站？"));
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "之后可以在左侧「回收站」里恢复。要真正删除，需在回收站里再删一次。",
+                )
+                .size(11.0)
+                .color(ui.visuals().weak_text_color()),
+            );
             ui.add_space(12.0);
             let mut do_delete = false;
             let mut cancel = false;
@@ -2082,9 +2178,11 @@ impl App {
         let (do_delete, cancel) = resp.inner;
         if do_delete {
             self.confirm_delete = None;
+            self.confirm_purge = None;
             self.delete_entry(&id);
         } else if cancel || resp.should_close() {
             self.confirm_delete = None;
+            self.confirm_purge = None;
         }
     }
 }
@@ -2317,6 +2415,7 @@ impl eframe::App for App {
         self.apply_settings_intent(settings_intent);
         self.apply_edit_intent(edit_intent);
         self.draw_confirm_lock(ui.ctx());
+        self.draw_confirm_purge(ui.ctx());
         self.draw_confirm_delete(ui.ctx());
         self.draw_export_confirm(ui.ctx());
         self.draw_confirm_empty_trash(ui.ctx());

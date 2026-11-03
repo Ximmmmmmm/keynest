@@ -82,8 +82,10 @@ pub enum MainIntent {
     OpenUrl(String),
     /// 从回收站恢复
     Restore(String),
-    /// 永久删除
+    /// 永久删除（先弹确认）
     Purge(String),
+    /// 确认框里点了「永久删除」
+    PurgeConfirmed(String),
     /// 清空回收站
     EmptyTrash,
 }
