@@ -574,6 +574,110 @@ fn entries_without_a_password_never_emit_copy_password() {
     }
 }
 
+/// 回收站里的条目不能一键复制密码。
+///
+/// # 为什么
+///
+/// 用户把条目丢进回收站，往往是因为**怀疑密码已经泄露**。
+/// 而原来回收站里的行与普通行渲染完全相同——包括
+/// 「复制密码」那个图标：点一下密码就进了剪贴板，等于「删了但没删」。
+///
+/// 要恢复使用先点「恢复」；在回收站里提供快捷复制只会让人
+/// 误以为它已经安全了。
+///
+/// 这条测试走的是真实的点击路径（注入指针事件），
+/// 不是读源码判断有没有那个图标。
+#[test]
+fn the_trash_list_never_offers_quick_copy() {
+    use keynest_egui::views::main_view::{Filter, MainView, SortBy};
+
+    let mut data = data_with(1);
+    data.entries[0].deleted_at = Some("2026-01-01T00:00:00.000Z".into());
+    data.entries[0].password = "still-secret".into();
+    data.entries[0].username = "user".into();
+    data.entries[0].url = "https://example.test/".into();
+
+    let ctx = Context::default();
+    let mut search = String::new();
+    let mut filter = Filter::Trash;
+    let mut sort = SortBy::UpdatedDesc;
+    let mut selected = None;
+    let mut reveal = None;
+    let mut new_cat = String::new();
+    let copy_banner: Option<(std::time::Instant, u32)> = None;
+
+    let mut run = |ctx: &Context, ev: Vec<egui::Event>| -> MainIntent {
+        let mut intent = MainIntent::None;
+        let mut out = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                events: ev,
+                ..Default::default()
+            },
+            |ui: &mut Ui| {
+                intent = keynest_egui::views::main_view::show(
+                    ui,
+                    MainView {
+                        data: &data,
+                        search: &mut search,
+                        filter: &mut filter,
+                        sort: &mut sort,
+                        selected_id: &mut selected,
+                        reveal: &mut reveal,
+                        copy_banner: &copy_banner,
+                        new_category_buf: &mut new_cat,
+                        focus_search: false,
+                        idle_left_secs: 0,
+                        toast: None,
+                    },
+                );
+            },
+        );
+        out.textures_delta.clear();
+        intent
+    };
+
+    let _ = run(&ctx, vec![]);
+
+    // 扫遍整行：任何 x 都不该返回 CopyPassword / CopyUsername / OpenUrl
+    let mut leaked: Vec<String> = Vec::new();
+    for y in [150f32, 160.0, 170.0] {
+        for x in (300..=1000).step_by(20).map(|v| v as f32) {
+            let pos = egui::Pos2::new(x, y);
+            let _ = run(&ctx, vec![egui::Event::PointerMoved(pos)]);
+            let _ = run(
+                &ctx,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                }],
+            );
+            let i = run(
+                &ctx,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+            );
+            match i {
+                MainIntent::CopyPassword(_) => leaked.push(format!("({x},{y}) 复制密码")),
+                MainIntent::CopyUsername(_) => leaked.push(format!("({x},{y}) 复制账号")),
+                MainIntent::OpenUrl(_) => leaked.push(format!("({x},{y}) 打开网址")),
+                _ => {}
+            }
+        }
+    }
+
+    assert!(leaked.is_empty(), "回收站里仍然存在快捷操作：{leaked:?}");
+}
+
 /// 点击列表**下方**的空白区域不能选中任何条目。
 ///
 /// 命中测试写宽了（比如整块区域都算作行）就会出现

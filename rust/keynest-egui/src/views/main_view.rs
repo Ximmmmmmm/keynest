@@ -1028,7 +1028,17 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
 
                             // 悬停/选中时右侧出现快捷复制（图标手绘，点击用 x 坐标判定，
                             // 避免为两个小按钮嵌套 Ui 影响行高与点击区域）
-                            let show_actions = resp.hovered() || is_sel;
+                            //
+                            // **回收站里不显示**。
+                            //
+                            // 用户把条目丢进回收站，往往是因为怀疑密码已经泄露；
+                            // 而原来那里仍然保留着一键复制密码的按钮——
+                            // 点一下密码就进了剪贴板，等于「删了但没删」。
+                            //
+                            // 回收站里的条目要恢复使用，先「恢复」再说；
+                            // 在那里提供快捷复制只会让人误以为它已经安全了。
+                            let in_trash = matches!(filter, Filter::Trash);
+                            let show_actions = (resp.hovered() || is_sel) && !in_trash;
                             // 从右到左：复制密码 / 复制用户名 / 打开网址
                             let pass_x = rect.right() - 40.0;
                             let user_x = rect.right() - 74.0;
@@ -1078,17 +1088,28 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
                             }
 
                             if resp.clicked() {
-                                match resp.interact_pointer_pos() {
-                                    Some(pos) if pos.x >= pass_x && !e.password.is_empty() => {
-                                        quick_copy = Some(e.id.clone())
+                                // 回收站里整行只有「选中」一个动作。
+                                //
+                                // **不能只把图标藏起来**：图标不画了、点击判定还在，
+                                // 用户就会点到一片空白、结果密码进了剪贴板——
+                                // 比原来更糟（看不见的按钮）。
+                                let pos = resp.interact_pointer_pos();
+                                if in_trash {
+                                    let _ = pos;
+                                    clicked_id = Some(e.id.clone());
+                                } else {
+                                    match pos {
+                                        Some(pos) if pos.x >= pass_x && !e.password.is_empty() => {
+                                            quick_copy = Some(e.id.clone())
+                                        }
+                                        Some(pos) if pos.x >= user_x && !e.username.is_empty() => {
+                                            quick_copy_user = Some(e.id.clone())
+                                        }
+                                        Some(pos) if pos.x >= open_x && can_open => {
+                                            quick_open = Some(e.id.clone())
+                                        }
+                                        _ => clicked_id = Some(e.id.clone()),
                                     }
-                                    Some(pos) if pos.x >= user_x && !e.username.is_empty() => {
-                                        quick_copy_user = Some(e.id.clone())
-                                    }
-                                    Some(pos) if pos.x >= open_x && can_open => {
-                                        quick_open = Some(e.id.clone())
-                                    }
-                                    _ => clicked_id = Some(e.id.clone()),
                                 }
                             }
                             if resp.hovered() {
