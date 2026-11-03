@@ -257,7 +257,14 @@ fn reply<T: Write>(
     tx: &mut SessionCipher,
     resp: &Response,
 ) -> Result<(), BridgeError> {
-    let body = serde_json::to_vec(resp).map_err(|_| BridgeError::Io("序列化失败".into()))?;
+    // 序列化结果可能含**明文密码**（`vault.fill` 的响应就是）。
+    //
+    // 裸 `Vec<u8>` 在 drop 时只是把内存还给分配器，内容仍留在那里——
+    // 加密之后那段明文没有任何理由继续存在于进程堆上。
+    // `keynest-core` 里同类缓冲区（写库前的 serde_json::to_vec）已经
+    // 这样处理了，这里此前漏掉。
+    let body =
+        Zeroizing::new(serde_json::to_vec(resp).map_err(|_| BridgeError::Io("序列化失败".into()))?);
     let sealed = tx.seal(&body)?;
     write_frame(transport, &sealed)
 }
@@ -458,6 +465,45 @@ mod tests {
             responses.push(serde_json::from_slice::<Response>(&plain).unwrap());
         }
         responses
+    }
+
+    /// `reply` 的序列化缓冲区必须被清零。
+    ///
+    /// `vault.fill` 的响应里带明文密码。序列化出的 JSON 字节流
+    /// 加密之后就没有理由继续留在进程堆上——而裸 `Vec<u8>` 在 drop 时
+    /// 只是归还内存，内容还在。
+    ///
+    /// 验"drop 后是 0"不可行（内存已归还分配器），所以盯源码，
+    /// 挡住"重构时顺手去掉 Zeroizing"这种退化。
+    ///
+    /// 截取范围必须**精确到 reply 函数体**：整份文件里别处也有
+    /// `Zeroizing::new`，范围放宽会让这条测试永远通过（已实测）。
+    #[test]
+    fn reply_body_is_zeroized() {
+        let src = include_str!("server.rs");
+        let after_sig = src
+            .split("fn reply<T: Write>")
+            .nth(1)
+            .expect("reply 函数不见了");
+
+        // 函数体在第一个位于行首的 `}` 处结束
+        let body = after_sig
+            .lines()
+            .take_while(|l| l.trim() != "}")
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+
+        assert!(
+            body.contains("Zeroizing::new"),
+            "reply 的序列化缓冲区没有用 Zeroizing 包装——明文密码会留在堆上"
+        );
+        assert!(
+            body.contains("serde_json::to_vec(resp)"),
+            "reply 里没有找到序列化语句，测试的截取范围可能已经失效"
+        );
     }
 
     #[test]
