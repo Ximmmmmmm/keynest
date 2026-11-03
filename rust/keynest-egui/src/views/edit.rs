@@ -197,6 +197,28 @@ impl EditState {
         }
     }
 
+    /// 按指定类型新建条目，并把该类型的字段模板填好。
+    ///
+    /// 与 `new_entry` 的区别：那个只设分类，类型固定是「账号」，
+    /// 模板留空——用户在 UI 里改类型时才填。
+    ///
+    /// 但有些入口是「直接新建一个 API Key / 信用卡」——
+    /// 那时用户已经表达了类型意图，不必让他再从下拉里选一次。
+    ///
+    /// `template` 由调用方给（类型定义挂在 `VaultData.types` 上，
+    /// 这里不持有 `VaultData`，硬查内置模板会漏掉用户自定义的类型）。
+    pub fn new_typed(
+        default_category: String,
+        kind: &str,
+        template: &[keynest_core::FieldTemplate],
+    ) -> Self {
+        let mut st = Self::new_entry(default_category);
+        st.kind = kind.to_string();
+        st.template = template.to_vec();
+        st.apply_template();
+        st
+    }
+
     pub fn from_entry(e: &keynest_core::vault::Entry) -> Self {
         Self {
             id: Some(e.id.clone()),

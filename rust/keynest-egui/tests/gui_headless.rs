@@ -848,6 +848,66 @@ fn clicking_empty_space_below_the_list_selects_nothing() {
     );
 }
 
+/// 「API Key」类型必须能在编辑框里正常渲染，并带上它的字段模板。
+///
+/// 只加类型与模板还不够——`EditState` 要能从类型推出字段行。
+/// 这条在**真实渲染**里验，而不是只验 `kinds::template()` 那个纯函数。
+#[test]
+fn the_api_key_type_renders_in_the_edit_dialog() {
+    use keynest_egui::views::edit::EditState;
+
+    let api_key = keynest_core::vault::kinds::APIKEY;
+    let tpl = keynest_core::vault::kinds::template(api_key);
+    assert!(!tpl.is_empty(), "前提：API Key 类型应当有模板");
+
+    // 用 `new_typed`：用户已经表达了「我要建一个 API Key」，
+    // 不必让他再从类型下拉里选一次。
+    let tpl_defs: Vec<keynest_core::vault::FieldTemplate> = tpl
+        .iter()
+        .map(|(label, secret)| keynest_core::vault::FieldTemplate {
+            label: (*label).to_string(),
+            secret: *secret,
+        })
+        .collect();
+
+    let mut st = EditState::new_typed(api_key.into(), api_key, &tpl_defs);
+
+    // 渲染时用的类型表（在闭包外构造，避免被 move）
+    let types = [keynest_core::vault::TypeDef::new(api_key, tpl_defs.clone())];
+    st.title = "OpenAI 项目 key".into();
+
+    // 模板字段应当已经被填进 drafts
+    assert!(
+        !st.fields.is_empty(),
+        "新建 API Key 条目时，字段模板没有被填进草稿"
+    );
+    assert_eq!(st.fields.len(), tpl.len(), "字段数与模板不一致");
+    assert!(
+        st.fields.iter().any(|f| f.label == "API Key"),
+        "草稿里应当有「API Key」字段"
+    );
+    let key_draft = st.fields.iter().find(|f| f.label == "API Key").unwrap();
+    assert!(key_draft.secret, "「API Key」字段必须打码");
+
+    let ctx = Context::default();
+    let mut out = ctx.run_ui(
+        RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        },
+        |_ui: &mut Ui| {
+            let _ = keynest_egui::views::edit::show(&ctx, &mut st, &["网站".to_string()], &types);
+        },
+    );
+    out.textures_delta.clear();
+
+    // 渲染不崩即通过；再确认字段数没被渲染过程改掉
+    assert!(!st.fields.is_empty(), "渲染后字段行消失了");
+}
+
 #[test]
 fn renders_the_first_entries_at_the_top() {
     // 顶部应当显示最前面的条目——虚拟滚动算错了范围就会露馅。

@@ -563,8 +563,15 @@ pub mod kinds {
     pub const CARD: &str = "信用卡";
     pub const IDENTITY: &str = "身份";
 
+    /// AI 服务的 API Key（OpenAI / Anthropic / 自建…）。
+    ///
+    /// 做成一个类型而不是专门功能：类型系统本来就是「标签 + 字段模板」，
+    /// API Key 只是又一组字段。这样它自动获得搜索、筛选、收藏、回收站、
+    /// 导入导出、字段打码，不需要为它写一套 UI 或改 `vault.dat` 格式。
+    pub const APIKEY: &str = "API Key";
+
     /// 默认的类型列表。
-    pub const DEFAULT_TYPES: [&str; 4] = [LOGIN, NOTE, CARD, IDENTITY];
+    pub const DEFAULT_TYPES: [&str; 5] = [LOGIN, NOTE, CARD, IDENTITY, APIKEY];
 
     /// 老版本把类型存成 `login` / `card` 这种英文 id，读进来要换成中文名。
     pub fn migrate_legacy(value: &str) -> Option<&'static str> {
@@ -593,6 +600,19 @@ pub mod kinds {
                 ("出生日期", false),
                 ("地址", false),
                 ("电话", false),
+            ],
+            // API Key 的字段设计见 docs/design-ai-apikey-type.md
+            //
+            // 「API Key」用 `secret: true` 的自定义字段，而不是复用 `password`：
+            // `password` 会参与「弱密码」「重复使用」两项安全统计，
+            // 而一个 50 位十六进制的 API Key 在那些统计里毫无意义。
+            APIKEY => &[
+                ("服务商", false),
+                ("API Key", true),
+                ("Base URL", false),
+                ("组织 / 项目", false),
+                ("额度 / 计费", false),
+                ("到期时间", false),
             ],
             _ => &[],
         }
@@ -793,6 +813,17 @@ impl VaultData {
         }
         if self.types.is_empty() {
             self.types = default_types();
+        }
+
+        // 「API Key」是后加的内置类型。类型表存在库文件里，
+        // 所以**已有的库不会自动出现它**——这里补一次。
+        //
+        // 只补这一个，不碰其它内置类型：用户可能主动删了「笔记」，
+        // 每次打开都加回去会很烦。API Key 是这版新增的，
+        // 老库里不可能「被用户删过」，所以补它是安全的。
+        if !self.types.iter().any(|t| t.label == kinds::APIKEY) {
+            self.types
+                .push(TypeDef::new(kinds::APIKEY, builtin_template(kinds::APIKEY)));
         }
         // 条目用到了但类型表里没有的，补进去（否则它会从类型下拉里消失）
         let used: Vec<String> = self.entries.iter().map(|e| e.kind.clone()).collect();
@@ -2988,6 +3019,101 @@ impl Vault {
 mod tests {
     use super::*;
 
+    /// 「API Key」类型的字段模板必须齐全，且 Key 本身要打码。
+    ///
+    /// 打码不是审美问题：API Key 泄露的经济后果与密码同级
+    /// （有人拿它刷你的额度），而它经常被投屏、截屏、录屏。
+    #[test]
+    fn api_key_template_masks_the_key_itself() {
+        let tpl = kinds::template(kinds::APIKEY);
+        assert!(!tpl.is_empty(), "API Key 类型应当有字段模板");
+
+        let key_field = tpl
+            .iter()
+            .find(|(label, _)| *label == "API Key")
+            .expect("模板里必须有「API Key」字段");
+        assert!(key_field.1, "「API Key」字段必须打码");
+
+        // 其余字段是辅助信息，不该打码（打码会让用户没法核对服务商/额度）
+        for (label, secret) in tpl {
+            if *label != "API Key" {
+                assert!(!secret, "「{label}」不该打码");
+            }
+        }
+    }
+
+    /// 「API Key」必须在默认类型列表里，且带模板。
+    #[test]
+    fn api_key_is_a_default_type_with_a_template() {
+        assert!(
+            kinds::DEFAULT_TYPES.contains(&kinds::APIKEY),
+            "API Key 应当是内置类型"
+        );
+        let defs = default_types();
+        let found = defs
+            .iter()
+            .find(|t| t.label == kinds::APIKEY)
+            .expect("默认类型里应当有 API Key");
+        assert!(
+            !found.template.is_empty(),
+            "默认类型里的 API Key 必须带字段模板"
+        );
+    }
+
+    /// **老库打开后必须出现「API Key」类型。**
+    ///
+    /// 类型表存在库文件里，所以新加的内置类型不会自动出现在已有库中。
+    /// 不补这一步，用户升级后根本找不到这个类型——功能等于没加。
+    #[test]
+    fn opening_an_old_vault_adds_the_api_key_type() {
+        // 造一个「旧库」：只有四个内置类型，没有 API Key
+        let mut data = VaultData::default();
+        data.types.retain(|t| t.label != kinds::APIKEY);
+        assert!(!data.types.iter().any(|t| t.label == kinds::APIKEY));
+
+        data.migrate_legacy();
+
+        let added = data
+            .types
+            .iter()
+            .find(|t| t.label == kinds::APIKEY)
+            .expect("打开旧库后应当补上 API Key 类型");
+        assert!(!added.template.is_empty(), "补上的类型要带字段模板");
+    }
+
+    /// 已经有了就不能重复添加（反复打开库不该堆出五个 API Key）。
+    #[test]
+    fn migration_is_idempotent_for_the_api_key_type() {
+        let mut data = VaultData::default();
+        data.migrate_legacy();
+        data.migrate_legacy();
+        data.migrate_legacy();
+
+        let n = data
+            .types
+            .iter()
+            .filter(|t| t.label == kinds::APIKEY)
+            .count();
+        assert_eq!(n, 1, "迁移不幂等，出现了 {n} 个 API Key 类型");
+    }
+
+    /// 用户**主动删掉**别的内置类型时，迁移不该强行加回来。
+    ///
+    /// 否则用户每次打开库都会发现自己删掉的类型又冒出来。
+    #[test]
+    fn migration_does_not_resurrect_user_deleted_types() {
+        let mut data = VaultData::default();
+        data.types.retain(|t| t.label != kinds::NOTE);
+        assert!(!data.types.iter().any(|t| t.label == kinds::NOTE));
+
+        data.migrate_legacy();
+
+        assert!(
+            !data.types.iter().any(|t| t.label == kinds::NOTE),
+            "迁移把用户删掉的「笔记」类型加回来了"
+        );
+    }
+
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
     }
@@ -4408,13 +4534,26 @@ mod tests {
         assert!(card.template.iter().any(|f| f.label == "卡号"));
     }
 
+    /// 新库应当带上**全部**内置类型。
+    ///
+    /// 断言写的是 `DEFAULT_TYPES.len()` 而不是字面量 4/5——
+    /// 原来这里写死 `4`，加「API Key」类型时它立刻变红。
+    /// 那不是缺陷被发现，而是测试在提醒「你改了内置类型集合，
+    /// 确认一下别的数字有没有跟着变」。改成引用常量后，
+    /// 它验的是「默认类型一个不少」，这才是真正想守的东西。
     #[test]
-    fn types_default_to_four_builtins() {
+    fn types_default_to_all_builtins() {
         let dir = tmp();
         let v = fast_vault(dir.path());
         let data = v.snapshot().unwrap();
-        assert_eq!(data.types.len(), 4);
-        assert!(data.types.iter().any(|t| t.label == kinds::LOGIN));
+        assert_eq!(data.types.len(), kinds::DEFAULT_TYPES.len());
+        for name in kinds::DEFAULT_TYPES {
+            assert!(
+                data.types.iter().any(|t| t.label == name),
+                "默认类型里缺「{name}」"
+            );
+        }
+        assert_eq!(data.types.len(), 5, "内置类型数量变化时请同步这行");
     }
 
     #[test]
