@@ -340,6 +340,9 @@ SIL OFL-1.1 / Ubuntu-font-1.0，随程序分发时需保留其许可证与署名
 - 目前提供四个能力：密码填充、广告与跟踪器过滤、阅读模式、夜间模式
 - 广告过滤是保守的域名清单，不做元素级（cosmetic）过滤
 - 扩展的自动化测试有三层：494 项单元/集成 + 离线装配自检 15 项 +
-  headless 真实 Chrome 验收 11 项（`node test/acceptance/extension-headless.mjs`，
-  **不启动 GUI、不抢焦点**，可以与日常使用同时跑）。
-  但**解锁 → 桥接 → 密码填充**的完整链路仍需 GUI 验收（`test/acceptance/run.mjs`）
+  headless 真实 Chrome 验收 **17 项**（`extension-headless.mjs` 11 项 +
+  `fill-headless.mjs` 6 项，**不启动 GUI、不抢焦点**，可以与日常使用同时跑）。
+  其中 `fill-headless.mjs` 验的是填充链路的**页面侧**：
+  origin 必须精确相等（前缀也拒）、nonce 不可重放、表单识别。
+  剩下的**真实窗口部分**（解锁后的桥接连接、真实剪贴板）仍需
+  GUI 验收（`test/acceptance/run.mjs`）
