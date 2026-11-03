@@ -108,6 +108,55 @@ pub struct MainView<'a> {
 const DETAIL_W: f32 = 400.0;
 const ROW_H: f32 = 46.0;
 
+/// 虚拟滚动：一次只渲染可视区域里的行。
+///
+/// # 为什么
+///
+/// 以前是每帧把**全部**条目都画一遍。密码库上限 5 万条，
+/// 即使几千条也会让每帧创建上万个 egui UI 元素——程序直接卡住。
+///
+/// 现在只渲染可视区域（外加一点余量），行数再多也只是常数开销。
+///
+/// # 坐标语义
+///
+/// * `viewport_top` —— 已经滚过的距离（像素，**非负**）
+/// * `viewport_bottom` —— 视口底边在内容坐标系里的位置
+/// * `total_rows` —— 总行数
+/// * `row_height` —— 单行高度（含行间距）
+///
+/// # 为什么要自己算，而不是用 egui 的 `ScrollArea::show_rows`
+///
+/// `show_rows` 内部把 `viewport.min.y`（**相对坐标，滚动时为负**）
+/// 直接 `floor() as usize`——负数转 usize 会环绕成巨大值。
+/// 它靠后面的钳制兜住，但那个兜底路径会让 `min_row` 变成 `total_rows`，
+/// 于是什么都不渲染。
+///
+/// 自己算的好处是：坐标语义明确（非负的「已滚过距离」），
+/// 而且**这段逻辑能被单元测试直接验证**——
+/// 「只渲染一部分」在界面上完全看不出来，
+/// 不测就永远发现不了它退化成「全渲染」。
+pub fn visible_row_range(
+    viewport_top: f32,
+    viewport_bottom: f32,
+    total_rows: usize,
+    row_height: f32,
+) -> std::ops::Range<usize> {
+    if total_rows == 0 || row_height <= 0.0 {
+        return 0..0;
+    }
+    let mut min_row = (viewport_top.max(0.0) / row_height).floor() as usize;
+    let mut max_row = (viewport_bottom.max(0.0) / row_height).ceil() as usize + 1;
+
+    if max_row > total_rows {
+        // 底部被截断时，**保持可见行数**而不是压缩——
+        // 压缩会让最后几行在滚到底时看不见。
+        let visible = max_row - min_row;
+        max_row = total_rows;
+        min_row = total_rows.saturating_sub(visible);
+    }
+    min_row.min(total_rows)..max_row.clamp(min_row, total_rows)
+}
+
 /// 把条目里填的网址整理成一个**可以安全交给浏览器**的地址。
 ///
 /// 只放行 http/https。理由：条目内容可能来自导入的第三方文件，而 `file://`、
@@ -814,10 +863,40 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
             egui::vec2(list_w, ui.available_height()),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
+                // **虚拟滚动**：只渲染可视区域里的行。
+                //
+                // 以前是 `for &idx in &visible` —— 每帧把**全部**条目
+                // 都画一遍。密码库上限 5 万条，即使几千条也会让每帧
+                // 创建上万个 egui UI 元素，程序会直接卡住。
+                //
+                // `show_rows` 只渲染可视区域（外加一点余量），
+                // 行数再多也只是常数开销。
+                //
+                // 它要求所有行**等高**——本列表的 ROW_H 是固定的，
+                // 标题与副标题都用 painter 绝对定位绘制，正好满足。
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for &idx in &visible {
+                    .show_viewport(ui, |ui, viewport| {
+                        let total = visible.len();
+                        let spacing = ui.spacing().item_spacing;
+                        let row_h = ROW_H + spacing.y;
+
+                        // 内容总高度：滚动条靠它算。
+                        // 与 egui `show_rows` 的算法一致。
+                        ui.set_height((row_h * total as f32 - spacing.y).max(0.0));
+
+                        // viewport 是**相对坐标**（滚动时 min.y 为负）。
+                        // 取反得到「已滚过的距离」，语义非负、没有环绕问题。
+                        let scrolled = (-viewport.min.y).max(0.0);
+                        let range =
+                            visible_row_range(scrolled, scrolled + viewport.height(), total, row_h);
+
+                        // 上方占位：让滚动条的高度与真实内容一致
+                        if range.start > 0 {
+                            ui.add_space(range.start as f32 * row_h);
+                        }
+
+                        for &idx in &visible[range.clone()] {
                             let e = &v.data.entries[idx];
                             let is_sel = v
                                 .selected_id
@@ -964,6 +1043,10 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
                                 }
                             }
                         }
+                        // 下方占位：让滚动条的高度与真实内容一致
+                        if range.end < total {
+                            ui.add_space((total - range.end) as f32 * row_h);
+                        }
                     });
             },
         );
@@ -1046,6 +1129,68 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// 虚拟滚动：渲染的行数必须与总数**无关**。
+    ///
+    /// 这是「只渲染可视区域」这个优化的**唯一可靠证明**——
+    /// 界面看起来完全正常，只是条目多的时候变卡，
+    /// 不测就永远发现不了退化。
+    #[test]
+    fn visible_rows_do_not_grow_with_total() {
+        let row_h = 46.0;
+        let viewport = (0.0, 600.0);
+
+        let small = visible_row_range(viewport.0, viewport.1, 100, row_h);
+        let huge = visible_row_range(viewport.0, viewport.1, 50_000, row_h);
+
+        assert!(small.len() < 40, "100 条时渲染了 {} 行", small.len());
+        assert!(
+            huge.len() <= small.len() + 2,
+            "5 万条时渲染了 {} 行（100 条时是 {} 行）——没有变成常数开销",
+            huge.len(),
+            small.len()
+        );
+    }
+
+    /// 滚到列表底部时，范围要覆盖最后一行。
+    ///
+    /// 只渲染可视区域有个典型的坑：底部算错，最后几条就永远看不到。
+    #[test]
+    fn visible_range_reaches_the_last_row_when_scrolled_to_bottom() {
+        let row_h = 46.0;
+        let total = 1000;
+        let bottom_y = total as f32 * row_h;
+        let range = visible_row_range(bottom_y - 600.0, bottom_y, total, row_h);
+        assert!(
+            range.end >= total.saturating_sub(1),
+            "滚到底时范围是 {range:?}，没覆盖到第 {total} 行"
+        );
+        assert!(range.end <= total);
+    }
+
+    /// 顶部时范围从 0 开始。
+    #[test]
+    fn visible_range_starts_at_zero_at_the_top() {
+        let range = visible_row_range(0.0, 600.0, 1000, 46.0);
+        assert_eq!(range.start, 0);
+        assert!(range.end > 0);
+        assert!(range.end <= 1000);
+    }
+
+    /// 边界：空列表不能 panic。
+    #[test]
+    fn visible_range_handles_empty_list() {
+        assert_eq!(visible_row_range(0.0, 600.0, 0, 46.0), 0..0);
+    }
+
+    /// 边界：行高为 0（除零）不能 panic 也不能死循环。
+    #[test]
+    fn visible_range_handles_zero_row_height() {
+        let r = visible_row_range(0.0, 600.0, 100, 0.0);
+        assert_eq!(r, 0..0);
+    }
+
     use super::{openable_url, reuse_count, reuse_counts};
     use keynest_core::vault::Entry;
 
