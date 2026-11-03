@@ -57,6 +57,24 @@ pub fn idle_since(app_idle: Duration, sys_idle: Duration) -> Duration {
 }
 
 /// 是否应当自动锁定。
+/// 算出「验证码该在剪贴板里待多少秒」。
+///
+/// 返回 `None` 表示不该复制——剩余时间太短，复制出去立刻就是过期码。
+///
+/// # 为什么单独抽出来
+///
+/// 原实现写成 `.min(remaining).max(3)`，`max(3)` 会把「只剩 1 秒」
+/// 拉成 3 秒，正好制造了它想避免的情况。这类**下限与上限打架**的
+/// 边界只有写成纯函数才容易被测到，留在 UI 事件处理里没人会去验。
+pub fn totp_clipboard_ttl(configured: u32, remaining: u32) -> Option<u32> {
+    // 剩余不足 3 秒：粘贴时多半已经失效，别复制
+    if remaining < 3 {
+        return None;
+    }
+    // 夹到配置范围，再截到当前时间步结束
+    Some(configured.clamp(3, 300).min(remaining))
+}
+
 pub fn should_auto_lock(limit_minutes: u32, app_idle: Duration, sys_idle: Duration) -> bool {
     let limit = Duration::from_secs(limit_minutes as u64 * 60);
     idle_since(app_idle, sys_idle) >= limit
@@ -1487,11 +1505,20 @@ impl App {
                 };
                 let code = totp.code_now();
                 let ttl = data.settings.clipboard_clear_seconds.clamp(3, 300);
+
                 // 验证码只在当前时间步内有效，TTL 不能超过剩余秒数，
                 // 否则剪贴板里留着一个已经过期的码，比不复制更糟。
-                let ttl = ttl
-                    .min(totp.remaining(keynest_core::totp::now_secs()) as u32)
-                    .max(3);
+                //
+                // **剩余时间过短时直接拒绝，而不是把 TTL 拉长到下限。**
+                // 原来写的是 `.min(remaining).max(3)`，`.max(3)` 会把
+                // 「只剩 1 秒」拉成 3 秒——正好制造了它想避免的那种情况：
+                // 剪贴板里留着一个已过期的码。
+                let left = totp.remaining(keynest_core::totp::now_secs()) as u32;
+                let Some(ttl) = totp_clipboard_ttl(ttl, left) else {
+                    self.set_toast("验证码即将失效，请稍候再复制");
+                    return;
+                };
+
                 match clipboard::copy_remembered(&code, ttl, &mut self.last_copied) {
                     Ok(banner) => {
                         if let AppState::Unlocked { copy_banner, .. } = &mut self.state {
@@ -2261,6 +2288,29 @@ mod tests {
         let sys = Duration::from_secs(60);
         assert_eq!(idle_since(app, sys), Duration::from_secs(60));
         assert_eq!(idle_since(sys, app), Duration::from_secs(60));
+    }
+
+    /// 验证码的剪贴板 TTL 不得**超过**当前时间步剩余秒数。
+    ///
+    /// 原实现是 `.min(remaining).max(3)`：剩余 1 秒时被 `max(3)` 拉成 3 秒，
+    /// 剪贴板里于是留着一个已经过期的码——正是那段代码的注释想避免的情况。
+    #[test]
+    fn totp_ttl_never_outlives_the_time_step() {
+        // 正常情况：截到剩余时间
+        assert_eq!(totp_clipboard_ttl(20, 12), Some(12));
+        // 剩余很少：宁可不复制，也不复制一个立刻过期的码
+        assert_eq!(totp_clipboard_ttl(20, 2), None);
+        assert_eq!(totp_clipboard_ttl(20, 0), None);
+        // 配置值本身越界也要夹紧
+        assert_eq!(totp_clipboard_ttl(1000, 60), Some(60));
+        assert_eq!(totp_clipboard_ttl(1, 60), Some(3));
+    }
+
+    /// 边界：剩余正好 3 秒时允许复制，TTL 恰好 3。
+    #[test]
+    fn totp_ttl_allows_exactly_three_seconds() {
+        assert_eq!(totp_clipboard_ttl(20, 3), Some(3));
+        assert_eq!(totp_clipboard_ttl(20, 4), Some(4));
     }
 
     #[test]
