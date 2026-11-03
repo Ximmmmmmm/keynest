@@ -5,6 +5,11 @@ node_modules/
 rust/target/
 target/
 
+# 本地打包出来的可运行副本（二进制产物，不进版本库）
+release-out/
+release-stage/
+ext-stage/
+
 # 测试产物
 test/e2e-data/
 test/e2e-onboard-data/
