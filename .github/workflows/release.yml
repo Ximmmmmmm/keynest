@@ -136,6 +136,12 @@ jobs:
         working-directory: rust
         run: cargo build --release -p keynest-egui
 
+      # 浏览器桥接的宿主。**没有它，扩展连不上桌面程序**——
+      # 扩展与桌面程序之间的全部通信都经过这个进程。
+      - name: 编译浏览器桥接宿主
+        working-directory: rust
+        run: cargo build --release -p keynest-bridge --bin keynest-native-host
+
       # 显式白名单。不用通配符，避免哪天误把 vault.dat、测试库、
       # 构建缓存或私钥一起塞进发布包。
       - name: 收集发布文件
@@ -144,6 +150,7 @@ jobs:
           $stage = "release-stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "rust/target/release/keynest-egui.exe" "$stage/KeyNest.exe"
+          Copy-Item "rust/target/release/keynest-native-host.exe" "$stage/keynest-native-host.exe"
           Copy-Item "README_EN.md" "$stage/README_EN.md"
           Copy-Item "README.md"    "$stage/README.md"
           Copy-Item "SECURITY.md"  "$stage/SECURITY.md"
@@ -281,7 +288,7 @@ jobs:
           set -euo pipefail
           # 覆盖全部随包发布的文件，而不是只算 exe——
           # 用户要能确认自己拿到的 README/LICENSE 也没被替换过。
-          sha256sum KeyNest.exe INSTALL.txt README.md README_EN.md SECURITY.md \
+          sha256sum KeyNest.exe keynest-native-host.exe INSTALL.txt README.md README_EN.md \
                     LICENSE-MIT LICENSE-APACHE KeyNest-Extension-*.zip > SHA256SUMS
           cat SHA256SUMS
 
