@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 20:10 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`c57af74`
+> 最后更新：2026-11-03 20:45 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`909722a`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **370** | `cd rust && cargo test --workspace` |
+| Rust | **372** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **494** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -353,6 +353,29 @@ clippy 失败（`let mut` 但没修改）。
 这条在本次会话里已经是第三次踩（虚拟滚动的纯函数、设置页的关窗判定、
 现在的源码扫描）。**凡是"守卫"性质的测试，写完必须故意破坏一次，
 确认它真的报错。**
+
+## 9g. 一次「分析完决定不改」的记录：`reuse_counts` 每帧 53ms
+
+5 万条实测单帧 81ms，其中 `reuse_counts()` 占 **53ms**。
+
+试了四条优化路线，**全部失败**：
+
+| 尝试 | 结果 |
+| --- | --- |
+| FxHash 风格快速哈希 | **更慢**（逐字节实现比 SipHash 还慢） |
+| 排序 Vec + 二分 | **更慢**（92.8ms vs 50.7ms） |
+| 先 O(n) 扫「有没有重复」 | 判断本身要 HashSet 插入 n 次，不比建表便宜 |
+| 跨帧缓存 | 失效点太多，风险大于收益 |
+
+**缓存的取舍**：`counts` 依赖全部条目的密码，失效点散布在
+upsert / import / delete / restore / purge / 分类操作里。
+漏一处用户就会看到过期的「重复使用 N 次」——他以为自己改了密码，
+其实界面在骗他。**那比慢严重得多。**
+
+结论写进了 `reuse_counts()` 的文档注释。真要再快，
+得把 `show()` 改成「只在数据变化时重算」的架构——另一个量级。
+
+**这条记下来是为了下一轮不再重复研究同一件事。**
 
 ## 10. 审查方法记录（下一轮可复用）
 
