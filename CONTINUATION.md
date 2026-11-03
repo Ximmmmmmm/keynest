@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 10:55 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`fa72b71`
+> 最后更新：2026-11-03 10:50 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`e2bbfa3`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **279** | `cd rust && cargo test --workspace` |
+| Rust | **281** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **468** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -54,6 +54,9 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `9fb4602` | 恢复失败时还原失败被 `let _ =` 吞掉，用户不知道数据在哪 | P1 数据可发现性 |
 | `a1fb1c0` | 阅读模式「退出」会删掉站点记忆（想临时看一眼却永久关掉） | P1 语义 |
 | `fa72b71` | SPA 换页不重新应用站点偏好（单页应用里功能时灵时不灵） | P1 可用性 |
+| `6df4278` | 「清除筛选」不清搜索词，按钮名不副实 | P2 可用性 |
+| `e2bbfa3` | 单条「永久删除」无确认（紧挨「恢复」，误点即丢失） | P1 误操作 |
+| `e2bbfa3` | 普通删除的文案写「无法撤销」，与实际（可恢复）不符 | P2 文案 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
