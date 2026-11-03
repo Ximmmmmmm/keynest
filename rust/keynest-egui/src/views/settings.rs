@@ -457,6 +457,23 @@ fn tab_security(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut Settings
         keynest_core::vault::MIN_MASTER_LEN
     )));
     ui.add_space(6.0);
+    // **事前**告知，而不是等改完才说。
+    //
+    // 改主密码只换掉包裹数据密钥的那一层，正文密文不变——
+    // 于是磁盘上已有的 .bak.* 裹的还是**旧密钥**，只能用**旧密码**打开。
+    //
+    // 用户不知道这件事：改完看到「主密码已修改」，自然以为所有东西
+    // 都用新密码保护了。真到了需要从备份恢复的那一天，他用新密码打不开，
+    // 会以为「备份全废了」，甚至因此放弃恢复。
+    ui.label(
+        egui::RichText::new(
+            "注意：已有的备份（.bak.*）仍然由**旧密码**保护。
+             需要用旧密码恢复那些备份，请把旧密码记牢。",
+        )
+        .size(11.0)
+        .color(ui.visuals().warn_fg_color),
+    );
+    ui.add_space(6.0);
     egui::Grid::new("master-grid")
         .num_columns(2)
         .spacing([10.0, 6.0])

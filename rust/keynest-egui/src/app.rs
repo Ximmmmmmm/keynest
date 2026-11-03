@@ -1339,10 +1339,15 @@ impl App {
                     st.new_pw = Zeroizing::new(String::new());
                     st.new_pw2 = Zeroizing::new(String::new());
                     st.error = None;
-                    st.notice = Some("主密码已修改".into());
+                    // 成功的提示也要提旧备份的事——用户可能没看表单上方那行说明，
+                    // 而这条信息在他需要从备份恢复的那天才会变得重要。
+                    st.notice = Some(
+                        "主密码已修改。已有的备份（.bak.*）仍由旧密码保护，                         用旧密码才能恢复它们。"
+                            .into(),
+                    );
                     st.changing_master = false;
                 }
-                self.set_toast("主密码已修改");
+                self.set_toast("主密码已修改（旧备份仍需旧密码）");
             }
             Err(e) => {
                 if let Some(st) = self.settings.as_mut() {
