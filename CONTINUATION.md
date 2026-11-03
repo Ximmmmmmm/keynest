@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 11:00 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`f1712cb`
+> 最后更新：2026-11-03 11:20 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`b202ac0`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -19,7 +19,7 @@
 | --- | --- | --- |
 | Rust | **282** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
-| 扩展单元 | **468** | `cd browser-extension && node --test tests/*.test.js` |
+| 扩展单元 | **475** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
 | 真实 Chrome 验收 | **46** | `node test/acceptance/run.mjs`（需启动浏览器） |
 
@@ -60,6 +60,7 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `9c95a01` | 改主密码/升级格式无防重入（窗口冻结期间可连点） | P1 正确性 |
 | `35d4538` | README「已知限制」三处与代码实际状态不符 | P1 文档 |
 | `f1712cb` | 中文 README 缺回滚攻击这条限制（英文版有） | P2 文档 |
+| `b202ac0` | **SPA 路由监听从未真正工作**（隔离世界与主世界不相通） | **P1 功能性** |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
@@ -87,20 +88,27 @@ Rust workspace 根是 `rust/`；Windows 上需要
 
 无。本轮已清空已知 P0。
 
-### P1：阶段 3.6 的真实浏览器验收
+### P1：阶段 3.6 的真实浏览器验收 —— **已完成（headless 部分）**
 
-扩展侧的「页面加载自动应用」只做了纯代码与单测，
-**从未在真实 Chrome 里跑过**。六项待验：
+`node test/acceptance/extension-headless.mjs` 已经把下列各项在真实 Chrome 里验完，
+**且不启动 GUI、不注入键鼠**，因此可以在用户用电脑时跑：
 
-1. 自动应用是否真的生效（打开已记忆站点，查 `documentElement.classList`)
-2. `load` + `setTimeout 0` 的时序是否合适
-3. 未授权时是否真的不弹确认框
-4. 阅读模式自动应用在真实文章页的表现
-5. `auto.apply` 的 `content` 门禁在真实消息路径是否生效
-6. `load` 事件在某些页面是否永不触发
+| # | 项 | 结果 |
+| --- | --- | --- |
+| 1 | 内容脚本在真实页面注入（隔离世界） | PASS `isoCtx=3 marker=true` |
+| 2 | 页面加载后自动应用夜间模式 | PASS `cls:true style:true` |
+| 3 | 非名单站点不被注入 | PASS |
+| 4 | 广告规则进浏览器（真实 dNR） | PASS `rules=46` |
+| 5 | forget 语义（真实 storage） | PASS |
+| 6 | 阅读模式在真实文章页提取正文 | PASS `reason:"scored:144"` |
+| 7 | SPA 换路由后重新应用 | PASS `cls:true style:true` |
 
-验证方式：`KN_KEEP=1 node test/acceptance/run.mjs`，然后检查
-`/article` 的自动应用。**需要启动浏览器**，应在用户机器空闲时做。
+第 7 项在验证过程中暴露了一个**真实缺陷**：隔离世界给 history 打的补丁
+对主世界的 pushState 无效。已在 `b202ac0` 修复（改为主世界注入）。
+
+**仍未验证**（必须启动 GUI，会抢焦点与键鼠，需机器空闲时做）：
+
+- 解锁 → 桥接 → 密码填充的完整链路（`node test/acceptance/run.mjs`，46 项）
 
 ### P2：审查中观察到但未处理
 
@@ -158,7 +166,22 @@ mtime 2026-11-01 23:19:17。
 （"范围里必须含某个必然存在的语句"），断言写到**关键调用**而非关键标识符。
 写完必须实测一次退化：把目标代码改坏，确认测试真的红。
 
-## 8. 审查方法记录（下一轮可复用）
+## 8. 一条被真实环境证伪的"设计"
+
+阶段 3.6 以为"SPA 换路由后重新应用"已经实现——单元测试全绿、代码看着合理、
+甚至还写了"两份实现一致性测试"。
+
+**但它从来没有工作过。** 内容脚本在隔离世界，页面在主世界，
+两者之间没有连接。
+
+教训：**跨执行环境的假设必须去真实环境验一次。**
+隔离世界 / 主世界 / Service Worker / 扩展页面 —— 这四个世界的边界，
+在单一世界的单元测试里全都看不见。
+
+无头 Chrome 让这次验证不再需要打扰用户——
+这本身就是一条值得沉淀的方法：**先想办法把验证变得不打扰人，再去做。**
+
+## 9. 审查方法记录（下一轮可复用）
 
 本轮 6 个缺陷都不是靠读代码「看」出来的，而是靠问三个问题：
 
