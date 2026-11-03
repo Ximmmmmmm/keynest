@@ -2429,11 +2429,6 @@ impl Vault {
         }
     }
 
-    /// 直接替换内存数据（供设置/分类等批量修改使用）。
-    pub fn replace_data(&mut self, data: VaultData) {
-        self.data = Some(data);
-    }
-
     /// 新增条目类型。
     pub fn add_type(&mut self, name: &str) -> Result<String> {
         let trimmed = name.trim();

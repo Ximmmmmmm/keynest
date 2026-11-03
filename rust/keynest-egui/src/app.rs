@@ -2589,7 +2589,7 @@ mod tests {
     #[test]
     fn auto_lock_still_works_when_system_idle_is_unknown() {
         let app_idle = Duration::from_secs(600); // 应用内已空闲 10 分钟
-        let sys_unknown = Duration::MAX; // 系统状态拿不到
+        let sys_unknown = keynest_core::secure::SYSTEM_IDLE_UNKNOWN; // 系统状态拿不到
 
         // 应当按应用内空闲算 → 超过 5 分钟上限 → 该锁
         assert!(
@@ -2640,7 +2640,11 @@ mod tests {
     /// 剩余时间在系统空闲未知时也要算得出来，不能变成负数或溢出。
     #[test]
     fn remaining_seconds_is_sane_when_system_idle_unknown() {
-        let left = idle_remaining_secs(5, Duration::from_secs(60), Duration::MAX);
+        let left = idle_remaining_secs(
+            5,
+            Duration::from_secs(60),
+            keynest_core::secure::SYSTEM_IDLE_UNKNOWN,
+        );
         assert!(left > 0 && left <= 300, "实际 {left}");
     }
 

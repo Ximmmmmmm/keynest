@@ -241,7 +241,7 @@ mod imp {
                 //
                 // 返回极大值 → `min` 退回到应用自己的计时，
                 // 自动锁定照常工作。
-                return Duration::MAX;
+                return SYSTEM_IDLE_UNKNOWN;
             }
             // GetTickCount 是 32 位毫秒计数，会回绕；用 wrapping_sub 处理
             let now = GetTickCount();
@@ -276,7 +276,7 @@ mod imp {
         //
         // 返回 0 会让 `app_idle.min(sys_idle)` 恒为 0，
         // **自动锁定永远不触发**。返回极大值则退回到应用自己的计时。
-        Duration::MAX
+        SYSTEM_IDLE_UNKNOWN
     }
 }
 
@@ -340,7 +340,26 @@ pub fn clipboard_text() -> Option<String> {
     imp::read_text()
 }
 
-/// 系统级闲置时长。自动锁定应基于这个值，而不是应用内的心跳。
+/// 「系统空闲时长**未知**」的标记值。
+///
+/// # 为什么要有这个常量
+///
+/// `system_idle()` 在拿不到系统状态时（`GetLastInputInfo` 失败、
+/// 非 Windows 平台）会返回这个值，而不是 0。
+///
+/// 区别很要紧：调用方算的是 `app_idle.min(sys_idle)`。
+/// 返回 0 会让结果恒为 0，**自动锁定永远不触发**——
+/// 密码库就这么一直开着，用户却以为设了 5 分钟自动锁定。
+///
+/// 用一个具名常量而不是裸的 `Duration::MAX`：
+/// 意图写在代码里，将来有人读到 `min` 那行时能立刻明白
+/// 「MAX 在这里表示未知，不是真的空闲了一亿年」。
+pub const SYSTEM_IDLE_UNKNOWN: Duration = Duration::MAX;
+
+/// 系统级闲置时长（最后一次键鼠输入至今）。
+///
+/// 返回 [`SYSTEM_IDLE_UNKNOWN`] 表示**拿不到**系统状态，
+/// 调用方应当退回到应用自己的计时，而不是把它当成 0。
 pub fn system_idle() -> Duration {
     imp::system_idle()
 }
@@ -357,7 +376,7 @@ pub fn system_idle() -> Duration {
 pub fn is_idle_beyond(minutes: u32) -> bool {
     let threshold = Duration::from_secs(minutes as u64 * 60);
     let idle = system_idle();
-    if idle == Duration::MAX {
+    if idle == SYSTEM_IDLE_UNKNOWN {
         return false;
     }
     idle >= threshold
