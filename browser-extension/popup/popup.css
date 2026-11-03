@@ -78,6 +78,14 @@ li:hover { border-color: var(--accent); }
 li .title { font-weight: 600; }
 li .user { color: var(--muted); font-size: 12px; }
 
+/* 分组小标题（「夜间模式」/「阅读模式」）。 */
+.panel-group {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin: 8px 0 4px;
+  letter-spacing: 0.02em;
+}
+
 /* 「已记住的站点」列表：一行里左边是域名，右边是「移除」。 */
 li:has(> button.ghost) {
   display: flex;

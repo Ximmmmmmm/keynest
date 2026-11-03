@@ -127,6 +127,25 @@ export function hasSite(list, host) {
  * @param {import('../config.js').ModuleConfig} configView
  * @param {string} moduleId
  */
+/**
+ * 从调用方给的字符串取规范化后的 host。
+ *
+ * 不合法就返回 `null`，让调用方退回到「从 tab 的 URL 取」。
+ *
+ * 放在这里而不是各模块各写一份：规范化规则必须**只有一处**——
+ * 两边不一致的话，名单里会出现同��个站点的两种写法，
+ * 于是「移除」移不掉、自动应用也判不准。
+ *
+ * @param {unknown} raw
+ * @returns {string|null}
+ */
+export function normalizeHost(raw) {
+  if (typeof raw !== 'string') return null;
+  const s = raw.trim().toLowerCase();
+  if (!s || s.includes('/') || s.includes(':')) return null;
+  return /^[a-z0-9.-]+$/.test(s) ? s : null;
+}
+
 export function createSiteMemory(configView, moduleId) {
   const key = configKeyFor(moduleId);
 

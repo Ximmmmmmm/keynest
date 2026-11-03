@@ -482,6 +482,9 @@ export const KIND_REQUIREMENT = Object.freeze({
   // 阅读模式：只有扩展页面能触发注入（网页自己不能要求被"阅读"）
   'reader.toggle': 'popup',
   'reader.query': 'popup',
+  // 站点列表：只有扩展页面能读/改名单
+  'reader.sites': 'popup',
+  'reader.forget': 'popup',
   // 夜间模式：同样只有扩展页面能触发
   'dark.toggle': 'popup',
   'dark.query': 'popup',

@@ -24,7 +24,7 @@ import {
   createAdblockPanel,
   createBridgePanel,
   createDarkPanel,
-  createDarkSitesPanel,
+  createSavedSitesPanel,
   createFillPanel,
   createReaderPanel,
 } from './panels.js';
@@ -82,7 +82,7 @@ async function init() {
   host.register(createReaderPanel({ getTabId }));
   host.register(createDarkPanel({ getTabId }));
   // 夜间模式记住的站点列表（接在夜间模式面板后面）
-  host.register(createDarkSitesPanel());
+  host.register(createSavedSitesPanel());
   host.register(createAdblockPanel({ getTabUrl: () => (currentTab ? currentTab.url : null) }));
 
   await refreshStatus();

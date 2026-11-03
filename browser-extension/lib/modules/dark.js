@@ -22,7 +22,7 @@
 // 这一层在阶段 3.3 已经踩过坑，这里直接复用。
 
 import { injectInto } from '../inject.js';
-import { createSiteMemory } from '../site-memory.js';
+import { createSiteMemory, normalizeHost } from '../site-memory.js';
 
 /** 注入到页面的函数。**完全自包含**：不能引用任何外部变量。 */
 function darkToggle(args) {
@@ -90,13 +90,10 @@ function darkToggle(args) {
 /**
  * 从调用方给的 host 取站点名（popup 通常已知，直接传更快）。
  * 不合法就返回 null，让调用方退回到 `hostOfTab`。
+ *
+ * 规范化规则住在 `site-memory.js` —— 只有一处，两边不会写出不同的结果。
  */
-function hostOf(raw) {
-  if (typeof raw !== 'string') return null;
-  const s = raw.trim().toLowerCase();
-  if (!s || s.includes('/') || s.includes(':')) return null;
-  return /^[a-z0-9.-]+$/.test(s) ? s : null;
-}
+const hostOf = normalizeHost;
 
 /** 从 tab 的 URL 取 host。取不到就返回 null（不是错误）。 */
 async function hostOfTab(deps, tabId) {

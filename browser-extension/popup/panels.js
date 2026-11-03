@@ -181,80 +181,97 @@ export function createBridgePanel() {
 }
 
 /**
- * 「已记住的站点」面板：夜间模式对哪些站点自动生效。
+ * 「已记住的站点」面板：夜间模式与阅读模式对哪些站点自动生效。
  *
  * # 为什么需要
  *
- * 用户在好几个站点开了夜间模式之后，**想不起来在哪些站点开了**——
+ * 用户在好几个站点开了夜间模式（或阅读模式）之后，**想不起来在哪些站点开了**——
  * popup 只显示当前站点，没有地方能看到全部，也没法关掉其中一个。
  *
- * 而 `dark.sites` 这个消息早就存在（门禁表里也有），只是**从来没被用过**。
+ * 而 `dark.sites` / `reader.sites` 这两个消息早就存在（门禁表里也有），
+ * 只是**从来没被用过**。
  *
- * # 用途
+ * # 两种模块一起管
  *
- * 列出全部被记住的站点，每个后面一个「移除」按钮。
- * 移除 = 从名单里删掉，以后不再对它自动应用（`dark.forget`）。
+ * 两个模块的站点名单语义完全一样（都是「这些站点自动应用」），
+ * 所以放一个面板里，按模块分组显示。分成两个面板会让 popup 变长，
+ * 而用户关心的是「我到底在哪些站点开了自动功能」。
  */
-const DARK_SITES_PANEL = {
-  id: 'dark-sites',
-  // 不声明 moduleId：它依附于夜间模式模块，本身不是独立功能。
+const SAVED_SITES_PANEL = {
+  id: 'saved-sites',
+  // 不声明 moduleId：它依附于夜间模式与阅读模式模块，本身不是独立功能。
   order: 17,
   async render(host) {
-    const res = await host.send('dark.sites');
-    if (!res || !res.ok || !Array.isArray(res.list)) return;
-    const sites = res.list.slice().sort();
-    if (sites.length === 0) return;
+    // 两类模块：夜间模式与阅读模式。
+    // 哪个没启用就问不到（返回 MODULE_DISABLED），跳过即可。
+    const groups = [
+      { module: 'dark', label: '夜间模式' },
+      { module: 'reader', label: '阅读模式' },
+    ];
+
+    const sections = [];
+    for (const g of groups) {
+      const res = await host.send(`${g.module}.sites`);
+      if (!res || !res.ok || !Array.isArray(res.list) || res.list.length === 0) continue;
+      sections.push({ ...g, sites: res.list.slice().sort() });
+    }
+    if (sections.length === 0) return;
 
     const head = document.createElement('div');
     head.className = 'panel-head';
     const title = document.createElement('span');
     title.className = 'panel-title';
     title.textContent = '已记住的站点';
+    const total = sections.reduce((n, g) => n + g.sites.length, 0);
     const badge = document.createElement('span');
     badge.className = 'badge';
-    badge.textContent = String(sites.length);
+    badge.textContent = String(total);
     head.append(title, badge);
     host.section.append(head);
 
-    host.el('p', 'panel-host', '这些站点打开时会自动应用夜间模式');
+    host.el('p', 'panel-host', '这些站点打开时会自动应用对应功能');
 
-    const list = document.createElement('ul');
-    list.className = 'entries';
+    for (const g of sections) {
+      host.el('p', 'panel-group', g.label);
 
-    for (const site of sites) {
-      const li = document.createElement('li');
-      const name = document.createElement('span');
-      name.className = 'title';
-      name.textContent = site;
+      const list = document.createElement('ul');
+      list.className = 'entries';
 
-      const rm = document.createElement('button');
-      rm.className = 'ghost';
-      rm.textContent = '移除';
-      rm.addEventListener('click', async (ev) => {
-        ev.stopPropagation();
-        rm.disabled = true;
-        const out = await host.send('dark.forget', { host: site });
-        rm.disabled = false;
-        if (!out || !out.ok) {
-          host.error(`移除失败：${(out && out.error) || '未知错误'}`);
-          return;
-        }
-        host.error(null);
-        host.section.replaceChildren();
-        await panel.render(host);
-      });
+      for (const site of g.sites) {
+        const li = document.createElement('li');
+        const name = document.createElement('span');
+        name.className = 'title';
+        name.textContent = site;
 
-      li.append(name, rm);
-      list.append(li);
+        const rm = document.createElement('button');
+        rm.className = 'ghost';
+        rm.textContent = '移除';
+        rm.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          rm.disabled = true;
+          const out = await host.send(`${g.module}.forget`, { host: site });
+          rm.disabled = false;
+          if (!out || !out.ok) {
+            host.error(`移除失败：${(out && out.error) || '未知错误'}`);
+            return;
+          }
+          host.error(null);
+          host.section.replaceChildren();
+          await panel.render(host);
+        });
+
+        li.append(name, rm);
+        list.append(li);
+      }
+
+      host.section.append(list);
     }
-
-    host.section.append(list);
   },
 };
 
-/** 创建「已记住的站点」面板。 */
-export function createDarkSitesPanel() {
-  return DARK_SITES_PANEL;
+/** 创建「已记住的站点」面板（夜间模式 + 阅读模式）。 */
+export function createSavedSitesPanel() {
+  return SAVED_SITES_PANEL;
 }
 
 const FILL_ERRORS = {

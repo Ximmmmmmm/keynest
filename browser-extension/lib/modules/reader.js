@@ -28,7 +28,7 @@
 // 注入函数无法 import。与其假装可以共享，不如把约束写明并加一致性测试。
 
 import { injectInto } from '../inject.js';
-import { createSiteMemory } from '../site-memory.js';
+import { createSiteMemory, normalizeHost } from '../site-memory.js';
 
 /** 从 tab 的 URL 取 host。取不到就返回 null（不是错误）。 */
 async function hostOfTab(deps, tabId) {
@@ -296,6 +296,31 @@ export function createReaderModule(deps) {
           const tabId = msg.tabId;
           if (!Number.isInteger(tabId)) return { ok: false, error: 'BAD_ARGS' };
           return run(tabId, { action: 'query', width: 0, theme: 'auto' }, false);
+        },
+      },
+      {
+        /** 阅读模式对哪些站点自动生效。 */
+        type: 'reader.sites',
+        handle: (msg, ctx) => ({
+          ok: true,
+          list: createSiteMemory(ctx.config, 'reader').list(),
+        }),
+      },
+      {
+        /**
+         * 从名单里移除某个站点（不再对它自动应用）。
+         *
+         * 与 `reader.toggle` 的 `forget: true` 同一件事，但不需要那个页面开着——
+         * 站点列表里点「移除」时，人可能根本不在那个站点上。
+         */
+        type: 'reader.forget',
+        handle: async (msg, ctx) => {
+          const host = normalizeHost(msg.host);
+          if (!host) return { ok: false, error: 'BAD_ARGS' };
+          const mem = createSiteMemory(ctx.config, 'reader');
+          const had = mem.has(host);
+          await mem.disable(host);
+          return { ok: true, removed: had, list: mem.list() };
         },
       },
     ],
