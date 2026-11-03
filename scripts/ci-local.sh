@@ -157,6 +157,20 @@ if [ "$FAST" != "1" ] && [ -x "/c/Program Files/Google/Chrome/Application/chrome
   run "fill-headless" node test/acceptance/fill-headless.mjs
 fi
 
+# ---- GUI 端到端验收（会抢焦点与键鼠，默认跳过）----
+#
+# 这一条**会短暂接管键盘鼠标**（真实窗口 + 注入输入），
+# 所以不放进默认流程。要跑就显式加 --gui：
+#
+#     bash scripts/ci-local.sh --gui
+#
+if [ "${2:-}" = "--gui" ] || [ "${1:-}" = "--gui" ]; then
+  step "GUI 端到端验收（解锁 → 桥接 → 填充，47 项）"
+  printf '  [33m注意：接下来约 1–2 分钟内会接管键盘鼠标[0m
+'
+  run "gui-acceptance" node test/acceptance/run.mjs
+fi
+
 # ---- legacy-electron 作业（非阻塞，但本地也要跑一遍）----
 if [ -f package.json ]; then
   step "legacy-electron / 单元测试"

@@ -1067,7 +1067,14 @@ async function main() {
       `yes=${JSON.stringify(shouldYes)} no=${JSON.stringify(shouldNo)}`
     );
 
-    // ---------- T17c 关闭后从名单移除 ----------
+    // ---------- T17c 关闭只是本次退出，**保留**站点记忆 ----------
+    //
+    // 与阅读模式对齐：用户在页面上点「关闭夜间模式」，往往只是想看一眼
+    // 原始页面。顺手把站点记忆也删掉的话，下次还得重新点开，
+    // 而他并不知道刚才删掉了什么。
+    //
+    // （这条原来断言「关闭后从名单移除」——那是旧语义，已被刻意改掉。
+    //   真要移除，走 dark.forget，见 T17d。）
     const memOff = memTab
       ? await options.call(
           `chrome.runtime.sendMessage({ type: 'dark.toggle', tabId: ${memTab.id}, action: 'uninstall', host: '127.0.0.1' })`
@@ -1078,12 +1085,31 @@ async function main() {
     );
     record(
       'T17c',
-      '关闭后从名单移除',
+      '关闭只是本次退出，保留站点记忆',
       memOff && memOff.ok && memAfter && memAfter.ok &&
-        Array.isArray(memAfter.list) && !memAfter.list.includes('127.0.0.1')
+        Array.isArray(memAfter.list) && memAfter.list.includes('127.0.0.1')
         ? 'PASS'
         : 'FAIL',
       `res=${JSON.stringify(memOff)} list=${JSON.stringify(memAfter && memAfter.list)}`
+    );
+
+    // ---------- T17d dark.forget 才真的移除 ----------
+    const memForget = await popup.call(
+      `chrome.runtime.sendMessage({ type: 'dark.forget', host: '127.0.0.1' })`
+    );
+    const memAfterForget = await popup.call(
+      `chrome.runtime.sendMessage({ type: 'dark.sites' })`
+    );
+    record(
+      'T17d',
+      'dark.forget 从名单移除（站点列表里的「移除」）',
+      memForget && memForget.ok && memForget.removed === true &&
+        memAfterForget && memAfterForget.ok &&
+        Array.isArray(memAfterForget.list) &&
+        !memAfterForget.list.includes('127.0.0.1')
+        ? 'PASS'
+        : 'FAIL',
+      `forget=${JSON.stringify(memForget)} list=${JSON.stringify(memAfterForget && memAfterForget.list)}`
     );
 
     await cdp.send('Target.closeTarget', { targetId: tabMem }).catch(() => {});
