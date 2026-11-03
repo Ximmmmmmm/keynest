@@ -902,7 +902,10 @@ impl App {
         let Some(e) = data.entries.iter().find(|e| e.id == id) else {
             return;
         };
-        let pw = e.password.clone();
+        // 用 Zeroizing 包住：裸 String 在 drop 时只是把内存还给分配器，
+        // 内容仍留在那里，直到那块内存被复用。库里某条记录的密码
+        // 在进程存活期间可能因此在堆上停留很久。
+        let pw = Zeroizing::new(e.password.clone());
         // 夹取 TTL：配置万一被写成 0，会导致「刚写入就被定时器清空」，
         // 表现为「点了复制但剪贴板是空的」。
         let ttl = data.settings.clipboard_clear_seconds.clamp(3, 300);
@@ -912,7 +915,7 @@ impl App {
                 // 回读校验：只有剪贴板里确实是我们的内容才算成功。
                 // Windows 上别的程序占用剪贴板时 SetClipboardData 可能静默失败。
                 let ok = keynest_core::secure::clipboard_text()
-                    .map(|t| t == pw)
+                    .map(|t| t == pw.as_str())
                     .unwrap_or(false);
                 if ok {
                     if let AppState::Unlocked { copy_banner, .. } = &mut self.state {
@@ -933,7 +936,9 @@ impl App {
         let Some(e) = data.entries.iter().find(|e| e.id == id) else {
             return;
         };
-        let name = e.username.clone();
+        // 与密码同样的理由：账号也是「看到就等于泄漏一半」的信息，
+        // 裸 String 在 drop 后内容仍留在堆上。
+        let name = Zeroizing::new(e.username.clone());
         if name.is_empty() {
             return;
         }
@@ -942,7 +947,7 @@ impl App {
         match clipboard::copy_remembered(&name, ttl, &mut self.last_copied) {
             Ok(banner) => {
                 let ok = keynest_core::secure::clipboard_text()
-                    .map(|t| t == name)
+                    .map(|t| t == name.as_str())
                     .unwrap_or(false);
                 if ok {
                     if let AppState::Unlocked { copy_banner, .. } = &mut self.state {

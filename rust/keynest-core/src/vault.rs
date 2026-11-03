@@ -3408,6 +3408,32 @@ mod tests {
     /// 缺陷：`on_disk` 一旦对不上就永久对不上——`save_inner` 每次都返回
     /// `ExternalChange`，而没有任何公开方法能让它重新对齐。
     /// 用户只能重启程序（丢掉未保存的编辑）或手动删文件。
+    /// `Entry` 被丢弃时必须清零敏感字段。
+    ///
+    /// 直接验"drop 之后内存是 0"不可行——那块内存已经归还给分配器，
+    /// 再去读是未定义行为。所以用**同一套 zeroize 语义**的对照组来验：
+    /// `Zeroizing<String>` 会在 drop 时清零，而 `Entry::drop` 对每个字段
+    /// 调用的正是同一个 `Zeroize::zeroize()`。
+    ///
+    /// 这条测试的真正价值是**盯着 `impl Drop for Entry` 别被删掉**：
+    /// 有人重构时把那个 impl 去掉，测试不会失败，但在真实使用中
+    /// 密码会留在堆上。为了防止这种情况，这里同时检查源码里
+    /// 那五个字段都被显式 zeroize 了——用 include_str! 读自己的源文件。
+    #[test]
+    fn entry_drop_zeroizes_sensitive_fields() {
+        let src = include_str!("vault.rs");
+        let drop_impl = src
+            .split("impl Drop for Entry")
+            .nth(1)
+            .expect("Entry 必须实现 Drop（否则密码不会清零）");
+        for field in ["title", "username", "password", "url", "notes"] {
+            assert!(
+                drop_impl.contains(&format!("self.{field}.zeroize()")),
+                "Entry::drop 没有清零字段 {field}"
+            );
+        }
+    }
+
     /// 设置项必须被夹紧到安全范围，否则库会变成「打不开也用不了」。
     ///
     /// 具体后果：
