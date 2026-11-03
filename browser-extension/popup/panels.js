@@ -77,6 +77,87 @@ export function createFillPanel(deps) {
   };
 }
 
+/**
+ * 浏览器桥接面板：显示扩展 ID，让用户复制给桌面程序。
+ *
+ * # 为什么必须有这个
+ *
+ * 浏览器只在**注册表**里找 Native Messaging 宿主，清单里的
+ * `allowed_origins` 必须写**精确的扩展 ID**。而未发布到商店的扩展，
+ * ID 是由安装路径的哈希决定的——**每台机器都不一样**。
+ *
+ * 所以桌面程序没法自己猜，只能由用户把这个 ID 告诉它。
+ * 而这个 ID 只有扩展自己知道（`chrome.runtime.id`）。
+ *
+ * 少了这一段，用户装上扩展后看到的是「KeyNest 未运行」，
+ * 而实际上桌面程序在运行、只是不知道该允许哪个扩展。
+ */
+const BRIDGE_PANEL = {
+  id: 'bridge',
+  // 不声明 moduleId：这不是一个功能模块，是一条安装指引。
+  order: 5,
+  async render(host) {
+    // `chrome` 本身可能不存在（扩展被重载、页面在无扩展环境打开）。
+    // 直接写 `chrome.runtime.id` 会抛 "Cannot read properties of undefined"。
+    const id = typeof chrome !== 'undefined' && chrome.runtime ? chrome.runtime.id : null;
+    if (!id) return;
+
+    host.el('p', 'panel-host', '浏览器桥接');
+    // ID 本身也作为文本放进 host.el——这样无障碍树与测试都能拿到它，
+    // 不必去挖 DOM 结构。
+    host.el(
+      'p',
+      'note',
+      '把这个扩展 ID 填到钥巢的「设置 → 浏览器桥接 → 扩展 ID」，桌面程序才能连上本扩展。'
+    );
+    // ID 单独一行：它是**要被人抄走**的东西，混在说明文字里不好找。
+    host.el('p', 'bridge-id-text', id);
+
+    const row = document.createElement('div');
+    row.className = 'bridge-id-row';
+
+    const code = document.createElement('code');
+    code.className = 'bridge-id';
+    code.textContent = id;
+    row.append(code);
+
+    const btn = document.createElement('button');
+    btn.className = 'ghost';
+    btn.textContent = '复制';
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(id);
+        btn.textContent = '已复制';
+        setTimeout(() => {
+          btn.textContent = '复制';
+        }, 1500);
+      } catch {
+        // 剪贴板可能被策略禁用：让用户自己选
+        const sel = window.getSelection();
+        if (sel) {
+          const range = document.createRange();
+          range.selectNodeContents(code);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+        btn.textContent = '请手动复制';
+      }
+    });
+    row.append(btn);
+
+    host.section.append(row);
+  },
+};
+
+/**
+ * 创建浏览器桥接面板（显示扩展 ID）。
+ *
+ * 单独一个工厂函数而不是直接导出常量——与其它面板保持一致的形状。
+ */
+export function createBridgePanel() {
+  return BRIDGE_PANEL;
+}
+
 const FILL_ERRORS = {
   HTTP_NOT_ALLOWED: '该页面不是 HTTPS，已按策略禁止填充。',
   NO_ORIGIN: '这个页面没有可用的网址。',

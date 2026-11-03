@@ -22,6 +22,7 @@
 import { PanelHost } from './panel-host.js';
 import {
   createAdblockPanel,
+  createBridgePanel,
   createDarkPanel,
   createFillPanel,
   createReaderPanel,
@@ -74,6 +75,8 @@ async function init() {
   });
 
   const getTabId = () => (currentTab ? currentTab.id : null);
+  // 桥接面板排最前：用户第一次装扩展时最需要的就是这个 ID。
+  host.register(createBridgePanel());
   host.register(createFillPanel({ getTabId }));
   host.register(createReaderPanel({ getTabId }));
   host.register(createDarkPanel({ getTabId }));
