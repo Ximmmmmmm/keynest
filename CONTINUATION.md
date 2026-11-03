@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 14:15 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`5bc3f67`
+> 最后更新：2026-11-03 14:35 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`1848871`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **318** | `cd rust && cargo test --workspace` |
+| Rust | **320** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **491** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -82,6 +82,7 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `61b890b` | **已提交的 ci.yml 是非法 YAML —— CI 静默失效数轮** | **P0 工程** |
 | `3e51973` | `keynest-paths` 测试只在 Windows 跑；legacy 作业漏跑 4 个测试文件 | P2 工程 |
 | `5bc3f67` | 本地 CI 复现脚本与 ci.yml 会悄悄漂移 | P2 工程 |
+| `1848871` | **Firefox 的 CSV 实际导不进来**（README 声称支持） | P1 功能 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
