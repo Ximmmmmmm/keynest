@@ -299,6 +299,96 @@ for (const rel of ['.github/workflows/ci.yml', '.github/workflows/release.yml'])
 }
 
 /* ------------------------------------------------------------------ */
+/* 4c) 本地 CI 复现脚本必须与 CI 配置保持一致                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 检查 `scripts/ci-local.sh` 里跑的命令与 `ci.yml` 里写的一致。
+ *
+ * # 为什么需要
+ *
+ * `scripts/ci-local.sh` 的意义是「本地能一键跑完 CI 的每一步」。
+ * 但如果它和 CI 配置各写各的，这个脚本会慢慢变成**另一套**流程——
+ * 本地全绿、CI 全红，而两边都说不清是哪里不一样。
+ *
+ * 这正是上一轮那个 bug 的同族：两份本该一致的东西悄悄分开了。
+ *
+ * # 怎么比
+ *
+ * 不做精确解析（YAML 与 shell 都太灵活），而是取 CI 里每条 run 的
+ * **命令行**，看它有没有出现在本地脚本文本里。
+ *
+ * 方向的取舍：只检查「CI 有的、本地没有的」——
+ * 本地多跑一步（比如多跑一次 release 构建）是无害的，
+ * 而 CI 有、本地没有，才是真正的漏洞。
+ */
+{
+  const ci = read('.github/workflows/ci.yml');
+  const local = read('scripts/ci-local.sh');
+  if (ci !== null && local !== null) {
+    // 提取 CI 里所有 run 的命令行
+    const ciCmds = [];
+    const lines = ci.split('\n');
+    for (let i = 0; i < lines.length; i += 1) {
+      const m = lines[i].match(/^\s*run:\s*(.+)$/);
+      if (!m) continue;
+      const inline = m[1].trim();
+      if (inline.startsWith('|')) {
+        // 多行块：收集直到缩进回退
+        const baseIndent = lines[i].match(/^\s*/)[0].length;
+        let j = i + 1;
+        for (; j < lines.length; j += 1) {
+          const l = lines[j];
+          if (l.trim() === '') continue;
+          const ind = l.length - l.trimStart().length;
+          if (ind <= baseIndent) break;
+          const t = l.trim();
+          if (t.startsWith('#')) continue;
+          ciCmds.push(t);
+        }
+        i = j - 1;
+      } else {
+        ciCmds.push(inline);
+      }
+    }
+
+    // 只看「会执行什么」：第一词是**有意义的动词**的命令。
+    //
+    // 辅助行（`count=$(...)`、`echo ...`、`if ...`）不算——
+    // 本地脚本的辅助写法与 CI 不一定一样，比它们只会产生误报。
+    const VERBS = ['cargo', 'node', 'npm', 'bash', 'dotnet', 'python', 'pip'];
+    const interesting = ciCmds.filter((c) => {
+      const t = c.trim();
+      if (!t) return false;
+      const verb = t.split(/\s+/)[0];
+      return VERBS.includes(verb);
+    });
+
+    const missing = [];
+    for (const c of interesting) {
+      // CI 里 `node "$f"` 与本地的 `node "$f"` 一致；
+      // 但 CI 用的是变量名 `$f`/`$files`，本地可能不同，所以宽松一点：
+      // 取命令的**第一个词 + 关键参数**做匹配。
+      const norm = c.replace(/\s+/g, ' ').trim();
+      if (local.includes(norm)) continue;
+      // 再试一次：忽略末尾的参数（多行块里常有 cd 之类的前缀）
+      const head = norm.split(' ').slice(0, 2).join(' ');
+      if (head.length > 6 && local.includes(head)) continue;
+      missing.push(norm);
+    }
+
+    if (missing.length === 0) {
+      ok('本地 CI 脚本覆盖了 CI 的每条命令', `${interesting.length} 条`);
+    } else {
+      fail(
+        '本地 CI 脚本没覆盖 CI 的某些命令（两边会漂移）',
+        missing.slice(0, 3).join(' | '),
+      );
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 5) 仓库里不能有敏感或调试文件                                        */
 /* ------------------------------------------------------------------ */
 
