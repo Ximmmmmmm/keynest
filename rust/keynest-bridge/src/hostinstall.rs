@@ -798,8 +798,14 @@ mod tests {
         for (_, key) in &test_keys {
             let _ = reg::delete_key(key);
         }
-        // 连父键一起删：测试不该在用户机器上留任何痕迹
+        // 连父键一起删：测试不该在用户机器上留任何痕迹。
+        //
+        // `RegDeleteKeyW` 对**非空**键会失败（ERROR_ACCESS_DENIED），
+        // 所以这一句天然是安全的：只有当 `Software\KeyNest` 确实为空时
+        // 才会删掉它。将来这里真放了别的东西，它会删不掉——
+        // 那正是我们想要的。
         let _ = reg::delete_key(r"Software\KeyNest\Test");
+        let _ = reg::delete_key(r"Software\KeyNest");
 
         // 文件干净
         assert!(!manifest.exists(), "清单没删");
@@ -846,6 +852,7 @@ mod tests {
 
         let _ = reg::delete_key(keys[0].1);
         let _ = reg::delete_key(r"Software\KeyNest\Test");
+        let _ = reg::delete_key(r"Software\KeyNest");
     }
 
     /// 缺宿主 exe 时**不写注册表**。
