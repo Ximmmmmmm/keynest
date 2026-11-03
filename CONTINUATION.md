@@ -101,6 +101,28 @@ Rust workspace 根是 `rust/`；Windows 上需要
 
 无。本轮已清空已知 P0。
 
+### P0：验证能力的边界（**实测得出，影响所有后续验证**）
+
+**`--headless=new` 不支持 native messaging 宿主。**
+
+证据：注册了真实的
+`HKCU\\Software\Google\Chrome\NativeMessagingHosts\com.keynest.bridge`
+之后，用一个会写标记文件的 .bat 当宿主，Chrome **完全没有启动它**。
+
+项目自己的验收夹具（`run.mjs`）用的是**有头** Chrome，它跑通 46 项——
+native messaging 在有头模式下是通的。
+
+**后果**：
+
+| 能用 headless 验 | 不能用 headless 验 |
+| --- | --- |
+| 扩展自身逻辑（注入、自动应用、模块、广告规则、DOM 效果） | 宿主 → 管道 → 桌面程序（解锁 → 桥接 → 填充） |
+
+所以 `extension-headless.mjs` 覆盖的是**扩展侧**；
+桥接那条链路只能靠 `run.mjs`（需要有头 Chrome + GUI 解锁）。
+
+**别再花时间试图用 headless 验桥接了**——这条限制已经用标记文件实测确认。
+
 ### P1：阶段 3.6 的真实浏览器验收 —— **已完成（headless 部分）**
 
 `node test/acceptance/extension-headless.mjs` 已经把下列各项在真实 Chrome 里验完，

@@ -21,6 +21,23 @@
 // 需要 GUI 的路径（解锁 → 桥接 → 填充）它一概不碰。
 // 那部分仍然必须用 `run.mjs`，且需要在机器空闲时跑。
 //
+// # 为什么桥接这条链路它也测不了
+//
+// **`--headless=new` 不支持 native messaging 宿主**（实测）。
+//
+// 证据：注册了真实的
+// `HKCU\\Software\Google\Chrome\NativeMessagingHosts\com.keynest.bridge`
+// 之后，用一个会写标记文件的 .bat 当宿主，Chrome **完全没有启动它**。
+//
+// 项目自己的验收夹具（`run.mjs`）用的是**有头** Chrome，
+// 它跑通 46 项——native messaging 在有头模式下是通的。
+//
+// 所以「宿主 → 管道 → 桌面程序」这条链路只能由 `run.mjs` 覆盖，
+// 而那需要 GUI 解锁（会抢焦点与键鼠）。
+//
+// 无头模式能做的是：**扩展自身的逻辑**（注入、自动应用、模块、
+// 广告规则、页面 DOM 效果）——这些都不需要桌面程序参与。
+//
 // ```bash
 // node test/acceptance/extension-headless.mjs
 // ```
