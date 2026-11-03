@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 19:15 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`3b6c507`
+> 最后更新：2026-11-03 20:10 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`c57af74`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **366** | `cd rust && cargo test --workspace` |
+| Rust | **370** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **494** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -335,6 +335,24 @@ clippy 失败（`let mut` 但没修改）。
 这个漏洞会原样留着。
 
 **规则：把某个交互从界面上拿掉时，同时把它的判定路径也关掉。**
+
+**补充：还要找全所有入口。** 列表行与详情面板是两个独立的渲染函数，
+修了一个不等于修了另一个（这是下一轮才发现的）。
+
+## 9f. 源码扫描测试必须自证会变红（**又踩一次**）
+
+`include_str!("app.rs")` 把**整个文件**（含测试自己）都包含进来，
+而测试的说明文字里就写着要统计的那个字符串——
+于是计数永远够，断言永远绿。
+
+第一版写完，我故意删掉一处调用验证，**测试没变红**才发现。
+
+修法：先 `find("#[cfg(test)]")` 切掉测试模块再统计。
+修完再删一次验证，报「只找到 4 处」——真的红了。
+
+这条在本次会话里已经是第三次踩（虚拟滚动的纯函数、设置页的关窗判定、
+现在的源码扫描）。**凡是"守卫"性质的测试，写完必须故意破坏一次，
+确认它真的报错。**
 
 ## 10. 审查方法记录（下一轮可复用）
 
