@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 15:10 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`aa6b25f`
+> 最后更新：2026-11-03 15:40 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`7b21be0`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **321** | `cd rust && cargo test --workspace` |
+| Rust | **331** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **494** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -86,6 +86,8 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `61904cc` | 改主密码后不提醒「旧备份仍需旧密码」（用户以为备份废了） | P1 数据可恢复性 |
 | `9f78d8c` | **看不到自己记住了哪些站点**，也没法关掉某一个 | P1 可用性 |
 | `aa6b25f` | 阅读模式同样缺站点管理（与夜间模式对称） | P1 可用性 |
+| `2b8fe01` | **条目列表每帧渲染全部条目**（大密码库直接卡死） | **P1 性能** |
+| `7b21be0` | 搜索每个字段都 `to_lowercase()` 分配内存（慢 8.7 倍） | P1 性能 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
