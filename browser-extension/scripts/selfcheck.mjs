@@ -30,6 +30,7 @@ import { diffManifest, CAPABILITIES } from '../lib/permissions.js';
 import { autoApplyModules } from '../lib/auto-apply.js';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
+const REPO = path.resolve(import.meta.dirname, '../..');
 const EXT_ID = 'abcdefghijklmnopabcdefghijklmnop';
 const EXT_BASE = `chrome-extension://${EXT_ID}/`;
 
@@ -230,6 +231,29 @@ async function main() {
   const FORBIDDEN = ['webRequest', 'webRequestBlocking', 'debugger', 'proxy', 'management'];
   const bad = FORBIDDEN.filter((p) => (manifest.permissions || []).includes(p));
   check('没有声明高风险权限', bad.length === 0, bad.join(','));
+
+  /* ---------------- 11b. CI 必须跑扩展的测试 ---------------- */
+
+  // 扩展承担了本项目近一半的功能面，却一度完全不在 CI 里——
+  // 任何提交都能悄悄破坏它，直到有人手动跑测试才会发现。
+  //
+  // 检查 CI 配置里确实有这一步，免得将来有人删掉它而无人察觉。
+  {
+    const ciPath = path.join(REPO, '.github/workflows/ci.yml');
+    if (fs.existsSync(ciPath)) {
+      const ci = fs.readFileSync(ciPath, 'utf8');
+      const hasExtensionJob = /extension:/.test(ci);
+      const runsTests = /node --test/.test(ci);
+      const runsSelfcheck = /selfcheck\.mjs/.test(ci);
+      check(
+        'CI 里有扩展的测试作业',
+        hasExtensionJob && runsTests && runsSelfcheck,
+        `job=${hasExtensionJob} test=${runsTests} selfcheck=${runsSelfcheck}`
+      );
+    } else {
+      check('CI 里有扩展的测试作业', false, '找不到 .github/workflows/ci.yml');
+    }
+  }
 
   /* ---------------- 12. 版本号同步 ---------------- */
 

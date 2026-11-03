@@ -148,6 +148,58 @@ jobs:
           arguments: --all-features
 
   # ---------------------------------------------------------------- #
+  # 浏览器扩展（Manifest V3）
+  # ---------------------------------------------------------------- #
+  # 为什么必须进 CI：扩展已经承担了本项目近一半的功能面
+  # （自动填充、广告与跟踪器过滤、阅读模式、夜间模式），
+  # 却一度完全不受持续集成保护——任何提交都能悄悄破坏它，
+  # 而且要等到有人手动跑测试才会发现。
+  #
+  # 扩展**零运行时依赖**，所以这个作业不需要 npm ci：
+  # 直接用 Node 内置的测试运行器即可。这既是它容易进 CI 的原因，
+  # 也说明没有引入供应链风险。
+  extension:
+    name: browser extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "24"
+      # 单元 + 集成测试（模块系统、配置中心、权限门禁、注入、自动应用…）
+      #
+      # 用 `ls` 展开而不是直接写 glob：如果测试文件被误删，
+      # glob 会把 `tests/*.test.js` 原样传给 node，node 会报一个
+      # 让人摸不着头脑的错。这里显式展开并检查数量。
+      - name: 单元与集成测试
+        working-directory: browser-extension
+        run: |
+          set -euo pipefail
+          files=$(ls tests/*.test.js)
+          count=$(printf '%s
+' "$files" | wc -l)
+          if [ "$count" -lt 5 ]; then
+            echo "测试文件数量异常（$count 个），可能是 glob 没展开"; exit 1
+          fi
+          echo "运行 $count 个测试文件"
+          node --test $files
+      # 装配自检：模块注册、权限与 manifest 一致、门禁表完整性、
+      # 内容脚本无 import、版本号同步——这些不需要浏览器就能查
+      - name: 装配自检
+        working-directory: browser-extension
+        run: node scripts/selfcheck.mjs
+      # 冒烟：确认 manifest 与入口文件都在，且能被解析
+      - name: 扩展清单可解析
+        working-directory: browser-extension
+        run: |
+          node -e "const m=require('fs').readFileSync('manifest.json','utf8');JSON.parse(m);console.log('manifest ok')"
+          for f in background/service-worker.js content/content-script.js popup/popup.js; do
+            test -f "$f" || { echo "缺少 $f"; exit 1; }
+          done
+
+  # ---------------------------------------------------------------- #
   # 旧版 Electron 实现：仍在仓库里，但已被 Rust 版取代。
   # 保留这层测试只是为了让还没升级的用户不至于拿到彻底坏掉的旧版，
   # 不阻塞主线，也不作为发布标准。1.0 前会连同 src/ 一起移除。
