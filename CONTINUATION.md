@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 10:45 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`bb9a89a`
+> 最后更新：2026-11-03 10:30 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`67bf0e5`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **270** | `cd rust && cargo test --workspace` |
+| Rust | **274** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **453** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -48,6 +48,8 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `e4f82df` | 复制密码/账号用裸 String，内容留在堆上 | P1 安全 |
 | `75b9ce8` | bridge 响应序列化缓冲区含明文密码未清零 | P1 安全 |
 | `bb9a89a` | `Entry::drop` 漏清 TOTP 密钥与自定义字段（TOTP 泄漏=二次验证失效） | P1 安全 |
+| `3cd6721` | 复用密码统计是 O(n²)，5000 条时每帧 2500 万次比较 | P2 性能 |
+| `67bf0e5` | TOTP 复制 TTL 被 `.max(3)` 拉长，剪贴板留过期码 | P1 安全 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
