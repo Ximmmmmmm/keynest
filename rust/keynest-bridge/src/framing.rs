@@ -26,6 +26,45 @@ pub fn encode(payload: &[u8]) -> Result<Vec<u8>, BridgeError> {
     Ok(out)
 }
 
+/// 判断这个 IO 错误是不是「对端已经断开」。
+///
+/// Windows 命名管道在三种情况下会这样：
+/// * `ERROR_BROKEN_PIPE`（109）：对端关闭了管道
+/// * `ERROR_PIPE_NOT_CONNECTED`（233）：管道已经不存在
+/// * `ERROR_NO_DATA`（232）：管道已结束
+///
+/// # 为什么第三种要靠消息文本判断
+///
+/// `ERROR_NO_DATA` 在 Windows 上是以 **HRESULT**（`0x8007006D`）形式返回的，
+/// 不是 `GetLastError()` 的形式。`std::io::Error` 对它做了转换，
+/// 结果是 `raw_os_error()` 返回 **`None`**、`kind()` 是 `Other`，
+/// 错误消息是本地化的「管道已结束。」。
+///
+/// 所以只能同时看两种来源：
+///   * `raw_os_error()` —— 覆盖 BROKEN_PIPE / PIPE_NOT_CONNECTED
+///   * 消息里含 HRESULT —— 覆盖 NO_DATA
+///
+/// 消息匹配用 `contains` 而不是精确相等：系统语言不同，文本会变
+/// （英文是 "The pipe has been ended."），但 HRESULT 那段十六进制是稳定的。
+#[cfg(windows)]
+fn is_pipe_disconnected(e: &io::Error) -> bool {
+    if matches!(e.raw_os_error(), Some(109) | Some(232) | Some(233)) {
+        return true;
+    }
+    // HRESULT 形式：0x8007006D == ERROR_NO_DATA
+    let text = e.to_string();
+    text.contains("0x8007006D") || text.contains("0x8007006E")
+}
+
+/// 非 Windows 平台：断开的典型表现是 `UnexpectedEof` 或连接被重置。
+#[cfg(not(windows))]
+fn is_pipe_disconnected(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+    )
+}
+
 /// 从流里读一帧。
 ///
 /// 长度前缀先做上限检查**再**分配内存：否则一个声明 4 GiB 的恶意帧
@@ -97,6 +136,15 @@ pub fn read_exact_on_first_byte<R: Read>(
                 filled += n;
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            // 对端已经断开：当成正常关闭，而不是 IO 错误。
+            //
+            // 真实场景：浏览器扩展被禁用、用户关掉标签页、native host 崩溃——
+            // 这些都会让管道读到 `ERROR_BROKEN_PIPE` / `ERROR_PIPE_NOT_CONNECTED`
+            // 而不是干净的 EOF（读到 0 字节）。
+            //
+            // 不区分的话，服务端会把一次**正常的**连接结束报成 IO 错误：
+            // 日志里出现误导性的错误，还可能让上层以为出了故障。
+            Err(e) if is_pipe_disconnected(&e) => return Err(BridgeError::Closed),
             Err(e) => return Err(BridgeError::Io(e.to_string())),
         }
     }
@@ -117,6 +165,74 @@ pub fn write_frame<W: Write>(writer: &mut W, payload: &[u8]) -> Result<(), Bridg
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 对端断开要当成**正常关闭**，不是 IO 错误。
+    ///
+    /// 浏览器扩展被禁用、用户关掉标签页、native host 崩溃——这些都会让
+    /// 管道读到 `ERROR_BROKEN_PIPE` 而不是干净的 EOF。
+    ///
+    /// 不区分的话，服务端会把一次正常的连接结束报成 IO 错误：
+    /// 日志里出现误导性的错误，还可能让上层以为出了故障。
+    #[test]
+    fn broken_pipe_is_reported_as_closed_not_io() {
+        // 造一个「读的时候报破损管道」�� reader
+        struct BrokenPipe;
+        impl Read for BrokenPipe {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from_raw_os_error(109)) // ERROR_BROKEN_PIPE
+            }
+        }
+
+        let err = read_frame(&mut BrokenPipe).unwrap_err();
+        assert!(
+            matches!(err, BridgeError::Closed),
+            "对端断开应当是 Closed，实际: {err:?}"
+        );
+    }
+
+    /// `ERROR_NO_DATA`（HRESULT 形式）也要被当成正常关闭。
+    ///
+    /// 它是实测最常遇到的：客户端进程退出后，服务端继续读管道，
+    /// Windows 给的是 `0x8007006D`，而 `std::io::Error` 对它做了转换后
+    /// **`raw_os_error()` 返回 `None`**——所以只能从消息文本里认。
+    #[test]
+    fn error_no_data_as_hresult_is_reported_as_closed() {
+        // 造一个与 Windows 转换结果同形的错误
+        let e = std::io::Error::other("管道已结束。 (0x8007006D)");
+        assert!(
+            is_pipe_disconnected(&e),
+            "HRESULT 形式的 ERROR_NO_DATA 没被认出来"
+        );
+        // 同样要能通过 read_frame 走完整路径
+        struct NoData;
+        impl Read for NoData {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("管道已结束。 (0x8007006D)"))
+            }
+        }
+        let err = read_frame(&mut NoData).unwrap_err();
+        assert!(matches!(err, BridgeError::Closed), "实际: {err:?}");
+    }
+
+    /// 真正的 IO 错误**不能**被当成正常关闭。
+    ///
+    /// 把所有读错误都算成 Closed 的话，磁盘故障、权限问题这类真故障
+    /// 会被静默吞掉——会话"正常结束"，但用户什么也没得到。
+    #[test]
+    fn real_io_error_is_still_io() {
+        struct RealError;
+        impl Read for RealError {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from_raw_os_error(5)) // ERROR_ACCESS_DENIED
+            }
+        }
+
+        let err = read_frame(&mut RealError).unwrap_err();
+        assert!(
+            matches!(err, BridgeError::Io(_)),
+            "真 IO 错误应当是 Io，实际: {err:?}"
+        );
+    }
 
     #[test]
     fn roundtrip_preserves_bytes() {

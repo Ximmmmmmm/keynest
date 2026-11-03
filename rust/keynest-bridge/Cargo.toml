@@ -37,3 +37,8 @@ windows = { version = "0.58", features = [
 [[bin]]
 name = "keynest-native-host"
 path = "src/bin/native_host.rs"
+
+[dev-dependencies]
+# 进程级集成测试需要一个临时目录放 bridge.key。
+# 版本约束与 keynest-core 一致，避免引入第二个版本。
+tempfile = "3"
