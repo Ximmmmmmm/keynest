@@ -479,6 +479,55 @@ for (const rel of ['.github/workflows/ci.yml', '.github/workflows/release.yml'])
 }
 
 /* ------------------------------------------------------------------ */
+/* 4e) workflow 里的 action 必须 pin 到完整 SHA                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 检查 `.github/workflows/*.yml` 里每个 `uses:` 都是 40 位 commit SHA。
+ *
+ * # 为什么
+ *
+ * 用 tag 或分支引用 action（`actions/checkout@v4`）意味着上游可以
+ * 随时把那个 tag 指向任意 commit——包括被入侵的账号推的恶意 commit。
+ * 而 workflow 里的 action 跑在 CI 里，**能读到仓库内容、拿到
+ * GITHUB_TOKEN**。这是真实发生过的攻击面（tj-actions 事件）。
+ *
+ * pin 到完整 SHA 之后，上游改不了我们跑的是什么。
+ *
+ * # 局限
+ *
+ * 这条只保证「格式是 40 位 SHA」，不验证那个 SHA 在 GitHub 上
+ * 是否真的存在、是否指向预期的版本——那需要网络请求，
+ * 不适合放进一个离线自检。本轮已经用 GitHub API 逐个核实过
+ * 当前这 9 个 action 的 SHA 全部存在。
+ */
+{
+  for (const file of ['.github/workflows/ci.yml', '.github/workflows/release.yml']) {
+    const text = read(file);
+    if (text === null) continue;
+
+    const unpinned = [];
+    for (const line of text.split('\n')) {
+      const m = line.match(/^\s*(?:-\s*)?uses:\s*([A-Za-z0-9_.\-]+\/[A-Za-z0-9_.\-]+)@(\S+)\s*$/);
+      if (!m) continue;
+      const [, action, ref] = m;
+      if (!/^[a-f0-9]{40}$/.test(ref)) {
+        unpinned.push(`${action}@${ref}`);
+      }
+    }
+
+    if (unpinned.length) {
+      fail(
+        `${file} 里有 action 没 pin 到完整 SHA（上游可替换）`,
+        unpinned.slice(0, 3).join(', '),
+      );
+    } else {
+      ok(`${file} 的 action 全部 pin 到 SHA`, '');
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 5) 仓库里不能有敏感或调试文件                                        */
 /* ------------------------------------------------------------------ */
 
