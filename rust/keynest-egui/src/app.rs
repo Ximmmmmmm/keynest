@@ -2010,6 +2010,15 @@ impl App {
                     st.password = Zeroizing::new(st.gen.preview.to_string());
                 }
             }
+            EditIntent::CancelDiscard => {
+                if let Some(e) = self.edit.as_mut() {
+                    e.confirm_discard = false;
+                }
+            }
+            EditIntent::DiscardConfirmed => {
+                // 用户明确选择放弃：直接丢掉编辑状态。
+                self.edit = None;
+            }
             EditIntent::Closed => self.edit = None,
         }
     }

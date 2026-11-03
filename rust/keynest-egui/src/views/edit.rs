@@ -58,6 +58,8 @@ pub struct EditState {
     pub gen: GeneratorState,
     /// 正在播放关闭动画
     pub closing: bool,
+    /// 有未保存内容时点了关闭 —— 现在等他确认。
+    pub confirm_discard: bool,
     /// 打开时的内容快照（`None` 表示这是新增条目）
     pub original: Option<EditOriginal>,
 }
@@ -190,6 +192,7 @@ impl EditState {
             generator_open: false,
             gen: GeneratorState::default(),
             closing: false,
+            confirm_discard: false,
             original: None,
         }
     }
@@ -221,6 +224,7 @@ impl EditState {
             generator_open: false,
             gen: GeneratorState::default(),
             closing: false,
+            confirm_discard: false,
             original: Some(EditOriginal {
                 title: e.title.clone(),
                 username: e.username.clone(),
@@ -294,10 +298,23 @@ fn window_id() -> egui::Id {
     egui::Id::new("edit-window")
 }
 
+/// 用户点了关闭时，要不要拦住并弹确认？
+///
+/// 与设置页的 `should_block_close` 同构。抽成纯函数的原因也一样：
+/// 「拦住了」在界面上表现为「窗口没关」，而 `open` 是 egui `Window`
+/// 的局部状态，测试里没法直接置 false 来触发那条路径。
+fn should_block_edit_close(is_dirty: bool, already_asking: bool) -> bool {
+    is_dirty && !already_asking
+}
+
 pub enum EditIntent {
     None,
     Save,
     Cancel,
+    /// 确认框里点了「放弃并关闭」
+    DiscardConfirmed,
+    /// 确认框里点了「继续编辑」
+    CancelDiscard,
     UseGenerated,
     /// 关闭动画播完，可以真正销毁状态
     Closed,
@@ -636,12 +653,54 @@ pub fn show(
                             intent = EditIntent::Cancel;
                         }
                     });
+
+                    // ---- 未保存内容的确认 ----
+                    if st.confirm_discard {
+                        ui.add_space(10.0);
+                        egui::Frame::new()
+                            .fill(p.surface_alt)
+                            .corner_radius(egui::CornerRadius::same(theme::R_SM))
+                            .inner_margin(egui::Margin::same(10))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new("这条记录还没保存")
+                                        .size(12.5)
+                                        .color(p.warn),
+                                );
+                                ui.add_space(4.0);
+                                ui.label(theme::caption("关闭后你刚填的内容会丢失。"));
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    if theme::primary_button(ui, "继续编辑", 96.0).clicked() {
+                                        intent = EditIntent::CancelDiscard;
+                                    }
+                                    if theme::ghost_button(ui, "放弃并关闭").clicked() {
+                                        intent = EditIntent::DiscardConfirmed;
+                                    }
+                                    if theme::ghost_button(ui, "保存并关闭").clicked() {
+                                        // 走正常的保存流程：保存成功后由 app.rs 关掉。
+                                        intent = EditIntent::Save;
+                                    }
+                                });
+                            });
+                    }
                 });
         });
 
-    // 用户点了标题栏的 × ：进入关闭动画
+    // 用户点了标题栏的 × ：进入关闭动画。
+    //
+    // **有未保存内容时先问一句**。
+    //
+    // 锁定路径（`app.rs` 的 `request_lock`）早就有这个保护，
+    // 但关编辑框本身没有：写完半条记录、顺手点 ×，内容就静默没了。
+    // 而且那是用户刚敲进去的东西，比设置项更疼。
     if !open && !st.closing && matches!(intent, EditIntent::None) {
-        st.closing = true;
+        if should_block_edit_close(st.is_dirty(), st.confirm_discard) {
+            st.confirm_discard = true;
+            st.closing = false;
+        } else {
+            st.closing = true;
+        }
     }
 
     // 动画播完才真正销毁
@@ -655,6 +714,52 @@ pub fn show(
 mod tests {
     use super::*;
     use keynest_core::vault::Entry;
+
+    /// 关编辑框时的拦截判定。
+    ///
+    /// 与设置页的 `should_block_close` 同构，测试理由也一样：
+    /// 「拦住了」在界面上表现为「窗口没关」，而 `open` 是 egui `Window`
+    /// 的局部状态，测试里没法直接置 false 来触发那条路径。
+    #[test]
+    fn edit_close_is_blocked_only_when_there_is_unsaved_content() {
+        assert!(!should_block_edit_close(false, false));
+        assert!(should_block_edit_close(true, false));
+        // 已经在问了 → 不要再拦，否则点了「放弃」还会被拦，出不去
+        assert!(!should_block_edit_close(true, true));
+        assert!(!should_block_edit_close(false, true));
+    }
+
+    /// 新建条目、什么都没填 → 不算脏，关掉不打扰。
+    #[test]
+    fn a_blank_new_entry_is_not_dirty() {
+        let st = EditState::new_entry("网站".into());
+        assert!(!st.is_dirty(), "空白新条目被判为脏，关窗会白弹一次确认");
+    }
+
+    /// 新建条目、填了标题 → 脏。
+    #[test]
+    fn a_new_entry_with_a_title_is_dirty() {
+        let mut st = EditState::new_entry("网站".into());
+        st.title = "某个站点".into();
+        assert!(st.is_dirty());
+    }
+
+    /// 打开既有条目、什么都不改 → 不脏。
+    #[test]
+    fn an_unchanged_existing_entry_is_not_dirty() {
+        let e = sample_entry();
+        let st = EditState::from_entry(&e);
+        assert!(!st.is_dirty(), "没改任何东西就被判为脏");
+    }
+
+    /// 改了密码 → 脏。
+    #[test]
+    fn editing_the_password_makes_it_dirty() {
+        let e = sample_entry();
+        let mut st = EditState::from_entry(&e);
+        st.password = zeroize::Zeroizing::new("a-brand-new-password".into());
+        assert!(st.is_dirty());
+    }
 
     fn sample_entry() -> Entry {
         Entry {
