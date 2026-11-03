@@ -701,6 +701,36 @@ impl fmt::Debug for Field {
 /// 字段数量上限。防御畸形库/导入文件把界面撑爆。
 pub const MAX_FIELDS: usize = 50;
 
+/// 条目各字段的长度上限（字符数，不是字节数）。
+///
+/// # 为什么要有
+///
+/// 没有上限时，一个 100 MB 的备注字段就能让整个密码库超过
+/// `MAX_VAULT_BYTES`（64 MiB）——从此**再也保存不了**：
+/// 每��保存都被文件大小挡住，用户只能手工改文件。
+///
+/// 这不只是"数据脏"，是**库被永久写坏**。
+///
+/// # 为什么与 bridge 的限制一致
+///
+/// `keynest-bridge` 的 `limits.rs` 里已经有一组同样的上限
+/// （title 256 / username 320 / password 1024 / url 2048）。
+/// 浏览器填充进来的条目会被 bridge 挡下，但从 GUI 直接添加的不会——
+/// 两条路径的限制必须一致，否则「换个入口就能绕过」。
+pub const MAX_TITLE_CHARS: usize = 256;
+pub const MAX_USERNAME_CHARS: usize = 320;
+pub const MAX_PASSWORD_CHARS: usize = 1024;
+pub const MAX_URL_CHARS: usize = 2048;
+pub const MAX_NOTES_CHARS: usize = 64 * 1024;
+pub const MAX_CATEGORY_CHARS: usize = 64;
+pub const MAX_KIND_CHARS: usize = 64;
+
+/// TOTP 配置的长度上限。
+///
+/// TOTP 密钥是 Base32，正常是 16–32 字符。上限给到 512 足够，
+/// 又能挡住"误粘贴了一个几 MB 的文件"。
+pub const MAX_TOTP_CHARS: usize = 512;
+
 impl VaultData {
     /// 找出重复的条目 id。
     ///
@@ -1445,6 +1475,30 @@ fn sanitize_fields(fields: Vec<Field>) -> Vec<Field> {
     out
 }
 
+/// 检查条目各字段的长度上限。
+///
+/// 长度按**字符数**算而不是字节数：中文一个字占 3 字节，
+/// 按字节算会让中文用户实际能用到的长度只有预期的三分之一。
+fn check_entry_lengths(e: &Entry) -> Result<()> {
+    fn check(name: &str, len: usize, max: usize) -> Result<()> {
+        if len > max {
+            return Err(VaultError::FieldTooLong(name.to_string(), max));
+        }
+        Ok(())
+    }
+    check("标题", e.title.chars().count(), MAX_TITLE_CHARS)?;
+    check("账号", e.username.chars().count(), MAX_USERNAME_CHARS)?;
+    check("密码", e.password.chars().count(), MAX_PASSWORD_CHARS)?;
+    check("网址", e.url.chars().count(), MAX_URL_CHARS)?;
+    check("备注", e.notes.chars().count(), MAX_NOTES_CHARS)?;
+    check("分类", e.category.chars().count(), MAX_CATEGORY_CHARS)?;
+    check("类型", e.kind.chars().count(), MAX_KIND_CHARS)?;
+    if let Some(t) = e.totp.as_deref() {
+        check("验证码配置", t.chars().count(), MAX_TOTP_CHARS)?;
+    }
+    Ok(())
+}
+
 /// 取 32 字节随机数据密钥。
 fn random_key() -> Result<[u8; KEY_LEN]> {
     let mut key = [0u8; KEY_LEN];
@@ -2070,6 +2124,16 @@ impl Vault {
         if entry.title.trim().is_empty() {
             return Err(VaultError::InvalidEntry);
         }
+
+        // 字段长度上限。
+        //
+        // 超长时**拒绝**而不是截断：截断会静默丢掉用户的输入，
+        // 而他以为自己保存成功了——那是更难发现的数据丢失。
+        //
+        // 没有这道闸，一个超长备注就能把库撑过 `MAX_VAULT_BYTES`，
+        // 从此**再也保存不了**。
+        check_entry_lengths(&entry)?;
+
         // 字段清洗：去空、去重标签、限量。导入的文件里什么都可能有。
         entry.fields = sanitize_fields(std::mem::take(&mut entry.fields));
 
@@ -2208,6 +2272,19 @@ impl Vault {
                 if seen.contains(&key) {
                     report.skipped_existing += 1;
                     continue;
+                }
+
+                // 超长字段：跳过这一条，**不要让整批失败**。
+                //
+                // 导入是「尽力而为」的批量操作：一条有问题不该毁掉另外 999 条。
+                // 但也不能放它进去——超长字段会让库超出 MAX_VAULT_BYTES，
+                // 从此再也保存不了。
+                if let Err(e) = check_entry_lengths(&e) {
+                    if e.code() == "FIELD_TOO_LONG" {
+                        report.skipped_invalid += 1;
+                        continue;
+                    }
+                    return Err(e);
                 }
                 seen.insert(key);
 
@@ -3902,6 +3979,75 @@ mod tests {
         assert!(data.find_duplicate_ids().is_empty());
     }
 
+    /// 超长的字段必须被**拒绝**，而不是截断。
+    ///
+    /// # 为什么这是数据完整性问题而不只是"输入校验"
+    ///
+    /// `MAX_VAULT_BYTES` 是 64 MiB。没有字段长度上限时，
+    /// 一个 100 MB 的备注就能让库超出这个上限——
+    /// 此后**每次保存都被文件大小挡住**，用户再也存不进任何东西。
+    /// 库从此写不坏也写不好。
+    ///
+    /// 截断比拒绝更糟：用户以为保存成功了，实际上尾部被悄悄丢掉。
+    #[test]
+    fn oversized_fields_are_rejected_not_truncated() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        // 超长备注
+        let mut e = entry("A", "pw");
+        e.notes = "x".repeat(MAX_NOTES_CHARS + 1);
+        let err = v.upsert_entry(e).unwrap_err();
+        assert_eq!(err.code(), "FIELD_TOO_LONG");
+        assert!(
+            err.to_string().contains("备注"),
+            "错误信息要指出是哪个字段: {err}"
+        );
+
+        // 超长标题
+        let mut e = entry("B", "pw");
+        e.title = "x".repeat(MAX_TITLE_CHARS + 1);
+        assert_eq!(v.upsert_entry(e).unwrap_err().code(), "FIELD_TOO_LONG");
+
+        // 超长 TOTP 配置
+        let mut e = entry("C", "pw");
+        e.totp = Some("x".repeat(MAX_TOTP_CHARS + 1));
+        assert_eq!(v.upsert_entry(e).unwrap_err().code(), "FIELD_TOO_LONG");
+
+        // 库里确实什么都没进去
+        assert_eq!(v.snapshot().unwrap().entries.len(), 0);
+    }
+
+    /// 刚好在上限上的内容必须能存进去（别把合法输入也挡了）。
+    #[test]
+    fn fields_at_the_limit_are_accepted() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        let mut e = entry("A", "pw");
+        e.title = "x".repeat(MAX_TITLE_CHARS);
+        e.notes = "y".repeat(MAX_NOTES_CHARS);
+        v.upsert_entry(e).unwrap();
+        assert_eq!(v.snapshot().unwrap().entries.len(), 1);
+    }
+
+    /// 长度按**字符数**算，不是字节数。
+    ///
+    /// 中文一个字占 3 字节——按字节算的话，中文用户实际能用到的
+    /// 长度只有预期的三分之一，而且没有任何提示。
+    #[test]
+    fn length_limits_count_characters_not_bytes() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        let mut e = entry("标题", "pw");
+        // 每个中文字符 3 字节；按字节算会超限，按字符算正好在限内
+        e.notes = "中".repeat(MAX_NOTES_CHARS);
+        assert!(e.notes.len() > MAX_NOTES_CHARS, "前提：字节数确实超了");
+        v.upsert_entry(e).unwrap();
+        assert_eq!(v.snapshot().unwrap().entries.len(), 1);
+    }
+
     /// 导入必须有条目上限，且超限时**保留已导入的部分**。
     ///
     /// 没有上限时：一个 32 MiB 的 CSV 能造出上百万条记录，
@@ -3931,6 +4077,27 @@ mod tests {
         assert_eq!(report.added, 0, "已达上限，不该再写入");
         assert_eq!(report.skipped_limit, 5, "被上限挡下的条数要如实计入报告");
         assert!(report.summary().contains("条目上限"), "摘要要说明原因");
+    }
+
+    /// 导入时遇到超长字段：**跳过这一条**，不要让整批失败。
+    ///
+    /// 导入是「尽力而为」的批量操作：一条有问题不该毁掉另外 999 条。
+    /// 但也不能放它进去——超长字段会让库超出 MAX_VAULT_BYTES，从此再也保存不了。
+    #[test]
+    fn import_skips_oversized_entries_without_failing_the_batch() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        let mut huge = entry("Huge", "pw");
+        huge.notes = "x".repeat(MAX_NOTES_CHARS + 1);
+
+        let report = v
+            .import_entries(vec![huge, entry("Good1", "pw"), entry("Good2", "pw")])
+            .unwrap();
+
+        assert_eq!(report.added, 2, "正常条目必须照样导入");
+        assert_eq!(report.skipped_invalid, 1, "超长那条要计入跳过数");
+        assert_eq!(v.snapshot().unwrap().entries.len(), 2);
     }
 
     /// 解析阶段丢掉的条目必须出现在报告里。

@@ -53,6 +53,13 @@ pub enum VaultError {
     #[error("标题不能为空")]
     InvalidEntry,
 
+    /// 某个字段超长。
+    ///
+    /// 单列一个变体而不是复用 `InvalidEntry`：那个的文案是「标题不能为空」，
+    /// 用在"备注太长"上会让用户完全不知道发生了什么。
+    #[error("{0}太长（上限 {1} 个字符）")]
+    FieldTooLong(String, usize),
+
     #[error("分类名不能为空")]
     InvalidCategory,
 
@@ -103,6 +110,7 @@ impl VaultError {
             VaultError::NoBackup => "NO_BACKUP",
             VaultError::NotFound => "NOT_FOUND",
             VaultError::InvalidEntry => "INVALID_ENTRY",
+            VaultError::FieldTooLong(..) => "FIELD_TOO_LONG",
             VaultError::InvalidCategory => "INVALID_CATEGORY",
             VaultError::Io(_) => "IO",
             VaultError::Json(_) => "CORRUPT",
