@@ -176,6 +176,38 @@ pub fn install(
     host_exe_src: &Path,
     extension_ids: &[String],
 ) -> Result<InstallReport, BridgeError> {
+    install_with_registry(data_dir, host_exe_src, extension_ids, true)
+}
+
+/// 与 [`install`] 相同，但可以指定「只读不写注册表」或用自定义的注册表路径。
+///
+/// # 为什么要有这个变体
+///
+/// 端到端测试必须能验证「装完之后注册表里真的有东西、卸完之后真的没了」。
+/// 而测试**不能**碰真实的 `NativeMessagingHosts` —— 那是别的软件也在用的
+/// 地方，测试留下痕迹就是在用户机器上留垃圾。
+///
+/// 所以把「写哪些键」变成参数：生产用真实的那个，测试用
+/// `Software\KeyNest\Test\...` 下面的专用键。
+///
+/// `write_registry = false` 时完全跳过注册表，只做文件部分。
+pub fn install_with_registry(
+    data_dir: &Path,
+    host_exe_src: &Path,
+    extension_ids: &[String],
+    write_registry: bool,
+) -> Result<InstallReport, BridgeError> {
+    install_at(data_dir, host_exe_src, extension_ids, write_registry, None)
+}
+
+/// 真正干活的实现。`registry_paths` 为 `None` 时用生产路径。
+fn install_at(
+    data_dir: &Path,
+    host_exe_src: &Path,
+    extension_ids: &[String],
+    write_registry: bool,
+    registry_paths: Option<&[(&str, &str)]>,
+) -> Result<InstallReport, BridgeError> {
     let manifest_json = build_manifest(&host_exe_path(data_dir), extension_ids)?;
 
     if !host_exe_src.exists() {
@@ -212,16 +244,24 @@ pub fn install(
     };
     let manifest_str = manifest_path_for_reg.to_string_lossy().to_string();
 
-    for browser in BROWSERS {
-        match write_registry_value(browser.name, &manifest_str) {
-            Ok(WriteOutcome::Written) => report.registered_browsers.push(browser.name.to_string()),
-            Ok(WriteOutcome::AlreadyCorrect) => {
-                report.already_correct.push(browser.name.to_string())
-            }
+    let targets: Vec<(&str, &str)> = match registry_paths {
+        Some(p) => p.to_vec(),
+        None => BROWSERS.iter().map(|b| (b.name, b.key_path)).collect(),
+    };
+
+    for (name, key_path) in &targets {
+        if !write_registry {
+            continue;
+        }
+        match write_registry_value_at(key_path, &manifest_str) {
+            Ok(WriteOutcome::Written) => report.registered_browsers.push((*name).to_string()),
+            Ok(WriteOutcome::AlreadyCorrect) => report.already_correct.push((*name).to_string()),
             Err(e) => {
                 // 回滚：把已经写的注册表项撤掉，再删文件
                 for b in &report.registered_browsers {
-                    let _ = delete_registry_value(b.as_str());
+                    if let Some((_, path)) = targets.iter().find(|(n, _)| *n == b.as_str()) {
+                        let _ = delete_registry_value_at(path);
+                    }
                 }
                 let _ = std::fs::remove_file(&manifest_path_for_reg);
                 let _ = std::fs::remove_file(&dst_exe);
@@ -238,15 +278,27 @@ pub fn install(
 /// **绝不**碰 `vault.dat` 及其备份，**绝不**碰别的软件的
 /// `NativeMessagingHosts` 项——只删 `com.keynest.bridge` 这一个值。
 pub fn uninstall(data_dir: &Path) -> Result<InstallReport, BridgeError> {
+    uninstall_at(data_dir, None)
+}
+
+/// 与 [`uninstall`] 相同，但可以用自定义的注册表路径（给测试用）。
+pub fn uninstall_at(
+    data_dir: &Path,
+    registry_paths: Option<&[(&str, &str)]>,
+) -> Result<InstallReport, BridgeError> {
     let mut report = InstallReport {
         host_exe: host_exe_path(data_dir),
         manifest: manifest_path(data_dir),
         ..Default::default()
     };
 
-    for browser in BROWSERS {
-        if let Ok(true) = delete_registry_value(browser.name) {
-            report.registered_browsers.push(browser.name.to_string());
+    let targets: Vec<(&str, &str)> = match registry_paths {
+        Some(p) => p.to_vec(),
+        None => BROWSERS.iter().map(|b| (b.name, b.key_path)).collect(),
+    };
+    for (name, key_path) in &targets {
+        if delete_registry_value_at(key_path) {
+            report.registered_browsers.push((*name).to_string());
         }
     }
 
@@ -446,13 +498,13 @@ mod reg {
 ///
 /// 内部版本，路径可注入——测试用它指向一个测试专用键，
 /// 绝不碰真实的 `NativeMessagingHosts`。
-#[cfg(all(windows, test))]
+#[cfg(windows)]
 fn delete_registry_value_at(path: &str) -> bool {
     reg::delete_value(path)
 }
 
 /// 写**指定的**那个键的默认值。
-#[cfg(all(windows, test))]
+#[cfg(windows)]
 fn write_registry_value_at(path: &str, value: &str) -> Result<WriteOutcome, BridgeError> {
     if let Some(cur) = reg::read_value(path) {
         if cur == value {
@@ -466,27 +518,6 @@ fn write_registry_value_at(path: &str, value: &str) -> Result<WriteOutcome, Brid
     }
 }
 
-#[cfg(windows)]
-fn write_registry_value(browser: &str, value: &str) -> Result<WriteOutcome, BridgeError> {
-    let path = registry_path(browser)?;
-    if let Some(cur) = reg::read_value(&path) {
-        if cur == value {
-            return Ok(WriteOutcome::AlreadyCorrect);
-        }
-    }
-    if reg::write_value(&path, value) {
-        Ok(WriteOutcome::Written)
-    } else {
-        Err(BridgeError::Io(format!("写入注册表失败：{path}")))
-    }
-}
-
-#[cfg(windows)]
-fn delete_registry_value(browser: &str) -> Result<bool, BridgeError> {
-    let path = registry_path(browser)?;
-    Ok(reg::delete_value(&path))
-}
-
 #[cfg(not(windows))]
 fn write_registry_value(_browser: &str, _value: &str) -> Result<WriteOutcome, BridgeError> {
     // 非 Windows 上没有注册表这回事。直接报「不支持」而不是假装成功。
@@ -498,15 +529,6 @@ fn write_registry_value(_browser: &str, _value: &str) -> Result<WriteOutcome, Br
 #[cfg(not(windows))]
 fn delete_registry_value(_browser: &str) -> Result<bool, BridgeError> {
     Ok(false)
-}
-
-/// 查浏览器的注册表路径。
-fn registry_path(browser: &str) -> Result<String, BridgeError> {
-    BROWSERS
-        .iter()
-        .find(|b| b.name == browser)
-        .map(|b| b.key_path.to_string())
-        .ok_or_else(|| BridgeError::InvalidValue(format!("未知浏览器：{browser}")))
 }
 
 #[cfg(test)]
@@ -689,6 +711,166 @@ mod tests {
             serde_json::Value::String(host_exe_path(data_dir).to_string_lossy().to_string());
         std::fs::write(&manifest, serde_json::to_vec(&v).unwrap()).unwrap();
         assert!(is_installed(data_dir), "路径一致时才算已安装");
+    }
+
+    /// 端到端：安装 → 验证 → 卸载 → 验证清干净。
+    ///
+    /// # 为什么要有这条
+    ///
+    /// 安装分散在好几步：复制 exe、写清单、写两条注册表项。
+    /// 任何一步漏了，用户看到的都是「扩展连不上」，
+    /// 而程序这边没有任何异常。
+    ///
+    /// 这条测试把整条链路跑一遍并**逐项验证**——
+    /// 单元测试各自只覆盖一个函数，看不出它们拼起来对不对。
+    ///
+    /// 注册表用**测试专用**路径（`Software\KeyNest\Test\...`），
+    /// 绝不碰真实的 `NativeMessagingHosts`。
+    #[cfg(windows)]
+    #[test]
+    fn end_to_end_install_then_uninstall_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+
+        // 准备一个假的宿主 exe
+        let src_exe = dir.path().join("keynest-native-host.exe");
+        std::fs::write(&src_exe, b"fake host binary").unwrap();
+
+        let id = "abcdefghijklmnopabcdefghijklmnop".to_string();
+        let test_keys: Vec<(&str, &str)> = vec![
+            ("TestChrome", r"Software\KeyNest\Test\ChromeHost"),
+            ("TestEdge", r"Software\KeyNest\Test\EdgeHost"),
+        ];
+
+        // ---- 安装 ----
+        let report = install_at(
+            &data_dir,
+            &src_exe,
+            std::slice::from_ref(&id),
+            true,
+            Some(&test_keys),
+        )
+        .unwrap();
+        assert_eq!(report.registered_browsers.len(), 2, "两条注册表项都要写");
+        assert_eq!(report.already_correct.len(), 0);
+
+        // 宿主 exe 已复制
+        assert!(host_exe_path(&data_dir).exists(), "宿主 exe 没复制过去");
+        assert_eq!(
+            std::fs::read(host_exe_path(&data_dir)).unwrap(),
+            b"fake host binary"
+        );
+
+        // 清单已写，且内容正确
+        let manifest = manifest_path(&data_dir);
+        assert!(manifest.exists(), "清单没写");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(v["name"], "com.keynest.bridge");
+        assert_eq!(v["type"], "stdio");
+        assert!(v["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("keynest-native-host.exe"));
+        assert!(v["allowed_origins"][0].as_str().unwrap().contains(&id));
+
+        // 两条注册表项都真的写进去了，且值指向清单
+        for (_, key) in &test_keys {
+            assert_eq!(
+                reg::read_value(key).as_deref(),
+                Some(manifest.to_string_lossy().as_ref()),
+                "注册表 {key} 的值不对"
+            );
+        }
+
+        // 此时应当判定为「已安装」
+        assert!(is_installed(&data_dir), "装完应当算已安装");
+
+        // ---- 卸载 ----
+        let report = uninstall_at(&data_dir, Some(&test_keys)).unwrap();
+        assert_eq!(report.registered_browsers.len(), 2, "两条注册表项都要删");
+
+        // 注册表干净
+        for (_, key) in &test_keys {
+            assert_eq!(reg::read_value(key), None, "注册表 {key} 没删干净");
+        }
+        // 清理测试键本身（RegDeleteValueW 只删值，键还在）
+        for (_, key) in &test_keys {
+            let _ = reg::delete_key(key);
+        }
+        // 连父键一起删：测试不该在用户机器上留任何痕迹
+        let _ = reg::delete_key(r"Software\KeyNest\Test");
+
+        // 文件干净
+        assert!(!manifest.exists(), "清单没删");
+        assert!(!host_exe_path(&data_dir).exists(), "宿主 exe 没删");
+        assert!(!is_installed(&data_dir), "卸完不该算已安装");
+    }
+
+    /// 重复安装**幂等**：不会多出东西，也不会报错。
+    ///
+    /// 用户在设置页点了两次「安装」很常见。
+    #[cfg(windows)]
+    #[test]
+    fn installing_twice_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let src_exe = dir.path().join("keynest-native-host.exe");
+        std::fs::write(&src_exe, b"fake").unwrap();
+        let id = "abcdefghijklmnopabcdefghijklmnop".to_string();
+        let keys: Vec<(&str, &str)> = vec![("T", r"Software\KeyNest\Test\Idempotent")];
+
+        install_at(
+            &data_dir,
+            &src_exe,
+            std::slice::from_ref(&id),
+            true,
+            Some(&keys),
+        )
+        .unwrap();
+        let second = install_at(
+            &data_dir,
+            &src_exe,
+            std::slice::from_ref(&id),
+            true,
+            Some(&keys),
+        )
+        .unwrap();
+
+        assert!(second.registered_browsers.is_empty(), "第二次不该再写");
+        assert_eq!(
+            second.already_correct.len(),
+            1,
+            "第二次应当识别为「已经是对的」"
+        );
+
+        let _ = reg::delete_key(keys[0].1);
+        let _ = reg::delete_key(r"Software\KeyNest\Test");
+    }
+
+    /// 缺宿主 exe 时**不写注册表**。
+    ///
+    /// 顺序很重要：文件都拿不到，注册表就不该被改动。
+    /// 否则用户会看到一个「已安装」但其实没有宿主的坏状态。
+    #[cfg(windows)]
+    #[test]
+    fn missing_host_exe_leaves_the_registry_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_dir = dir.path().join("data");
+        let id = "abcdefghijklmnopabcdefghijklmnop".to_string();
+        let keys: Vec<(&str, &str)> = vec![("T", r"Software\KeyNest\Test\NoExe")];
+
+        let err = install_at(
+            &data_dir,
+            &dir.path().join("不存在.exe"),
+            std::slice::from_ref(&id),
+            true,
+            Some(&keys),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("keynest-native-host.exe"));
+
+        assert_eq!(reg::read_value(keys[0].1), None, "注册表不该被写");
     }
 
     /// 缺宿主 exe 时要给出**能照着做**的错误。
