@@ -686,6 +686,55 @@ function listAfter(text, marker, stop) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 4g) 原生宿主名与协议版本：两端必须一致                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 扩展通过 `chrome.runtime.connectNative(HOST_NAME)` 连接原生宿主，
+ * 浏览器**只认注册表里的那个名字**。Rust 侧写注册表时用的是自己的常量。
+ *
+ * 两边不一致的后果：扩展「已安装」、注册表项也写好了，
+ * 但 `connectNative` 立刻返回已断开的端口，
+ * 用户看到的是「浏览器桥接没有就绪」，完全指不到真正的原因。
+ *
+ * `PROTOCOL_VERSION` 同理：版本对不上，握手直接失败。
+ *
+ * # 局限
+ *
+ * 这里只比对**字面量**。两边都用常量这件事本身就是好事——
+ * 真正要防的是「有人改了一边忘了另一边」。
+ */
+{
+  const rs =
+    read('rust/keynest-bridge/src/hostinstall.rs') +
+    (read('rust/keynest-bridge/src/limits.rs') || '');
+  const js = read('browser-extension/lib/modules/vault.js');
+  if (rs !== null && js !== null) {
+    const pairs = [
+      ['HOST_NAME', /HOST_NAME: &str = "([^"]+)"/, /HOST_NAME = '([^']+)'/],
+      ['PROTOCOL_VERSION', /PROTOCOL_VERSION: u32 = (\d+)/, /PROTOCOL_VERSION = (\d+)/],
+    ];
+
+    const mismatched = [];
+    for (const [name, rre, jre] of pairs) {
+      const rm = rs.match(rre);
+      const jm = js.match(jre);
+      if (!rm || !jm) {
+        mismatched.push(`${name}（有一侧读不到）`);
+      } else if (rm[1] !== jm[1]) {
+        mismatched.push(`${name}: Rust=${rm[1]} 扩展=${jm[1]}`);
+      }
+    }
+
+    if (mismatched.length) {
+      fail('原生宿主名/协议版本两端不一致（桥接会连不上）', mismatched.join('; '));
+    } else {
+      ok('原生宿主名与协议版本两端一致', '');
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 5) 仓库里不能有敏感或调试文件                                        */
 /* ------------------------------------------------------------------ */
 
