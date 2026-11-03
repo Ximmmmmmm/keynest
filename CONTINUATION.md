@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 23:00 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`5bbc3e9`
+> 最后更新：2026-11-03 23:40 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`45751f7`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -406,8 +406,13 @@ CI 用 pwsh 7（默认 UTF-8）碰不到。**这属于「发布流程只能在 C
 `keynest-native-host.exe` 与 `KeyNest-Extension-*.zip`，
 而前一步刚给它们算过哈希 → **发布必失败**。
 
-三个问题全部来自「从未被执行过的 CI 配置」。
-已加自动检查：两份发布文件清单必须互相覆盖。
+**第四个同类问题（本轮）**：Release 附件列表漏了
+`keynest-native-host.exe` 与 `KeyNest-Extension-*.zip` ——
+用户下载到的发布里没有原生宿主，桥接装不了。
+
+四个问题全部来自「从未被执行过的 CI 配置」。
+已把发布自检扩展成**三方**交叉验证：
+sha256sum 列表 / 敏感检查白名单 / Release 附件列表必须互相覆盖。
 
 **下一轮该继续查**：workflow 里还没被本地验证过的东西。
 共享的 action SHA 已用 GitHub API 逐个核实（9 个全部存在），
