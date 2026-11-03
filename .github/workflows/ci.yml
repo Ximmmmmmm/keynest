@@ -178,8 +178,7 @@ jobs:
         run: |
           set -euo pipefail
           files=$(ls tests/*.test.js)
-          count=$(printf '%s
-' "$files" | wc -l)
+          count=$(ls tests/*.test.js | wc -l)
           if [ "$count" -lt 5 ]; then
             echo "测试文件数量异常（$count 个），可能是 glob 没展开"; exit 1
           fi
@@ -190,6 +189,12 @@ jobs:
       - name: 装配自检
         working-directory: browser-extension
         run: node scripts/selfcheck.mjs
+      # 发布前自检：版本一致性、发布白名单与扩展实际文件是否对得上、
+      # 仓库里有没有误提交的敏感文件。这些**编译器和测试都发现不了**，
+      # 只在真正打包时才暴露。
+      - name: 发布前自检
+        run: node scripts/release-check.mjs
+
       # 冒烟：确认 manifest 与入口文件都在，且能被解析
       - name: 扩展清单可解析
         working-directory: browser-extension

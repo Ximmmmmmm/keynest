@@ -85,6 +85,9 @@ jobs:
       #
       # CI 会跑扩展测试，但 CI 跑的是**分支**代码；发布跑的是 **tag 指向的代码**。
       # 如果 tag 是从某个没跑过 CI 的分支打的，扩展坏了也会照样发出去。
+      - name: 发布前自检
+        run: node scripts/release-check.mjs
+
       - name: 扩展测试
         working-directory: browser-extension
         run: node --test tests/*.test.js
