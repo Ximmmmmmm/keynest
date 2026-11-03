@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 16:45 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`6edd51e`
+> 最后更新：2026-11-03 17:20 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`a58c5bf`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **341** | `cd rust && cargo test --workspace` |
+| Rust | **346** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **494** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -265,9 +265,30 @@ egui 的 `Context::run_ui` 可以在**没有窗口、没有 GPU** 的情况下�
 于是「渲染了多少行」「某个面板会不会崩」都变成**可以断言的数字**，
 而不再只能靠「打开程序看看」。
 
-用法见 `rust/keynest-egui/tests/gui_headless.rs`（8 条测试）。
-一个坑：`FullOutput.textures_delta` 必须被消费，否则 drop 时 panic；
-无头渲染直接 `textures_delta.clear()`。
+用法见 `rust/keynest-egui/tests/gui_headless.rs`（13 条测试）。
+
+**两个必踩的坑**
+
+1. `FullOutput.textures_delta` 必须被消费，否则 drop 时 panic。
+   无头渲染直接 `textures_delta.clear()`。
+
+2. **必须给 `RawInput.screen_rect`**，否则 `ui.available_width()` 是 10000
+   （无界），界面不会按真实尺寸布局。行内的图标阈值（`right - 40` 之类）
+   会被推到「屏幕」外，任何点击都落到第一个分支上。
+   这会让测试看起来通过了、其实什么都没测到；
+   也会让人误以为是产品 bug（我差点就去改产品代码了）。
+
+   ```rust
+   RawInput {
+       screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
+       events,
+       ..Default::default()
+   }
+   ```
+
+**点击也能测**：`RawInput.events` 注入 `PointerMoved` + `PointerButton{pressed}`
++ `PointerButton{released}`（三帧，必须复用同一个 `Context`）。
+`Response::clicked()` 在释放那一帧才为真。
 
 **为什么这条能力重要**：在这之前，GUI 的渲染逻辑完全没有自动化保护。
 虚拟滚动那种「界面看起来正常、只是变卡」的退化，
