@@ -503,7 +503,11 @@ impl fmt::Debug for VaultFile {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 需要 `PartialEq`：设置页要判断「用户改了但还没保存」。
+///
+/// 这不只是体验问题——自动锁定从 60 分钟改成 5 分钟是**更安全**的方向，
+/// 用户以为改好了、结果没点保存就关了窗口，程序仍然 60 分钟才锁。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(rename = "autoLockMinutes")]
     pub auto_lock_minutes: u32,

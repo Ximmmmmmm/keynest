@@ -1280,6 +1280,10 @@ impl App {
                 if let Some(st) = self.settings.as_mut() {
                     st.notice = Some("设置已保存".into());
                     st.error = None;
+                    // 保存成功后草稿变成新的「原始值」，脏标记随之清除。
+                    // 不调用的话：保存完再点关闭，仍会被问「设置还没保存」——
+                    // 用户刚保存过，这提示会让他以为没生效。
+                    st.mark_saved();
                 }
             }
             Err(e) => {
@@ -1890,6 +1894,34 @@ impl App {
                 }
             }
             SettingsIntent::Wipe => self.apply_wipe(),
+            SettingsIntent::AskDiscard => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.confirm_discard = true;
+                }
+            }
+            SettingsIntent::CancelDiscard => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.confirm_discard = false;
+                }
+            }
+            SettingsIntent::DiscardConfirmed => {
+                // 用户明确选择放弃改动：直接丢掉整份状态。
+                // 不做「自动保存」——他要的就是不要这些改动。
+                self.settings = None;
+            }
+            SettingsIntent::SaveAndClose => {
+                self.apply_settings_save();
+                // 只有保存成功才关。失败时窗口留着，错误信息在 st.error 里，
+                // 用户还能继续改。
+                let ok = self
+                    .settings
+                    .as_ref()
+                    .map(|st| st.error.is_none())
+                    .unwrap_or(false);
+                if ok {
+                    self.settings = None;
+                }
+            }
             SettingsIntent::Closed => self.settings = None,
             SettingsIntent::SetTheme(dark) => {
                 // 主题切换会重建 visuals，字体已在启动时注册，不受影响

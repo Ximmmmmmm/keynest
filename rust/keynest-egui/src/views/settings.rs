@@ -66,6 +66,10 @@ pub struct SettingsState {
     /// 正在改名的分类：(原名, 新名缓冲)
     pub renaming: Option<(String, String)>,
     pub draft: Settings,
+    /// 打开设置页时库里的设置。用来判断「改了但还没保存」。
+    pub orig: Settings,
+    /// 用户在有未保存改动时点了关闭 —— 现在等他确认。
+    pub confirm_discard: bool,
     pub old_pw: Zeroizing<String>,
     pub new_pw: Zeroizing<String>,
     pub new_pw2: Zeroizing<String>,
@@ -143,6 +147,24 @@ pub struct SettingsContext {
 }
 
 impl SettingsState {
+    /// 用户改了设置但还没保存吗？
+    ///
+    /// # 为什么需要
+    ///
+    /// 设置页的改动只在点「保存设置」时落盘。用户把自动锁定
+    /// 从 60 分钟改成 5 分钟（**更安全**的方向），以为改好了，
+    /// 直接点右上角关窗——程序仍然 60 分钟才锁，而他没有得到任何提示。
+    ///
+    /// 所以关窗时要问一句。
+    pub fn is_dirty(&self) -> bool {
+        self.draft != self.orig
+    }
+
+    /// 保存成功后调用：把当前草稿变成新的「原始值」，脏标记随之清除。
+    pub fn mark_saved(&mut self) {
+        self.orig = self.draft.clone();
+    }
+
     pub fn new(settings: &Settings, ctx: SettingsContext) -> Self {
         Self {
             tab: Tab::default(),
@@ -153,6 +175,8 @@ impl SettingsState {
             renaming_type: None,
             renaming: None,
             draft: settings.clone(),
+            orig: settings.clone(),
+            confirm_discard: false,
             old_pw: Zeroizing::new(String::new()),
             new_pw: Zeroizing::new(String::new()),
             new_pw2: Zeroizing::new(String::new()),
@@ -211,6 +235,14 @@ pub enum SettingsIntent {
     DeleteType(String),
     /// 关掉设置并跳到「重复」筛选
     ShowReused,
+    /// 有未保存的改动时点了关闭 —— 请 `app.rs` 弹确认。
+    AskDiscard,
+    /// 确认框里点了「放弃改动」
+    DiscardConfirmed,
+    /// 确认框里点了「继续编辑」
+    CancelDiscard,
+    /// 确认框里点了「保存并关闭」
+    SaveAndClose,
     Close,
     Save,
     ChangeMaster,
@@ -258,6 +290,54 @@ fn slider_row(
             );
         });
     });
+}
+
+/// 把「改了哪几项」写成人话。
+///
+/// 只写「设置有改动」不够——用户需要知道**具体丢的是什么**，
+/// 才能判断值不值得回去保存。
+fn describe_dirty(orig: &Settings, draft: &Settings) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if orig.auto_lock_minutes != draft.auto_lock_minutes {
+        parts.push(format!(
+            "自动锁定 {} 分钟 → {} 分钟",
+            orig.auto_lock_minutes, draft.auto_lock_minutes
+        ));
+    }
+    if orig.clipboard_clear_seconds != draft.clipboard_clear_seconds {
+        parts.push(format!(
+            "剪贴板清理 {} 秒 → {} 秒",
+            orig.clipboard_clear_seconds, draft.clipboard_clear_seconds
+        ));
+    }
+    if orig.reveal_seconds != draft.reveal_seconds {
+        parts.push(format!(
+            "密码显示 {} 秒 → {} 秒",
+            orig.reveal_seconds, draft.reveal_seconds
+        ));
+    }
+    if orig.import_prompted != draft.import_prompted {
+        parts.push("导入提示开关".to_string());
+    }
+    if parts.is_empty() {
+        // 理论上不该到这里（dirty 才会显示）。留一个兜底而不是 panic。
+        "其他设置项".to_string()
+    } else {
+        parts.join("；")
+    }
+}
+
+/// 用户点了关闭时，要不要**拦住**并弹确认？
+///
+/// 抽成纯函数是为了能被测试直接验证：
+/// 「拦住了」这件事在界面上表现为「窗口没关」，
+/// 而 `open` 变量是 egui `Window` 的局部状态，
+/// 测试里没法直接把它置 false 来触发那条路径。
+///
+/// 参数取「是否脏」而不是 `&SettingsState`，
+/// 这样这条判定的**全部输入**都摆在明面上。
+fn should_block_close(is_dirty: bool, already_asking: bool) -> bool {
+    is_dirty && !already_asking
 }
 
 pub fn show(ctx: &egui::Context, st: &mut SettingsState) -> SettingsIntent {
@@ -326,10 +406,62 @@ pub fn show(ctx: &egui::Context, st: &mut SettingsState) -> SettingsIntent {
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(msg).size(12.0).color(p.success));
             }
+
+            // ---- 未保存改动的确认 ----
+            //
+            // 放在窗口内容里而不是弹独立 Modal：设置页本身就是一个窗口，
+            // 再叠一层会让「我在哪」变得混乱。这里用一块显眼的条带，
+            // 把改动点明了列出来。
+            if st.confirm_discard {
+                ui.add_space(10.0);
+                egui::Frame::new()
+                    .fill(p.surface_alt)
+                    .corner_radius(egui::CornerRadius::same(theme::R_SM))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("设置还没保存").size(12.5).color(p.warn));
+                        ui.add_space(4.0);
+                        ui.label(theme::caption(format!(
+                            "改动会丢失：{}",
+                            describe_dirty(&st.orig, &st.draft)
+                        )));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            // 注意：`intent` 在这个闭包里是被捕获的**值**，
+                            // 不是 `&mut` —— 外层 `show()` 里的闭包各自持有自己的副本，
+                            // 所以这里直接赋值即可，不能解引用。
+                            if theme::primary_button(ui, "继续编辑", 96.0).clicked() {
+                                intent = SettingsIntent::CancelDiscard;
+                            }
+                            if theme::ghost_button(ui, "放弃改动并关闭").clicked() {
+                                intent = SettingsIntent::DiscardConfirmed;
+                            }
+                            if theme::ghost_button(ui, "保存并关闭").clicked() {
+                                // 先保存；保存成功后再关。
+                                // 直接复用 Save 意图会让 app.rs 保存后仍把窗口留着，
+                                // 所以这里给出一个明确的组合意图。
+                                intent = SettingsIntent::SaveAndClose;
+                            }
+                        });
+                    });
+            }
         });
 
     if !open && !st.closing && matches!(intent, SettingsIntent::None) {
-        st.closing = true;
+        // 有未保存的改动时**先问一句**再关。
+        //
+        // 设置页的改动只在点「保存设置」时落盘。用户把自动锁定
+        // 从 60 分钟改成 5 分钟（更安全的方向），以为改好了，
+        // 直接点右上角关窗——程序仍然 60 分钟才锁，而他没有得到任何提示。
+        //
+        // 与编辑框一致：那条路径已经有了 `pending_lock_confirm`。
+        if should_block_close(st.is_dirty(), st.confirm_discard) {
+            st.confirm_discard = true;
+            // 让窗口重新打开（本帧的 open 已经为 false）
+            st.closing = false;
+        } else {
+            st.closing = true;
+        }
     }
     if st.closing && t < 0.02 {
         return SettingsIntent::Closed;
@@ -919,5 +1051,145 @@ fn tab_danger(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut SettingsIn
                 *intent = SettingsIntent::CancelWipe;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keynest_core::vault::Settings;
+
+    fn ctx() -> SettingsContext {
+        SettingsContext {
+            categories: vec!["网站".into()],
+            types: vec![keynest_core::vault::TypeDef::new("账号", vec![])],
+            legacy: false,
+            kdf_algo: "argon2id".into(),
+            format: "v3".into(),
+            key_locked: Some(true),
+            kdf_ok: Some(true),
+            security: SecuritySummary {
+                total: 0,
+                weak: 0,
+                reused: 0,
+                with_totp: 0,
+                stale: 0,
+            },
+            leftovers: Vec::new(),
+            font_note: None,
+            dark: false,
+            bridge_installed: false,
+        }
+    }
+
+    fn base() -> Settings {
+        Settings {
+            auto_lock_minutes: 10,
+            clipboard_clear_seconds: 20,
+            reveal_seconds: 10,
+            import_prompted: false,
+        }
+    }
+
+    /// 关窗拦截的核心判定。
+    ///
+    /// # 为什么单独测这个
+    ///
+    /// 「拦住了」在界面上表现为「窗口没关」，而 `open` 是 egui `Window`
+    /// 的局部状态——测试里没法直接置 false 来触发那条路径。
+    /// 所以把判定抽成纯函数，把它的全部输入摆在明面上。
+    #[test]
+    fn close_is_blocked_only_when_there_are_unsaved_changes() {
+        // 没改动 → 直接关，不打扰
+        assert!(!should_block_close(false, false));
+        // 有改动 → 拦住，弹确认
+        assert!(should_block_close(true, false));
+        // 已经在问了 → 不要再拦（否则点了「放弃」还会被拦，出不去）
+        assert!(!should_block_close(true, true));
+        assert!(!should_block_close(false, true));
+    }
+
+    /// 刚打开时不该是「脏」的。
+    #[test]
+    fn fresh_state_is_not_dirty() {
+        let s = base();
+        let st = SettingsState::new(&s, ctx());
+        assert!(!st.is_dirty());
+    }
+
+    /// 改了自动锁定就要算脏。
+    ///
+    /// 这不是体验问题：把 60 分钟改成 5 分钟是**更安全**的方向，
+    /// 用户以为改好了、结果没保存就关窗，程序仍然 60 分钟才锁。
+    #[test]
+    fn changing_auto_lock_makes_it_dirty() {
+        let s = base();
+        let mut st = SettingsState::new(&s, ctx());
+        st.draft.auto_lock_minutes = 5;
+        assert!(st.is_dirty());
+    }
+
+    /// 改了又改回去，不该算脏。
+    #[test]
+    fn changing_back_to_the_original_is_not_dirty() {
+        let s = base();
+        let mut st = SettingsState::new(&s, ctx());
+        st.draft.auto_lock_minutes = 5;
+        st.draft.auto_lock_minutes = 10;
+        assert!(!st.is_dirty(), "改回原值仍被判为脏");
+    }
+
+    /// 保存成功后脏标记要清掉。
+    ///
+    /// 不清的话：保存完再点关闭，仍会被问「设置还没保存」——
+    /// 用户刚保存过，这提示会让他以为没生效。
+    #[test]
+    fn mark_saved_clears_the_dirty_flag() {
+        let s = base();
+        let mut st = SettingsState::new(&s, ctx());
+        st.draft.auto_lock_minutes = 5;
+        assert!(st.is_dirty());
+        st.mark_saved();
+        assert!(!st.is_dirty(), "保存后仍是脏的");
+        // 再改一次仍然要能检测到
+        st.draft.auto_lock_minutes = 7;
+        assert!(st.is_dirty());
+    }
+
+    /// 提示里要说清楚**具体丢的是什么**。
+    ///
+    /// 只写「设置有改动」不够：用户需要知道丢的是哪一项，
+    /// 才能判断值不值得回去保存。
+    #[test]
+    fn describe_dirty_names_the_changed_fields() {
+        let orig = base();
+        let mut draft = base();
+        draft.auto_lock_minutes = 5;
+        let text = describe_dirty(&orig, &draft);
+        assert!(text.contains("自动锁定"), "没提到自动锁定：{text}");
+        assert!(text.contains("10"), "没显示原值：{text}");
+        assert!(text.contains("5"), "没显示新值：{text}");
+        // 没改的项不该出现
+        assert!(!text.contains("剪贴板"), "提到了没改的项：{text}");
+    }
+
+    #[test]
+    fn describe_dirty_lists_multiple_changes() {
+        let orig = base();
+        let mut draft = base();
+        draft.auto_lock_minutes = 5;
+        draft.clipboard_clear_seconds = 10;
+        draft.reveal_seconds = 5;
+        let text = describe_dirty(&orig, &draft);
+        assert!(text.contains("自动锁定"));
+        assert!(text.contains("剪贴板"));
+        assert!(text.contains("密码显示"));
+    }
+
+    /// 三项都没改时不能返回空字符串（界面上会显示「改动会丢失：」后面什么都没有）。
+    #[test]
+    fn describe_dirty_never_returns_an_empty_string() {
+        let s = base();
+        assert!(!describe_dirty(&s, &s).is_empty());
     }
 }
