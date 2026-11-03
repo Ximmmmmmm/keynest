@@ -479,6 +479,89 @@ for (const rel of ['.github/workflows/ci.yml', '.github/workflows/release.yml'])
 }
 
 /* ------------------------------------------------------------------ */
+/* 4d) 发布流程的两份文件清单必须互相覆盖                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `release.yml` 里有两处会列出「发布包里有哪些文件」：
+ *
+ * 1. `sha256sum ...` —— 给它算哈希的文件
+ * 2. 敏感文件检查的 `grep -vE '^(...)$'` 白名单
+ *
+ * 两处**必须覆盖同一批文件**。第一处有、第二处没有，那第二个检查会把
+ * 刚算过哈希的文件判成「预期之外」并 exit 1。
+ *
+ * 实际发生过：白名单漏了 `keynest-native-host.exe` 与
+ * `KeyNest-Extension-*.zip`，而前一步刚给它们算过哈希——
+ * **发布永远会在这里失败**。这个作业从没真正跑过，所以一直没暴露。
+ *
+ * 实现上刻意只用字符串切分，不写复杂正则——
+ * 这个文件里已经被转义问题坑过两次了。
+ */
+{
+  const yml = read('.github/workflows/release.yml');
+  if (yml !== null) {
+    // ---- (a) sha256sum 之后、以反斜杠续行的那些文件名 ----
+    const idx = yml.indexOf('sha256sum KeyNest.exe');
+    const hashed = [];
+    if (idx !== -1) {
+      // 取到这一条命令结束（第一个不以反斜杠结尾的行）
+      const rest = yml.slice(idx + 'sha256sum'.length);
+      const cmdLines = [];
+      for (const raw of rest.split('\n')) {
+        const t = raw.trim();
+        cmdLines.push(t.replace(/\\$/, ''));
+        if (!t.endsWith('\\')) break;
+      }
+      for (const tok of cmdLines.join(' ').split(/[ \s]+/)) {
+        if (!tok || tok === '>') continue;
+        if (tok.includes('SHA256SUMS')) break;
+        hashed.push(tok);
+      }
+    }
+
+    // ---- (b) 敏感文件检查白名单 ----
+    const gIdx = yml.indexOf("grep -vE '^(");
+    let allowed = [];
+    if (gIdx !== -1) {
+      const tail = yml.slice(gIdx + "grep -vE '^(".length);
+      const close = tail.indexOf(')$' + "'");
+      if (close !== -1) {
+        allowed = tail
+          .slice(0, close)
+          .split('|')
+          .map((x) => x.replace(/\\/g, ''))
+          .filter(Boolean);
+      }
+    }
+
+    // ---- 比对（glob 用前缀） ----
+    const covered = (name) => {
+      if (name.includes('*')) {
+        const prefix = name.split('*')[0];
+        return allowed.some((x) => x.startsWith(prefix));
+      }
+      return allowed.includes(name);
+    };
+
+    if (hashed.length === 0 || allowed.length === 0) {
+      fail('release.yml 里找不到 sha256sum 列表或敏感文件检查白名单');
+    } else {
+      const missing = hashed.filter((h) => !covered(h));
+      if (missing.length) {
+        fail(
+          '发布包文件清单不一致（算过哈希但被敏感检查判为"预期之外"，发布必失败）',
+          missing.join(', '),
+        );
+      } else {
+        ok('发布包的两份文件清单互相覆盖', `${hashed.length} 个`);
+      }
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
 /* 4e) workflow 里的 action 必须 pin 到完整 SHA                          */
 /* ------------------------------------------------------------------ */
 

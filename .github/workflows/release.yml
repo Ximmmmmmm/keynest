@@ -327,7 +327,15 @@ jobs:
           set -euo pipefail
           ls -la
           # 发布包里只允许这些文件，多一个都要停下来看
-          BAD=$(ls | grep -vE '^(KeyNest\.exe|README\.md|README_EN\.md|SECURITY\.md|LICENSE-MIT|LICENSE-APACHE|INSTALL\.txt|SHA256SUMS)$' || true)
+          # 白名单必须与实际发布内容一致。
+          #
+          # 原来漏了 keynest-native-host.exe 与 KeyNest-Extension-*.zip——
+          # 而前一步刚用 sha256sum 给这两个文件算过哈希。
+          # 也就是说：**发布永远会在这里 exit 1**，
+          # 报「发布包里出现了预期之外的文件」。
+          #
+          # 这个作业从没真正跑过（CI 之前连 YAML 都不合法），所以一直没暴露。
+          BAD=$(ls | grep -vE '^(KeyNest\.exe|keynest-native-host\.exe|KeyNest-Extension-.*\.zip|README\.md|README_EN\.md|SECURITY\.md|LICENSE-MIT|LICENSE-APACHE|INSTALL\.txt|SHA256SUMS)$' || true)
           if [ -n "$BAD" ]; then
             echo "::error::发布包里出现了预期之外的文件: $BAD"
             exit 1
