@@ -108,3 +108,79 @@ export function autoApplyModules(registry) {
     .filter((e) => e.raw && e.raw.autoApply)
     .map((e) => e.id);
 }
+
+
+/**
+ * 注入到**主世界**的 URL 观察器。
+ *
+ * # 为什么必须是主世界
+ *
+ * 内容脚本跑在隔离世界，看到的是一份独立的 `window` 与 `history`。
+ * 页面自己的脚本跑在主世界，调的是主世界的 `history.pushState` ——
+ * 隔离世界给 history 打的补丁**根本不会被触发**。
+ *
+ * 这正是「SPA 换路由后不重新应用」的真正原因（阶段 3.6 漏掉的一环）：
+ * 补丁装上了、页面也真的换了路由，但两者之间没有连接。
+ *
+ * # 为什么用 `func` 而不是 `files`
+ *
+ * `executeScript({files})` 没法传参，而这个观察器需要一个 token
+ * （用来识别"这条消息是我们发的"，避免网页自己伪造 postMessage）。
+ * `func` 可以带 `args`。
+ *
+ * 另外 `files` 注入要求文件在 `web_accessible_resources` 里，
+ * 那等于把这个文件暴露给任意网页——不想为此扩大攻击面。
+ *
+ * # 函数必须完全自包含
+ *
+ * 注入的函数会被单独序列化，**不能引用任何外部变量**。
+ *
+ * @param {{token:string}} args
+ */
+export function mainWorldUrlWatcher(args) {
+  const token = args && args.token;
+  if (!token) return { ok: false, error: 'NO_TOKEN' };
+  if (window.__keynestUrlWatcher) return { ok: true, already: true };
+
+  const CHANNEL = '__keynestUrlWatch';
+  const notify = () => {
+    try {
+      window.postMessage({ [CHANNEL]: token, url: location.href }, '*');
+    } catch {
+      /* 页面可能正在卸载 */
+    }
+  };
+
+  let patched = 0;
+  for (const name of ['pushState', 'replaceState']) {
+    try {
+      const original = history[name];
+      if (typeof original !== 'function') continue;
+      // 已经打过补丁就别再套一层：一次导航会触发多次回调
+      if (original.__keynestPatched) {
+        patched += 1;
+        continue;
+      }
+      const wrapper = function patchedState(...args) {
+        const out = original.apply(this, args);
+        notify();
+        return out;
+      };
+      wrapper.__keynestPatched = true;
+      history[name] = wrapper;
+      patched += 1;
+    } catch {
+      // 属性只读 / 被冻结：跳过这一个，另一个仍然尝试
+    }
+  }
+
+  try {
+    window.addEventListener('popstate', notify);
+    window.addEventListener('hashchange', notify);
+  } catch {
+    /* 忽略 */
+  }
+
+  window.__keynestUrlWatcher = true;
+  return { ok: true, patched };
+}

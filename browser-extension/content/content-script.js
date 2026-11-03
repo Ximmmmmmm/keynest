@@ -229,6 +229,39 @@
   /* ------------------------------------------------------------------ */
 
   /**
+   * 主世界观察器的 token。
+   *
+   * 由 SW 注入主世界时生成并回传。内容脚本用它识别"这条 postMessage
+   * 是我们发的"——网页自己也能 postMessage，不能让它冒充。
+   *
+   * 拿不到（没权限、SW 未就绪）时保持 null，此时只监听 popstate/hashchange，
+   * SPA 支持退化为不生效，但不影响其它功能。
+   */
+  let urlWatchToken = null;
+
+  /**
+   * 让 SW 往主世界注入 URL 观察器。
+   *
+   * 这一步是 SPA 支持的关键：主世界才能看到页面脚本调的 pushState。
+   */
+  function requestUrlWatcher() {
+    try {
+      chrome.runtime
+        .sendMessage({ type: 'url-watch.install' })
+        .then((res) => {
+          if (res && res.ok && res.token) {
+            urlWatchToken = res.token;
+          }
+        })
+        .catch(() => {
+          /* 扩展重载 / SW 未就绪：忽略 */
+        });
+    } catch {
+      /* 同上 */
+    }
+  }
+
+  /**
    * SPA 换页不重新加载文档，`load` 只触发一次，于是自动应用也只在第一次生效。
    *
    * 用户的实际经历：在列表页开了夜间模式，点进一篇文章——页面变回亮色。
@@ -254,9 +287,41 @@
       }, 250);
     };
 
+    // 接收**主世界**发来的「URL 变了」通知。
+    //
+    // 主世界是页面脚本所在的世界，它调 history.pushState 时我们才知道。
+    // 隔离世界给 history 打补丁是**没用的**——页面根本不走那份副本。
+    //
+    // token 由 SW 注入主世界时生成并回传，这里只认带对 token 的消息，
+    // 免得网页自己伪造 postMessage 让扩展反复刷新。
+    window.addEventListener('message', (ev) => {
+      if (ev.source !== window) return;
+      const d = ev.data;
+      if (!d || d.__keynestUrlWatch !== urlWatchToken) return;
+      schedule();
+    });
+
     try {
       window.addEventListener('popstate', schedule);
       window.addEventListener('hashchange', schedule);
+
+      // # 主世界的 history 也得盯着
+      //
+      // 内容脚本跑在**隔离世界**，它看到的是一份独立的 window 与 history。
+      // 页面自己的脚本跑在**主世界**，调的是主世界的 history.pushState ——
+      // 我们在这里给隔离世界的 history 打补丁，**它根本不会经过**。
+      //
+      // 这就是"SPA 换路由后不重新应用"的真正原因（阶段 3.6 漏掉的一环）：
+      // 补丁装上了（`__keynestPatched` 为 true），页面也真的换了路由，
+      // 但两者之间没有连接。
+      //
+      // 解决办法：往主世界注入一个极小的观察器，用 postMessage 把
+      // "URL 变了"告诉隔离世界。主世界注入需要把脚本文件列进
+      // `web_accessible_resources` —— 那会让任何网页都能引用它。
+      //
+      // 所以这里用一个**内联**的注入脚本，不新增任何可访问资源：
+      // 由 SW 通过 `chrome.scripting.executeScript({world:'MAIN'})` 注入。
+      // 拿不到 scripting 权限时静默跳过——SPA 支持是增强，不是必需。
 
       // 打补丁：框架用的是 history API，不会触发上面两个事件。
       // 语义与 lib/spa-router.js 的 patchHistory 一致——
@@ -292,6 +357,7 @@
 
   try {
     watchRouteChanges();
+    requestUrlWatcher();
   } catch {
     /* 同上：失败只是失去 SPA 支持，不影响首次应用 */
   }

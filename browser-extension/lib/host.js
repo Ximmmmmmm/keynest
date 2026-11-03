@@ -21,7 +21,7 @@
 import { ConfigCenter } from './config.js';
 import { ModuleRegistry } from './modules.js';
 import { pickStore } from './storage.js';
-import { applyAuto } from './auto-apply.js';
+import { applyAuto, mainWorldUrlWatcher } from './auto-apply.js';
 import { createVaultModule, HOST_NAME, PROTOCOL_VERSION } from './modules/vault.js';
 import { createModulesModule } from './modules/registry.js';
 import { createAdblockModule } from './modules/adblock.js';
@@ -295,6 +295,19 @@ export async function createHost(chromeImpl, opts = {}) {
     }
 
     const ctx = { sender, kind };
+
+    // 内容脚本请求往**主世界**注入 URL 观察器。
+    //
+    // 为什么要主世界：内容脚本在隔离世界，看到的是一份独立的 history，
+    // 页面脚本调的是主世界的 history.pushState——两者不相通。
+    // 隔离世界给 history 打补丁是**无效**的。
+    if (msg.type === 'url-watch.install') {
+      installUrlWatcher(msg, sender)
+        .then(sendResponse)
+        .catch(() => sendResponse({ ok: false, error: 'URL_WATCH_FAILED' }));
+      return true;
+    }
+
     if (msg.type === 'auto.apply') {
       handleAutoApply(msg, sender)
         .then(sendResponse)
@@ -325,6 +338,36 @@ export async function createHost(chromeImpl, opts = {}) {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * 往主世界注入 URL 观察器，返回它的 token。
+   *
+   * token 每次生成一个：内容脚本用它识别"这条 postMessage 是我们发的"。
+   * 网页自己也能 postMessage，没有 token 就会被冒充。
+   */
+  async function installUrlWatcher(msg, sender) {
+    const tabId = sender && sender.tab ? sender.tab.id : null;
+    if (!Number.isInteger(tabId)) return { ok: false, error: 'NO_TAB' };
+    if (!chromeImpl.scripting) return { ok: false, error: 'NO_SCRIPTING' };
+
+    const token = crypto.randomUUID
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    try {
+      await chromeImpl.scripting.executeScript({
+        target: { tabId, frameIds: [0] },
+        world: 'MAIN',
+        func: mainWorldUrlWatcher,
+        args: [{ token }],
+      });
+    } catch (e) {
+      // 没权限、页面不允许注入等：静默失败即可——
+      // SPA 支持是增强，不是必需功能。
+      return { ok: false, error: 'INJECT_FAILED' };
+    }
+    return { ok: true, token };
   }
 
   /**
@@ -385,6 +428,8 @@ export const KIND_REQUIREMENT = Object.freeze({
   status: 'any',
   // 页面加载后的自动应用：只接受内容脚本（网页自己不能要求被注入样式）
   'auto.apply': 'content',
+  // 主世界观察器：只接受内容脚本的请求（网页自己不能要求注入）
+  'url-watch.install': 'content',
   // 设置页自己读模块清单（不含任何密码或密钥）
   'modules.list': 'popup',
   'modules.set-enabled': 'popup',

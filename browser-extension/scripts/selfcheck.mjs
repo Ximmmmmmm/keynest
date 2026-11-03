@@ -133,8 +133,12 @@ async function main() {
   for (const entry of registry.entries()) {
     for (const h of entry.raw.handlers || []) registered.add(h.type);
   }
-  // auto.apply 不是模块 handler，是宿主自己处理的，单独放行
-  const HOST_HANDLED = new Set(['auto.apply']);
+  // 这些不是模块 handler，是宿主自己处理的，单独放行。
+  //
+  // 它们的共同点：需要在**模块体系之外**动手——
+  //   auto.apply         遍历模块决定要不要注入
+  //   url-watch.install  往主世界注入 URL 观察器（与模块无关）
+  const HOST_HANDLED = new Set(['auto.apply', 'url-watch.install']);
   const orphans = declared.filter((t) => !registered.has(t) && !HOST_HANDLED.has(t));
   check(
     '门禁表里没有指向不存在 handler 的条目',

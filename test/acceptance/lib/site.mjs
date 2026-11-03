@@ -42,6 +42,26 @@ function pageOther() {
 }
 
 /**
+ * 单页应用风格���页面：3 秒后调一次 `history.pushState`。
+ *
+ * 用来验「SPA 换路由后要重新应用站点偏好」——
+ * SPA 换页不重新加载文档，只靠 `load` 事件的方案在这里会失效。
+ */
+function pageSpa() {
+  return PAGE(
+    'Site A SPA',
+    `<p id="marker">site-a-spa</p>
+     <script>
+       // 模拟框架内部跳转：pushState 不触发 popstate
+       setTimeout(function () {
+         history.pushState({}, '', '/spa/next');
+         document.getElementById('marker').textContent = 'site-a-spa-after-push';
+       }, 2500);
+     <\/script>`,
+  );
+}
+
+/**
  * 文章页：阅读模式的验收页面。
  *
  * 刻意做成"像真实文章页"的结构——导航 + 正文 + 侧栏 + 页脚。
@@ -99,12 +119,12 @@ export async function startSites({ certDir, portA, portB }) {
       res.end(PAGE('Same-origin iframe', LOGIN_FORM));
       return;
     }
-    if (p === '/spa') {
-      res.end(pageA());
-      return;
-    }
     if (p === '/article') {
       res.end(pageArticle());
+      return;
+    }
+    if (p === '/spa' || p.startsWith('/spa/')) {
+      res.end(pageSpa());
       return;
     }
     res.end(pageA());
