@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 10:30 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`67bf0e5`
+> 最后更新：2026-11-03 10:50 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`9fb4602`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **274** | `cd rust && cargo test --workspace` |
+| Rust | **279** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **453** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -50,6 +50,8 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `bb9a89a` | `Entry::drop` 漏清 TOTP 密钥与自定义字段（TOTP 泄漏=二次验证失效） | P1 安全 |
 | `3cd6721` | 复用密码统计是 O(n²)，5000 条时每帧 2500 万次比较 | P2 性能 |
 | `67bf0e5` | TOTP 复制 TTL 被 `.max(3)` 拉长，剪贴板留过期码 | P1 安全 |
+| `f23b442` | 恢复留档（`vault.dat.corrupt-*`）界面完全不可见、无法清理 | P2 可用性 |
+| `9fb4602` | 恢复失败时还原失败被 `let _ =` 吞掉，用户不知道数据在哪 | P1 数据可发现性 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
@@ -98,7 +100,7 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | --- | --- |
 | SPA 路由变化 | 自动应用只在页面加载时跑一次，`pushState` 不会重新触发 |
 | 阅读模式的「只关这一次」 | 用户手动关掉会同时清掉站点名单，没有临时关闭的概念 |
-| `.corrupt-*` 无上限展示 | `wipe()` 会清，但设置页没有「清理留档文件」入口 |
+| ~~`.corrupt-*` 无清理入口~~ | 已在 `f23b442` 解决：设置页可列出并清空（带二次确认） |
 | `random_index` 的取值区间 | 当前实现拒绝 `v >= zone`，比理论必要略保守（不影响安全，仅效率） |
 
 ### P3：产品化欠缺
