@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 12:40 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`01188e5`
+> 最后更新：2026-11-03 13:10 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`5750aa3`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,9 +17,9 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **309** | `cd rust && cargo test --workspace` |
+| Rust | **312** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
-| 扩展单元 | **480** | `cd browser-extension && node --test tests/*.test.js` |
+| 扩展单元 | **491** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
 | 真实 Chrome 验收 | **46** | `node test/acceptance/run.mjs`（需启动浏览器） |
 
@@ -74,6 +74,9 @@ Rust workspace 根是 `rust/`；Windows 上需要
 | `518121f` | **产品从未注册 native messaging host**（扩展永远连不上） | **P1 产品级** |
 | `cf76106` | 扩展不显示自己的 ID（用户无法配置桥接） | P1 可用性 |
 | `1d8afef` | 设置里没有浏览器桥接入口 | P1 可用性 |
+| `07b9800` | 桥接安装缺端到端测试（各步拼起来对不对没人验） | P2 测试 |
+| `08aeea8` | 扩展分不清「宿主没装」与「桌面程序没跑」 | P1 可用性 |
+| `e3159bb` | 让宿主主动报告连不上的原因（启动消息机制） | P1 可用性 |
 
 对应的回归测试名可直接 `cargo test <名字>`：
 
