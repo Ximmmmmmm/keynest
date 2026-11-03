@@ -1,7 +1,7 @@
 # KeyNest 续接文档（CONTINUATION）
 
-> 最后更新：2026-11-03 18:40 (+08:00)
-> 分支：`feat/browser-bridge` · HEAD：`175146b`
+> 最后更新：2026-11-03 19:15 (+08:00)
+> 分支：`feat/browser-bridge` · HEAD：`3b6c507`
 > main `09b870d` 未动 · Tag `v0.4.3`（`d27c0fd`）未动
 
 ---
@@ -17,7 +17,7 @@
 
 | 层 | 数量 | 命令 |
 | --- | --- | --- |
-| Rust | **363** | `cd rust && cargo test --workspace` |
+| Rust | **366** | `cd rust && cargo test --workspace` |
 | Rust 格式/静态 | 0 问题 | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | 扩展单元 | **494** | `cd browser-extension && node --test tests/*.test.js` |
 | 扩展装配自检 | **14** | `cd browser-extension && node scripts/selfcheck.mjs` |
@@ -319,6 +319,22 @@ clippy 失败（`let mut` 但没修改）。
 本次按这个方法又找到两处（ShowWeak/ShowReused 绕过检查、重新载入无提示），
 其余各点（锁定、清库、整库替换）丢弃界面状态是正确的——
 库本身已经变了，残留草稿没有意义。
+
+## 9e. 一条教训：**只藏 UI 不关逻辑 = 看不见的按钮**
+
+回收站那次的修法分两步，第一步**不够**：
+
+1. 隐藏图标（`show_actions && !in_trash`）
+2. 关闭点击判定（`in_trash` 时整行只选中）
+
+只做第 1 步时，图标不画了、`resp.clicked()` 的 x 判定还在——
+用户点到一片空白，密码照样进剪贴板。**比原来更糟**：
+原来至少看得见按钮，知道自己在点什么。
+
+是注入指针事件的无头测试逼出了第 2 步。只读代码写「我把图标藏了」，
+这个漏洞会原样留着。
+
+**规则：把某个交互从界面上拿掉时，同时把它的判定路径也关掉。**
 
 ## 10. 审查方法记录（下一轮可复用）
 
