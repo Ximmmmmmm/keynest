@@ -78,6 +78,32 @@ li:hover { border-color: var(--accent); }
 li .title { font-weight: 600; }
 li .user { color: var(--muted); font-size: 12px; }
 
+/* 「已记住的站点」列表：一行里左边是域名，右边是「移除」。 */
+li:has(> button.ghost) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: default;
+}
+
+li:has(> button.ghost):hover { border-color: var(--line); }
+
+li:has(> button.ghost) .title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  font-size: 12px;
+}
+
+li:has(> button.ghost) button.ghost {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
 footer {
   display: flex;
   align-items: center;

@@ -205,12 +205,24 @@ export function createDarkModule(deps) {
 
           // 按站点记忆：只有注入成功才写名单。
           // 注入失败还记成"已开启"，下次页面加载会自动尝试、又失败——用户看到的是"开关自己跳"。
+          //
+          // # 关闭分两种，不能混为一谈
+          //
+          // `forget: true`（站点列表里的「不再自动」）——真的从名单里移除；
+          // 否则（在页面上点「关闭夜间模式」）——**只本次关闭，保留记忆**。
+          //
+          // 原来无论哪种都会 `mem.disable(host)`，于是用户想看一眼原始页面，
+          // 就把这个站点的记忆一起删了：下次还得重新点开，
+          // 而他并不知道刚才顺手删掉了什么。
+          //
+          // 阅读模式（reader.toggle）已经是这个语义，这里对齐。
           if (ctx.config.get('remember')) {
             const host = hostOf(msg.host) || (await hostOfTab(deps, tabId));
             if (host) {
               const mem = createSiteMemory(ctx.config, 'dark');
               if (action === 'install') await mem.enable(host);
-              else await mem.disable(host);
+              else if (msg.forget === true) await mem.disable(host);
+              // 否则只是本次退出：名单保持不动
             }
           }
 
@@ -230,6 +242,23 @@ export function createDarkModule(deps) {
       {
         type: 'dark.sites',
         handle: (msg, ctx) => ({ ok: true, list: createSiteMemory(ctx.config, 'dark').list() }),
+      },
+      {
+        /**
+         * 从名单里移除某个站点（不再对它自动应用）。
+         *
+         * 与 `dark.toggle` 的 `forget: true` 是同一件事，但不需要一个打开着的
+         * 标签页——站点列表里点「移除」时，页面可能根本不在这个站点。
+         */
+        type: 'dark.forget',
+        handle: async (msg, ctx) => {
+          const host = hostOf(msg.host);
+          if (!host) return { ok: false, error: 'BAD_ARGS' };
+          const mem = createSiteMemory(ctx.config, 'dark');
+          const had = mem.has(host);
+          await mem.disable(host);
+          return { ok: true, removed: had, list: mem.list() };
+        },
       },
       {
         type: 'dark.query',

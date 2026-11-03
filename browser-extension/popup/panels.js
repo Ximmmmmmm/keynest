@@ -180,6 +180,83 @@ export function createBridgePanel() {
   return BRIDGE_PANEL;
 }
 
+/**
+ * 「已记住的站点」面板：夜间模式对哪些站点自动生效。
+ *
+ * # 为什么需要
+ *
+ * 用户在好几个站点开了夜间模式之后，**想不起来在哪些站点开了**——
+ * popup 只显示当前站点，没有地方能看到全部，也没法关掉其中一个。
+ *
+ * 而 `dark.sites` 这个消息早就存在（门禁表里也有），只是**从来没被用过**。
+ *
+ * # 用途
+ *
+ * 列出全部被记住的站点，每个后面一个「移除」按钮。
+ * 移除 = 从名单里删掉，以后不再对它自动应用（`dark.forget`）。
+ */
+const DARK_SITES_PANEL = {
+  id: 'dark-sites',
+  // 不声明 moduleId：它依附于夜间模式模块，本身不是独立功能。
+  order: 17,
+  async render(host) {
+    const res = await host.send('dark.sites');
+    if (!res || !res.ok || !Array.isArray(res.list)) return;
+    const sites = res.list.slice().sort();
+    if (sites.length === 0) return;
+
+    const head = document.createElement('div');
+    head.className = 'panel-head';
+    const title = document.createElement('span');
+    title.className = 'panel-title';
+    title.textContent = '已记住的站点';
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = String(sites.length);
+    head.append(title, badge);
+    host.section.append(head);
+
+    host.el('p', 'panel-host', '这些站点打开时会自动应用夜间模式');
+
+    const list = document.createElement('ul');
+    list.className = 'entries';
+
+    for (const site of sites) {
+      const li = document.createElement('li');
+      const name = document.createElement('span');
+      name.className = 'title';
+      name.textContent = site;
+
+      const rm = document.createElement('button');
+      rm.className = 'ghost';
+      rm.textContent = '移除';
+      rm.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        rm.disabled = true;
+        const out = await host.send('dark.forget', { host: site });
+        rm.disabled = false;
+        if (!out || !out.ok) {
+          host.error(`移除失败：${(out && out.error) || '未知错误'}`);
+          return;
+        }
+        host.error(null);
+        host.section.replaceChildren();
+        await panel.render(host);
+      });
+
+      li.append(name, rm);
+      list.append(li);
+    }
+
+    host.section.append(list);
+  },
+};
+
+/** 创建「已记住的站点」面板。 */
+export function createDarkSitesPanel() {
+  return DARK_SITES_PANEL;
+}
+
 const FILL_ERRORS = {
   HTTP_NOT_ALLOWED: '该页面不是 HTTPS，已按策略禁止填充。',
   NO_ORIGIN: '这个页面没有可用的网址。',

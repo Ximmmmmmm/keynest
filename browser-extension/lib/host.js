@@ -486,5 +486,7 @@ export const KIND_REQUIREMENT = Object.freeze({
   'dark.toggle': 'popup',
   'dark.query': 'popup',
   'dark.should-apply': 'popup',
+  // 站点列表里的「不再自动」：只有扩展页面能改名单
+  'dark.forget': 'popup',
   'dark.sites': 'popup',
 });

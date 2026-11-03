@@ -431,13 +431,52 @@ test('PASS: 开启后把站点写进名单', async () => {
   assert.deepEqual(JSON.parse(store.darkSites), ['a.test']);
 });
 
-test('PASS: 关闭后从名单移除', async () => {
+test('PASS: 关闭只是本次退出，**保留**站点记忆', async () => {
+  // 用户在页面上点「关闭夜间模式」，往往只是想看一眼原始页面。
+  // 顺手把这个站点的记忆也删掉的话，下次还得重新点开，
+  // 而他并不知道刚才删掉了什么。
+  //
+  // 与阅读模式（reader.toggle）已经是这个语义，这里对齐。
   const { ctx, store } = memCtx({ darkSites: '["a.test"]' });
   const m = createDarkModule(memDeps({ ok: true, removed: true }));
   const h = m.handlers.find((x) => x.type === 'dark.toggle');
 
   await h.handle({ tabId: 1, action: 'uninstall', host: 'a.test' }, ctx);
+  assert.deepEqual(
+    JSON.parse(store.darkSites),
+    ['a.test'],
+    '本次退出不该删掉站点记忆'
+  );
+});
+
+test('PASS: forget:true 才移除站点记忆', async () => {
+  const { ctx, store } = memCtx({ darkSites: '["a.test"]' });
+  const m = createDarkModule(memDeps({ ok: true, removed: true }));
+  const h = m.handlers.find((x) => x.type === 'dark.toggle');
+
+  await h.handle({ tabId: 1, action: 'uninstall', host: 'a.test', forget: true }, ctx);
   assert.deepEqual(JSON.parse(store.darkSites), []);
+});
+
+test('PASS: dark.forget 从名单里移除指定站点', async () => {
+  const { ctx, store } = memCtx({ darkSites: '["a.test","b.test"]' });
+  const m = createDarkModule(memDeps({ ok: true }));
+  const h = m.handlers.find((x) => x.type === 'dark.forget');
+
+  const res = await h.handle({ host: 'a.test' }, ctx);
+  assert.equal(res.ok, true);
+  assert.equal(res.removed, true);
+  assert.deepEqual(JSON.parse(store.darkSites), ['b.test']);
+});
+
+test('FAIL-SAFE: dark.forget 缺 host 时拒绝', async () => {
+  const { ctx } = memCtx({ darkSites: '["a.test"]' });
+  const m = createDarkModule(memDeps({ ok: true }));
+  const h = m.handlers.find((x) => x.type === 'dark.forget');
+
+  const res = await h.handle({}, ctx);
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'BAD_ARGS');
 });
 
 test('FAIL-SAFE: 注入失败时不写名单（否则开关会自己跳）', async () => {
