@@ -1261,6 +1261,7 @@ impl App {
                 if let Some(st) = self.settings.as_mut() {
                     st.error = Some(e.to_string());
                     st.notice = None;
+                    st.changing_master = false;
                 }
             }
         }
@@ -1284,14 +1285,28 @@ impl App {
             return;
         }
 
+        // 防重入：Argon2id 要在 UI 线程上派生两次（旧 KEK + 新 KEK），
+        // 160–400ms 的冻结是真实的。没有这道闸，用户会反复点按钮，
+        // 排队多次 change_master——第二次因旧密码已变而失败，
+        // 于是看到一个莫名其妙的错误。
+        if st.changing_master {
+            return;
+        }
+
         let old = st.old_pw.clone();
         let new = st.new_pw.clone();
+        st.changing_master = true;
+        // 让"正在修改…"先画出来再开始阻塞，否则用户看到的仍是冻结
+        self.repaint_fast = true;
 
         let AppState::Unlocked { vault, .. } = &mut self.state else {
+            if let Some(st) = self.settings.as_mut() {
+                st.changing_master = false;
+            }
             return;
         };
 
-        // 注意：这里会在 UI 线程阻塞约 100–300ms（Argon2id 两次派生）
+        // 注意：这里会在 UI 线程阻塞约 160–400ms（Argon2id 两次派生）
         match vault.change_master(old.as_str(), new.as_str()) {
             Ok(()) => {
                 if let Some(st) = self.settings.as_mut() {
@@ -1300,6 +1315,7 @@ impl App {
                     st.new_pw2 = Zeroizing::new(String::new());
                     st.error = None;
                     st.notice = Some("主密码已修改".into());
+                    st.changing_master = false;
                 }
                 self.set_toast("主密码已修改");
             }
@@ -1307,6 +1323,7 @@ impl App {
                 if let Some(st) = self.settings.as_mut() {
                     st.error = Some(e.to_string());
                     st.notice = None;
+                    st.changing_master = false;
                 }
             }
         }
@@ -1316,9 +1333,19 @@ impl App {
         let Some(st) = self.settings.as_mut() else {
             return;
         };
+        // 与改主密码同样的理由：这次要派生 KEK + 重写整个库，
+        // 阻塞比 change_master 更久。没有闸门就会排队多次升级。
+        if st.upgrading {
+            return;
+        }
         let pw = st.upgrade_pw.clone();
+        st.upgrading = true;
+        self.repaint_fast = true;
 
         let AppState::Unlocked { vault, .. } = &mut self.state else {
+            if let Some(st) = self.settings.as_mut() {
+                st.upgrading = false;
+            }
             return;
         };
 
@@ -1332,6 +1359,7 @@ impl App {
                     st.upgrade_pw = Zeroizing::new(String::new());
                     st.error = None;
                     st.notice = Some("已升级到 v3 格式".into());
+                    st.upgrading = false;
                 }
                 self.set_toast("已升级到 v3 格式");
             }
@@ -1339,6 +1367,9 @@ impl App {
                 if let Some(st) = self.settings.as_mut() {
                     st.error = Some(e.to_string());
                     st.notice = None;
+                    // 注意是 upgrading 不是 changing_master——
+                    // 这两个标志属于不同的流程，写错会让另一个按钮永久变灰。
+                    st.upgrading = false;
                 }
             }
         }
@@ -2454,6 +2485,32 @@ mod tests {
         let sys = Duration::from_secs(60);
         assert_eq!(idle_since(app, sys), Duration::from_secs(60));
         assert_eq!(idle_since(sys, app), Duration::from_secs(60));
+    }
+
+    /// 长阻塞操作的重入闸必须能独立开关。
+    ///
+    /// 改主密码与升级格式都会在 UI 线程上跑 Argon2id（160–400ms）。
+    /// 没有闸门时用户会反复点，排队多次操作——第二次因为旧密码/旧格式
+    /// 已经变了而失败，用户看到一个莫名其妙的错误。
+    ///
+    /// 这条测的是**两个标志互不干扰**：修的过程中真的把它写错过一次
+    /// （升级的错误分支里清了 `changing_master`），后果是另一个按钮
+    /// 永久变灰，而升级那个反而一直可点。
+    #[test]
+    fn busy_flags_are_independent() {
+        let mut st = SettingsState::new(
+            &keynest_core::vault::Settings::default(),
+            crate::views::settings::SettingsContext::default(),
+        );
+
+        st.changing_master = true;
+        assert!(!st.upgrading, "清一个不该影响另一个");
+
+        st.upgrading = true;
+        assert!(st.changing_master, "两个可以同时为真");
+
+        st.changing_master = false;
+        assert!(st.upgrading, "清 changing_master 不该清 upgrading");
     }
 
     /// 「清除搜索与筛选」必须**同时**清掉搜索词与筛选条件。

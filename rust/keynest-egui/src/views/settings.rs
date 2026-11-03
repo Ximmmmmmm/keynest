@@ -88,6 +88,16 @@ pub struct SettingsState {
     pub font_note: Option<String>,
     /// 深色模式开关（仅本次运行，不写入仓库）
     pub dark: bool,
+    /// 正在改主密码。
+    ///
+    /// Argon2id 要派生两次（旧 KEK + 新 KEK），在 UI 线程上会阻塞
+    /// 160–400ms。没有这个标记时，用户在冻结期间会反复点按钮，
+    /// 于是排队多次 `change_master`——第二次因为旧密码已经变了而失败，
+    /// 用户看到一个莫名其妙的错误。
+    pub changing_master: bool,
+
+    /// 正在升级格式。同样是 Argon2id 派生 + 重写整个库，会阻塞。
+    pub upgrading: bool,
     /// 正在播放关闭动画
     pub closing: bool,
 }
@@ -144,6 +154,8 @@ impl SettingsState {
             leftovers: ctx.leftovers,
             font_note: ctx.font_note,
             dark: ctx.dark,
+            changing_master: false,
+            upgrading: false,
             closing: false,
         }
     }
@@ -441,7 +453,11 @@ fn tab_security(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut Settings
             ui.end_row();
         });
     ui.add_space(8.0);
-    if theme::ghost_button(ui, "修改主密码").clicked() {
+    if st.changing_master {
+        // 明确告诉用户"正在忙"，而不是让窗口看起来死了
+        ui.add_enabled(false, egui::Button::new("正在修改…"))
+            .on_disabled_hover_text("正在派生密钥，请稍候");
+    } else if theme::ghost_button(ui, "修改主密码").clicked() {
         *intent = SettingsIntent::ChangeMaster;
     }
 }
@@ -734,7 +750,10 @@ fn tab_data(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut SettingsInte
                     .password(true)
                     .hint_text("主密码"),
             );
-            if icons::labeled(ui, icons::Icon::Shield, "升级").clicked() {
+            if st.upgrading {
+                ui.add_enabled(false, egui::Button::new("正在升级…"))
+                    .on_disabled_hover_text("正在重写整个库，请稍候");
+            } else if icons::labeled(ui, icons::Icon::Shield, "升级").clicked() {
                 *intent = SettingsIntent::Upgrade;
             }
         });
