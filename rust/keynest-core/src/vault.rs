@@ -584,35 +584,54 @@ pub mod kinds {
         }
     }
 
-    /// 这种类型默认带哪些字段标签（只有内置类型有模板）。
-    pub fn template(name: &str) -> &'static [(&'static str, bool)] {
+    /// 这种类型默认带哪些字段（只有内置类型有模板）。
+    /// 返回（标签, 是否打码, 输入提示）。
+    ///
+    /// 提示语是**纯增量**的：老库里存的模板没有 hint，读进来是空串，
+    /// 编辑框就不显示灰字。这不需要数据迁移。
+    pub fn template(name: &str) -> &'static [(&'static str, bool, &'static str)] {
         match name {
             CARD => &[
-                ("持卡人", false),
-                ("卡号", true),
-                ("有效期", false),
-                ("安全码", true),
-                ("发卡行", false),
+                ("持卡人", false, "持卡人姓名"),
+                ("卡号", true, "16 位卡号"),
+                ("有效期", false, "MM/YY"),
+                ("安全码", true, "背面 3–4 位"),
+                ("发卡行", false, "例如 招商银行"),
             ],
             IDENTITY => &[
-                ("姓名", false),
-                ("证件号", true),
-                ("出生日期", false),
-                ("地址", false),
-                ("电话", false),
+                ("姓名", false, "证件上的姓名"),
+                ("证件号", true, "身份证 / 护照号"),
+                ("出生日期", false, "YYYY-MM-DD"),
+                ("地址", false, "常住地址"),
+                ("电话", false, "带国家码，如 +86 138…"),
             ],
             // API Key 的字段设计见 docs/design-ai-apikey-type.md
             //
-            // 「API Key」用 `secret: true` 的自定义字段，而不是复用 `password`：
-            // `password` 会参与「弱密码」「重复使用」两项安全统计，
-            // 而一个 50 位十六进制的 API Key 在那些统计里毫无意义。
+            // 字段取舍的依据（对照 1Password 的 API Credential 类别、
+            // AWS Secrets Manager 的密钥结构建议、以及社区提案）：
+            //
+            // * **两段式凭据要有位置放**：AWS / 阿里云这类是「访问密钥 ID +
+            //   访问密钥 Secret」两段，只存一个 Secret 等于存不全，用户还得
+            //   用备注补——那就白做了。所以「Key ID」和「Secret」分开。
+            // * **环境必须能筛**：同一个服务在 dev / prod 各有一把 key 是常态。
+            //   没有这个字段，两条记录长得一模一样，靠标题里的 `(prod)` 硬分，
+            //   迟早出错。做成一等字段才能按它筛。
+            // * **scope 决定泄露后的影响面**：只读还是读写、能访问哪些资源。
+            //   这条写下来，出事时才知道该慌到什么程度。
+            // * **轮换周期**比「到期时间」更有用：很多 key 根本不过期，
+            //   但该多久换一次是运维纪律。
+            //
+            // 全部用 `secret: true` 的只有 Secret 本身。Key ID 不是秘密
+            // （它会出现在请求头与日志里），打码只会让人核对不了。
             APIKEY => &[
-                ("服务商", false),
-                ("API Key", true),
-                ("Base URL", false),
-                ("组织 / 项目", false),
-                ("额度 / 计费", false),
-                ("到期时间", false),
+                ("服务商", false, "OpenAI / Anthropic / AWS / 自建…"),
+                ("环境", false, "prod / staging / dev"),
+                ("Key ID", false, "AKIA… 这类公开标识，没有就留空"),
+                ("Secret", true, "sk-… / 访问密钥，粘贴进来"),
+                ("权限范围", false, "只读 / 读写 / 具体 scope"),
+                ("Base URL", false, "走代理或自建时填，官方留空"),
+                ("到期时间", false, "YYYY-MM-DD，不过期就留空"),
+                ("轮换周期", false, "例如 90 天"),
             ],
             _ => &[],
         }
@@ -637,6 +656,16 @@ pub struct FieldTemplate {
     pub label: String,
     #[serde(default)]
     pub secret: bool,
+    /// 输入框里的灰字提示（`hint_text`）。
+    ///
+    /// 「环境」「权限范围」这类字段光有标签不够——用户不知道
+    /// 该填 `prod` 还是「生产环境」，也不知道 scope 要不要写全。
+    /// 一句示例比一整段说明更容易被读完。
+    ///
+    /// `serde(default)`：老库里的模板没有这个字段，读进来是空串，
+    /// 编辑框就不显示提示。这是**纯增量**的改动，不需要数据迁移。
+    #[serde(default)]
+    pub hint: String,
 }
 
 /// 兼容两种写法：老库里 `types` 是字符串数组，新格式是对象数组。
@@ -687,9 +716,10 @@ impl TypeDef {
 fn builtin_template(name: &str) -> Vec<FieldTemplate> {
     kinds::template(name)
         .iter()
-        .map(|(label, secret)| FieldTemplate {
+        .map(|(label, secret, hint)| FieldTemplate {
             label: (*label).to_string(),
             secret: *secret,
+            hint: (*hint).to_string(),
         })
         .collect()
 }
@@ -3019,25 +3049,69 @@ impl Vault {
 mod tests {
     use super::*;
 
-    /// 「API Key」类型的字段模板必须齐全，且 Key 本身要打码。
+    /// 「API Key」类型的字段模板必须齐全，且 Secret 本身要打码。
     ///
     /// 打码不是审美问题：API Key 泄露的经济后果与密码同级
     /// （有人拿它刷你的额度），而它经常被投屏、截屏、录屏。
     #[test]
-    fn api_key_template_masks_the_key_itself() {
+    fn api_key_template_masks_the_secret_only() {
         let tpl = kinds::template(kinds::APIKEY);
         assert!(!tpl.is_empty(), "API Key 类型应当有字段模板");
 
-        let key_field = tpl
+        let secret_field = tpl
             .iter()
-            .find(|(label, _)| *label == "API Key")
-            .expect("模板里必须有「API Key」字段");
-        assert!(key_field.1, "「API Key」字段必须打码");
+            .find(|(label, _, _)| *label == "Secret")
+            .expect("模板里必须有「Secret」字段");
+        assert!(secret_field.1, "「Secret」字段必须打码");
 
-        // 其余字段是辅助信息，不该打码（打码会让用户没法核对服务商/额度）
-        for (label, secret) in tpl {
-            if *label != "API Key" {
+        // 其余字段是辅助信息，不该打码：
+        // Key ID 会出现在请求头与日志里，根本不是秘密；
+        // 服务商/环境/scope 打码只会让人核对不了。
+        for (label, secret, _) in tpl {
+            if *label != "Secret" {
                 assert!(!secret, "「{label}」不该打码");
+            }
+        }
+    }
+
+    /// 两段式凭据要有地方放：Key ID 与 Secret 必须是**两个**字段。
+    ///
+    /// AWS / 阿里云这类是「访问密钥 ID + 访问密钥 Secret」两段。
+    /// 只给一个 Secret 字段等于存不全，用户只能拿备注补——
+    /// 备注不参与搜索高亮、也不能单独复制。
+    #[test]
+    fn api_key_type_supports_two_part_credentials() {
+        let labels: Vec<&str> = kinds::template(kinds::APIKEY)
+            .iter()
+            .map(|(l, _, _)| *l)
+            .collect();
+        assert!(labels.contains(&"Key ID"), "缺 Key ID 字段：{labels:?}");
+        assert!(labels.contains(&"Secret"), "缺 Secret 字段：{labels:?}");
+    }
+
+    /// 环境必须是一等字段——同一服务在 dev / prod 各有一把 key 是常态。
+    ///
+    /// 没有这个字段，两条记录长得一模一样，只能靠标题里写 `(prod)` 硬分，
+    /// 迟早出事故：在开发机上跑了生产 key，或者在生产上跑了测试 key。
+    #[test]
+    fn api_key_type_has_an_environment_field() {
+        let labels: Vec<&str> = kinds::template(kinds::APIKEY)
+            .iter()
+            .map(|(l, _, _)| *l)
+            .collect();
+        assert!(labels.contains(&"环境"), "缺「环境」字段：{labels:?}");
+    }
+
+    /// 每个内置字段都要有**非空**提示语。
+    ///
+    /// 「环境」「权限范围」这类字段光有标签不够——用户不知道
+    /// 该填 `prod` 还是「生产环境」，也不知道 scope 要不要写全。
+    /// 一句示例比一整段说明更容易被读完。
+    #[test]
+    fn every_builtin_field_has_a_hint() {
+        for name in kinds::DEFAULT_TYPES {
+            for (label, _, hint) in kinds::template(name) {
+                assert!(!hint.is_empty(), "「{name}」的「{label}」字段没有输入提示");
             }
         }
     }

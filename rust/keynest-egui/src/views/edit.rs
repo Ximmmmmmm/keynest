@@ -14,6 +14,11 @@ pub struct FieldDraft {
     pub label: String,
     pub value: Zeroizing<String>,
     pub secret: bool,
+    /// 输入框里的灰字提示。空串表示不提示。
+    ///
+    /// 与 `FieldTemplate.hint` 对应。「环境」「权限范围」这类字段
+    /// 光有标签不够——用户不知道该填 `prod` 还是「生产环境」。
+    pub hint: String,
 }
 
 /// 打开对话框那一刻的内容快照，用于判断"用户是否真的改过"。
@@ -60,6 +65,12 @@ pub struct EditState {
     pub closing: bool,
     /// 有未保存内容时点了关闭 —— 现在等他确认。
     pub confirm_discard: bool,
+    /// 哪些打码字段被临时「看一眼」了（按 `fields` 的下标）。
+    ///
+    /// 关掉对话框就丢——这是**一次性**的查看动作，不是持久设置。
+    /// 不放进 `vault.dat`：一个「我默认显示明文」的开关留在库里，
+    /// 下次打开别人也能看到。
+    pub field_revealed: std::collections::HashSet<usize>,
     /// 打开时的内容快照（`None` 表示这是新增条目）
     pub original: Option<EditOriginal>,
 }
@@ -148,6 +159,13 @@ impl EditState {
     }
 
     /// 切到某个类型时，若还没有任何字段，就按模板预填一份。
+    /// 切换某个字段的「看一眼」状态。
+    pub fn toggle_field_revealed(&mut self, i: usize) {
+        if !self.field_revealed.remove(&i) {
+            self.field_revealed.insert(i);
+        }
+    }
+
     pub fn apply_template(&mut self) {
         if !self.fields.is_empty() {
             return;
@@ -159,6 +177,7 @@ impl EditState {
                 label: t.label.clone(),
                 value: Zeroizing::new(String::new()),
                 secret: t.secret,
+                hint: t.hint.clone(),
             })
             .collect();
     }
@@ -193,6 +212,7 @@ impl EditState {
             gen: GeneratorState::default(),
             closing: false,
             confirm_discard: false,
+            field_revealed: std::collections::HashSet::new(),
             original: None,
         }
     }
@@ -231,6 +251,9 @@ impl EditState {
                     label: f.label.clone(),
                     value: Zeroizing::new(f.value.clone()),
                     secret: f.secret,
+                    // 编辑既有条目时不给提示：字段里已经有值，
+                    // 灰字提示不会显示，查一遍模板也是白费
+                    hint: String::new(),
                 })
                 .collect(),
             title: e.title.clone(),
@@ -247,6 +270,7 @@ impl EditState {
             gen: GeneratorState::default(),
             closing: false,
             confirm_discard: false,
+            field_revealed: std::collections::HashSet::new(),
             original: Some(EditOriginal {
                 title: e.title.clone(),
                 username: e.username.clone(),
@@ -549,19 +573,53 @@ pub fn show(
                     theme::section(ui, "自定义字段");
 
                     let mut remove: Option<usize> = None;
+                    // 先把「哪些字段被看一眼了」拷出来：
+                    // 循环体持有 `st.fields` 的可变借用，同时读 `st.field_revealed`
+                    // 会冲突。拷贝的代价是每帧一个小小的 HashSet，
+                    // 而字段通常只有个位数。
+                    let revealed_snapshot: std::collections::HashSet<usize> =
+                        st.field_revealed.clone();
+                    let mut toggle_reveal: Option<usize> = None;
                     for (i, f) in st.fields.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             ui.add_sized(
                                 [120.0, 28.0],
                                 egui::TextEdit::singleline(&mut f.label).hint_text("名称"),
                             );
-                            let w = (ui.available_width() - 96.0).max(80.0);
+
+                            // 眼睛按钮：临时看一眼明文。
+                            //
+                            // 打码字段永远不让人看是不行的——粘贴 API Key
+                            // 之后没法确认粘全了没有，只能存进去再到别处试，
+                            // 而那意味着「先失败一次才知道对不对」。
+                            // 1Password / Bitwarden 都给了这个开关。
+                            let revealed = revealed_snapshot.contains(&i);
+                            let w = (ui.available_width() - 128.0).max(80.0);
                             ui.add_sized(
                                 [w, 28.0],
                                 egui::TextEdit::singleline(&mut *f.value)
-                                    .hint_text("值")
-                                    .password(f.secret),
+                                    .hint_text(if f.hint.is_empty() {
+                                        "值"
+                                    } else {
+                                        f.hint.as_str()
+                                    })
+                                    .password(f.secret && !revealed),
                             );
+
+                            // 只有打码字段才需要这个开关
+                            if f.secret {
+                                let icon = if revealed {
+                                    icons::Icon::EyeOff
+                                } else {
+                                    icons::Icon::Eye
+                                };
+                                if icons::button(ui, icon, "看一眼").clicked() {
+                                    toggle_reveal = Some(i);
+                                }
+                            } else {
+                                ui.add_space(24.0);
+                            }
+
                             let mut secret = f.secret;
                             if ui
                                 .checkbox(&mut secret, "隐藏")
@@ -577,6 +635,17 @@ pub fn show(
                     }
                     if let Some(i) = remove {
                         st.fields.remove(i);
+                        // 删掉一行后，后面所有下标都要前移——
+                        // 不清理就会把「看一眼」状态错位到别的字段上。
+                        st.field_revealed = st
+                            .field_revealed
+                            .iter()
+                            .filter(|x| **x < i)
+                            .copied()
+                            .collect();
+                    }
+                    if let Some(i) = toggle_reveal {
+                        st.toggle_field_revealed(i);
                     }
 
                     if st.fields.len() < keynest_core::vault::MAX_FIELDS
@@ -586,6 +655,7 @@ pub fn show(
                             label: String::new(),
                             value: Zeroizing::new(String::new()),
                             secret: false,
+                            hint: String::new(),
                         });
                     }
 
@@ -922,6 +992,7 @@ mod tests {
             label: "新字段".into(),
             value: Zeroizing::new("v".to_string()),
             secret: false,
+            hint: String::new(),
         });
         assert!(st.is_dirty());
     }

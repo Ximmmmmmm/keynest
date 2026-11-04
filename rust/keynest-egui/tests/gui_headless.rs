@@ -1003,9 +1003,10 @@ fn the_api_key_type_renders_in_the_edit_dialog() {
     // 不必让他再从类型下拉里选一次。
     let tpl_defs: Vec<keynest_core::vault::FieldTemplate> = tpl
         .iter()
-        .map(|(label, secret)| keynest_core::vault::FieldTemplate {
+        .map(|(label, secret, hint)| keynest_core::vault::FieldTemplate {
             label: (*label).to_string(),
             secret: *secret,
+            hint: (*hint).to_string(),
         })
         .collect();
 
@@ -1022,11 +1023,15 @@ fn the_api_key_type_renders_in_the_edit_dialog() {
     );
     assert_eq!(st.fields.len(), tpl.len(), "字段数与模板不一致");
     assert!(
-        st.fields.iter().any(|f| f.label == "API Key"),
-        "草稿里应当有「API Key」字段"
+        st.fields.iter().any(|f| f.label == "Secret"),
+        "草稿里应当有「Secret」字段"
     );
-    let key_draft = st.fields.iter().find(|f| f.label == "API Key").unwrap();
-    assert!(key_draft.secret, "「API Key」字段必须打码");
+    let key_draft = st.fields.iter().find(|f| f.label == "Secret").unwrap();
+    assert!(key_draft.secret, "「Secret」字段必须打码");
+    assert!(
+        !key_draft.hint.is_empty(),
+        "「Secret」字段应当有输入提示"
+    );
 
     let ctx = Context::default();
     let mut out = ctx.run_ui(
