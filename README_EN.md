@@ -170,25 +170,17 @@ Also in that directory:
 
 ---
 
-## Browser extension setup
+## Browser extension
 
-After loading the extension, one more step is required — the browser bridge
-has to be registered:
-
-1. Open the extension popup and copy the **extension ID** it shows.
-2. KeyNest → Settings → Browser → paste the ID → click "Install".
-3. Reload a browser tab.
-
-Step 2 copies the messaging host into `%LOCALAPPDATA%\KeyNestin\` and writes
-two registry values under the current user (one for Chrome, one for Edge).
-**No administrator rights are needed**, and uninstalling removes only those two
-values.
-
-> Why this is necessary: the browser only finds a Native Messaging host through
-> the registry, and the manifest must name the **exact** extension ID. An
-> extension that isn't published to a store has an ID derived from the hash of
-> its install path, so it differs on every machine — the desktop program cannot
-> guess it and has to be told.
+> **This version does not ship an extension install entry point.**
+>
+> The extension source still lives in `browser-extension/` (you can load and
+> build it yourself), but the desktop app's Settings → Browser page has been
+> removed — this release does not distribute the extension with the program.
+> The bridge protocol and host installer remain complete in
+> `rust/keynest-bridge/`; there is simply no GUI entry for them.
+>
+> To wire it up you would call `keynest_bridge::hostinstall::install()` yourself.
 
 ## Limitations
 
