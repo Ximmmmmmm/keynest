@@ -1,6 +1,6 @@
 [package]
 name = "keynest-core"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2021"
 description = "钥巢的加密仓库核心（纯逻辑，无 UI / 无 WebView 依赖）"
 license = "MIT OR Apache-2.0"
