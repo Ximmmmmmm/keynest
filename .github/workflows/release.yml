@@ -71,9 +71,19 @@ jobs:
         working-directory: rust
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # `--no-fail-fast` + 显式回显：默认的 `cargo test` 一旦某个测试二进制失败
+      # 就停下去，日志里只留一行 "test result: FAILED"，看不出是哪个测试。
+      # 发布失败时必须能定位，否则只能靠猜。
       - name: 测试
         working-directory: rust
-        run: cargo test --workspace
+        run: |
+          cargo test --workspace --no-fail-fast 2>&1 | tee test-output.txt
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "::error::测试失败，以下是所有 FAILED 行"
+            grep -E "^test .* FAILED|panicked at|^error" test-output.txt | head -50 || true
+          fi
+          exit "$status"
 
       # 扩展测试需要 Node。release 流程此前完全没装 Node——
       # 光加测试步骤而不装 Node，只会把「node: command not found」带进发布。

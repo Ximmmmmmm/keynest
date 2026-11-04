@@ -796,21 +796,55 @@ fn the_trash_detail_panel_never_reveals_or_copies() {
 /// 卡性能指标。真正该担心的是「从 5ms 变成 500ms」这种量级变化。
 ///
 /// 时间相关的断言天然不稳定，所以只在明显退化时才失败。
+/// # 为什么用「相对倍数」而不是绝对毫秒
+///
+/// 最初这条断言的是 `one_frame < 200ms`。本地（5 万条 81ms）一直过，
+/// 但发布流程在 GitHub 的 `windows-latest` 上**失败了**——
+/// 那台机器比我的开发机慢好几倍，同一份代码在那里超过了 200ms。
+///
+/// 绝对阈值测的其实是「这台机器有多快」，不是「代码有没有退化」。
+/// 真正要抓的退化形态是：虚拟滚动失效，渲染成本从 O(视口) 变成 O(总条数)——
+/// 那会让耗时随条目数**成比例**增长，而不是随机器快慢整体平移。
+///
+/// 所以改成：同一台机器上，500 条与 5 万条的**单帧耗时比值**
+/// 不能超过 `MAX_RATIO`。虚拟滚动生效时这个比值应当接近 1
+/// （两者都只画十几行）；退化成全量扫描时会变成几十倍。
 #[test]
 fn a_large_vault_renders_a_frame_quickly() {
-    let data = data_with(50_000);
+    // 视口内能显示的条目数有限，所以 200 条与 5 万条的绘制量其实一样。
+    // 用 200 而不是 500：小库越快，比值越灵敏。
+    let small = data_with(200);
+    let large = data_with(50_000);
 
-    // 先跑一帧预热（字体、图集、布局缓存）
-    let _ = render_and_count(&data);
+    // 各自先跑一帧预热（字体、图集、布局缓存）
+    let _ = render_and_count(&small);
+    let _ = render_and_count(&large);
 
-    let start = std::time::Instant::now();
-    let _ = render_and_count(&data);
-    let one_frame = start.elapsed();
+    let t = std::time::Instant::now();
+    let _ = render_and_count(&small);
+    let small_frame = t.elapsed().as_secs_f64().max(0.000_001);
 
-    println!("FRAME_50K_MS={}", one_frame.as_millis());
+    let t = std::time::Instant::now();
+    let _ = render_and_count(&large);
+    let large_frame = t.elapsed().as_secs_f64();
+
+    let ratio = large_frame / small_frame;
+    println!(
+        "FRAME small={:.1}ms large={:.1}ms ratio={:.2}x",
+        small_frame * 1000.0,
+        large_frame * 1000.0,
+        ratio
+    );
+
+    // 虚拟滚动生效：两者画的行数一样，比值应当接近 1。
+    // 给 8 倍余量——覆盖计时抖动、缓存冷热、CPU 降频，
+    // 但远低于「全量扫描」时 250 倍（5 万/200）的量级。
+    const MAX_RATIO: f64 = 8.0;
     assert!(
-        one_frame.as_millis() < 200,
-        "5 万条时单帧渲染要 {one_frame:?}，超过 200ms 的宽限——         很可能某处退化成了「全量扫描」"
+        ratio < MAX_RATIO,
+        "5 万条单帧是小库的 {ratio:.1} 倍（{:.1}ms vs {:.1}ms），         超过 {MAX_RATIO} 倍——虚拟滚动很可能失效，退化成了全量扫描",
+        large_frame * 1000.0,
+        small_frame * 1000.0
     );
 }
 
@@ -818,15 +852,40 @@ fn a_large_vault_renders_a_frame_quickly() {
 ///
 /// 首次渲染比稳态慢得多：要建字体图集、算全部布局。
 /// 如果这一步要好几秒，用户会以为程序卡死了。
+/// # 为什么也改成相对判定
+///
+/// 原来断言 `first < 1s`。它同样测的是「这台机器有多快」——
+/// CI 上慢机器会误报。改成与**同一进程内的稳态帧**相比：
+/// 首帧要建字体图集、算全部布局，比稳态慢是正常的，
+/// 但慢几十倍就说明有 O(总条数) 的东西在首帧里跑。
 #[test]
 fn the_first_frame_of_a_large_vault_is_not_a_freeze() {
     let data = data_with(50_000);
-    let start = std::time::Instant::now();
+
+    let t = std::time::Instant::now();
     let _ = render_and_count(&data);
-    let first = start.elapsed();
+    let first = t.elapsed().as_secs_f64().max(0.000_001);
+
+    let t = std::time::Instant::now();
+    let _ = render_and_count(&data);
+    let steady = t.elapsed().as_secs_f64().max(0.000_001);
+
+    let ratio = first / steady;
+    println!(
+        "FIRST_FRAME first={:.1}ms steady={:.1}ms ratio={:.2}x",
+        first * 1000.0,
+        steady * 1000.0,
+        ratio
+    );
+
+    // 首帧建字体图集本来就要慢一截；给 30 倍余量，
+    // 只为抓「首帧里把全部条目都过了一遍」那种退化。
+    const MAX_RATIO: f64 = 30.0;
     assert!(
-        first.as_secs() < 1,
-        "5 万条的首次渲染要 {first:?}，用户会以为程序卡死了"
+        ratio < MAX_RATIO,
+        "首帧是稳态的 {ratio:.1} 倍（{:.1}ms vs {:.1}ms），         超过 {MAX_RATIO} 倍——首帧里很可能在遍历全部条目",
+        first * 1000.0,
+        steady * 1000.0
     );
 }
 
