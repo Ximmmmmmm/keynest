@@ -26,6 +26,12 @@ webbrowser = "1"
 rfd = "0.15"
 # 备份文件名里的时间戳
 chrono = "0.4"
+# 启动时把图标解码成 RGBA，交给窗口（任务栏/Alt+Tab 用的就是它）。
+#
+# 版本与特性必须与 eframe 依赖的那份对齐（eframe 传 `features=["png"]`），
+# 否则会多编一份 image，白涨二进制体积。
+# 不引入 `image` 的默认特性：那会拖进 jpeg/tiff/webp 一整套解码器。
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 # 截图工具：把界面渲染成 PNG 做视觉回归

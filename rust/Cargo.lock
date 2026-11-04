@@ -2040,6 +2040,7 @@ dependencies = [
  "chrono",
  "eframe",
  "egui",
+ "image",
  "keynest-bridge",
  "keynest-core",
  "keynest-paths",
