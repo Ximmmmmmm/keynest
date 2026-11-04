@@ -820,6 +820,67 @@ function listAfter(text, marker, stop) {
 }
 
 /* ------------------------------------------------------------------ */
+/* 4i) workflow 里用 bash 语法的步骤必须声明 bash shell                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `windows-latest` 的**默认 shell 是 pwsh**，`ubuntu-latest` 是 bash。
+ *
+ * 同一份 workflow 在两种 runner 上，「没写 `shell:`」的步骤会跑在不同的
+ * shell 里。一旦用到 `set -euo pipefail`、`${PIPESTATUS[0]}`、`$(cmd)`
+ * 这类 bash 语法，在 pwsh 上会**立刻**报错——而错误信息是
+ * 「术语不是 cmdlet 的名称」，跟测试毫无关系，极易误判。
+ *
+ * 实际发生过三次：
+ *   - 「测试」用了 ${PIPESTATUS[0]}（我加诊断时引入的）
+ *   - 「生成 SHA-256 校验文件」用了 set -euo pipefail
+ *   - ci.yml 的「单元与集成测试」用了 $(ls ...)
+ *
+ * 前两处在 windows runner 上，第三次侥幸在 ubuntu 上跑所以没暴露。
+ */
+{
+  const workflows = [
+    '.github/workflows/ci.yml',
+    '.github/workflows/release.yml',
+  ];
+  const BASHISM = [
+    ['${', 'bash 变量展开'],
+    ['$(', '命令替换'],
+    ['set -e', 'set -e / pipefail'],
+    ['PIPESTATUS', 'PIPESTATUS'],
+    ['|| true', '|| 兜底'],
+  ];
+
+  const offenders = [];
+  for (const f of workflows) {
+    const text = read(f);
+    if (text === null) continue;
+    const lines = text.split('\n');
+    let i = 0;
+    while (i < lines.length) {
+      if (/^      - name:/.test(lines[i])) {
+        let j = i + 1;
+        while (j < lines.length && !/^      - (name|uses):/.test(lines[j])) j++;
+        const step = lines.slice(i, j).join('\n');
+        if (step.includes('run:') && !step.split(String.fromCharCode(10)).some((l) => l.trim().startsWith('shell:'))) {
+          const name = (step.match(/- name: (.+)/) || [])[1] || '(无名)';
+          for (const [tok, why] of BASHISM) {
+            if (step.includes(tok)) offenders.push(`${f} · ${name}（${why}）`);
+          }
+        }
+        i = j;
+      } else i++;
+    }
+  }
+
+  if (offenders.length) {
+    fail('workflow 步骤用了 bash 语法却没声明 shell（windows runner 上是 pwsh）', offenders.join('; '));
+  } else {
+    ok('workflow 里用 bash 语法的步骤都声明了 shell', `${workflows.length} 个文件`);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 5) 仓库里不能有敏感或调试文件                                        */
 /* ------------------------------------------------------------------ */
 
