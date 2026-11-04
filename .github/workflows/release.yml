@@ -75,6 +75,27 @@ jobs:
         working-directory: rust
         run: cargo test --workspace
 
+      # 扩展测试需要 Node。release 流程此前完全没装 Node——
+      # 光加测试步骤而不装 Node，只会把「node: command not found」带进发布。
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "24"
+
+      # 扩展的测试也要在发布前跑一遍。
+      #
+      # CI 会跑扩展测试，但 CI 跑的是**分支**代码；发布跑的是 **tag 指向的代码**。
+      # 如果 tag 是从某个没跑过 CI 的分支打的，扩展坏了也会照样发出去。
+      - name: 发布前自检
+        run: node scripts/release-check.mjs
+
+      - name: 扩展测试
+        working-directory: browser-extension
+        run: node --test tests/*.test.js
+
+      - name: 扩展装配自检
+        working-directory: browser-extension
+        run: node scripts/selfcheck.mjs
+
   # ------------------------------------------------------------------ #
   # 依赖审计：必须跑在 Linux。
   # cargo-deny-action 是 Docker 容器型 action，Windows/macOS runner
@@ -118,6 +139,12 @@ jobs:
         working-directory: rust
         run: cargo build --release -p keynest-egui
 
+      # 浏览器桥接的宿主。**没有它，扩展连不上桌面程序**——
+      # 扩展与桌面程序之间的全部通信都经过这个进程。
+      - name: 编译浏览器桥接宿主
+        working-directory: rust
+        run: cargo build --release -p keynest-bridge --bin keynest-native-host
+
       # 显式白名单。不用通配符，避免哪天误把 vault.dat、测试库、
       # 构建缓存或私钥一起塞进发布包。
       - name: 收集发布文件
@@ -126,6 +153,7 @@ jobs:
           $stage = "release-stage"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "rust/target/release/keynest-egui.exe" "$stage/KeyNest.exe"
+          Copy-Item "rust/target/release/keynest-native-host.exe" "$stage/keynest-native-host.exe"
           Copy-Item "README_EN.md" "$stage/README_EN.md"
           Copy-Item "README.md"    "$stage/README.md"
           Copy-Item "SECURITY.md"  "$stage/SECURITY.md"
@@ -143,6 +171,11 @@ jobs:
             2. 首次启动会让你设置主密码（至少 12 位，无法找回）。
             3. 数据默认保存在 %LOCALAPPDATA%\KeyNest\vault.dat。
                若检测到旧的 %APPDATA%\KeyNest\vault.dat，会继续使用那里的库。
+               
+               浏览器扩展
+                 keynest-native-host.exe 是扩展与本程序之间的通信宿主。
+                 不带它，扩展装了也连不上——设置里的「安装浏览器桥接」
+                 会把它复制到 %LOCALAPPDATA%\KeyNest\bin\ 并写好注册表项。
 
           注意
             * 绿色版不写注册表、不需要管理员权限，删掉 exe 即卸载。
@@ -156,6 +189,74 @@ jobs:
           "@ | Set-Content -Encoding UTF8 "$stage/INSTALL.txt"
 
           Get-ChildItem $stage | Select-Object Name, Length
+
+      # ---------------------------------------------------------------- #
+      # 浏览器扩展（Chromium 系）
+      # ---------------------------------------------------------------- #
+      # 扩展是产品的一半功能，不进发布包就等于没发布。
+      #
+      # 用**显式白名单**打包，不用通配符——理由与 Windows 产物相同：
+      # 避免哪天误把测试文件、私钥、开发者本地的 vault.dat 一起塞进去。
+      - name: 打包浏览器扩展
+        shell: pwsh
+        run: |
+          $ext = "ext-stage"
+          New-Item -ItemType Directory -Force -Path $ext | Out-Null
+          # 目标目录自己建一个，不依赖前面的步骤。
+          # 隐式依赖看着省事，但一旦有人调整步骤顺序，
+          # 报错会是「路径不存在」——完全指不到真正的原因。
+          New-Item -ItemType Directory -Force -Path "release-stage" | Out-Null
+
+          $files = @(
+            "manifest.json",
+            "background/service-worker.js",
+            "content/content-script.js",
+            "popup/popup.html", "popup/popup.js", "popup/popup.css",
+            "popup/panel-host.js", "popup/panels.js",
+            "options/options.html", "options/options.js", "options/options.css",
+            "lib/host.js", "lib/modules.js", "lib/config.js", "lib/permissions.js",
+            "lib/errors.js", "lib/inject.js", "lib/auto-apply.js",
+            "lib/site-memory.js", "lib/spa-router.js",
+            "lib/filters/domain.js", "lib/filters/rules.js", "lib/filters/allowlist.js",
+            "lib/modules/vault.js", "lib/modules/registry.js",
+            "lib/modules/adblock.js", "lib/modules/reader.js", "lib/modules/dark.js",
+            "lib/reader/core.js",
+            # 密码填充链路的必需模块：授权状态机、origin 规范化、
+            # 兑换、来源分类、存储。漏任何一个，扩展在浏览器里直接白屏。
+            "lib/auth-store.js", "lib/origin.js", "lib/redeem.js",
+            "lib/sender.js", "lib/storage.js",
+            "package.json"
+          )
+          foreach ($f in $files) {
+            $src = Join-Path "browser-extension" $f
+            if (-not (Test-Path $src)) { throw "扩展缺少文件: $f" }
+            $dst = Join-Path $ext $f
+            New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+            Copy-Item $src $dst
+          }
+
+          # 扩展有**自己独立**的版本号（0.13.x），与桌面程序（0.4.x）不是一套。
+          # 所以这里检查的是扩展**内部**的一致性：manifest 与 package.json 必须相同。
+          #
+          # 曾经写成「扩展版本必须等于 tag 版本」——那会让每次发布都失败，
+          # 因为两套版本号从来就不相等。
+          # **必须显式指定 UTF-8**。
+          #
+          # Windows PowerShell 5.1 的 `Get-Content -Raw` 用系统 ANSI 码页读文件，
+          # package.json 里的中文描述会被读坏，ConvertFrom-Json 直接报错：
+          # 「无效的 JSON 文法」。GitHub 的 pwsh 是 7.x（默认 UTF-8）所以碰不到，
+          # 但本地用 5.1 跑就炸——而且报错完全指不到真正的原因。
+          $mf = Get-Content "browser-extension/manifest.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+          $pkg = Get-Content "browser-extension/package.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($mf.version -ne $pkg.version) {
+            throw "扩展版本不一致：manifest $($mf.version) vs package.json $($pkg.version)"
+          }
+          $extVer = $mf.version
+
+          # 装成一个 zip：用户在 Chrome/Edge 的「加载已解压的扩展程序」
+          # 里直接指向解压后的目录即可，不需要这个 zip；
+          # zip 是给需要归档/分发的人用的。
+          Compress-Archive -Path "$ext/*" -DestinationPath "release-stage/KeyNest-Extension-$extVer.zip"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
@@ -195,8 +296,8 @@ jobs:
           set -euo pipefail
           # 覆盖全部随包发布的文件，而不是只算 exe——
           # 用户要能确认自己拿到的 README/LICENSE 也没被替换过。
-          sha256sum KeyNest.exe INSTALL.txt README.md README_EN.md SECURITY.md \
-                    LICENSE-MIT LICENSE-APACHE > SHA256SUMS
+          sha256sum KeyNest.exe keynest-native-host.exe INSTALL.txt README.md README_EN.md \
+                    LICENSE-MIT LICENSE-APACHE KeyNest-Extension-*.zip > SHA256SUMS
           cat SHA256SUMS
 
       # Release Notes 直接取 CHANGELOG 里对应版本那一节，避免"发布说明和实际改动对不上"。
@@ -226,7 +327,15 @@ jobs:
           set -euo pipefail
           ls -la
           # 发布包里只允许这些文件，多一个都要停下来看
-          BAD=$(ls | grep -vE '^(KeyNest\.exe|README\.md|README_EN\.md|SECURITY\.md|LICENSE-MIT|LICENSE-APACHE|INSTALL\.txt|SHA256SUMS)$' || true)
+          # 白名单必须与实际发布内容一致。
+          #
+          # 原来漏了 keynest-native-host.exe 与 KeyNest-Extension-*.zip——
+          # 而前一步刚用 sha256sum 给这两个文件算过哈希。
+          # 也就是说：**发布永远会在这里 exit 1**，
+          # 报「发布包里出现了预期之外的文件」。
+          #
+          # 这个作业从没真正跑过（CI 之前连 YAML 都不合法），所以一直没暴露。
+          BAD=$(ls | grep -vE '^(KeyNest\.exe|keynest-native-host\.exe|KeyNest-Extension-.*\.zip|README\.md|README_EN\.md|SECURITY\.md|LICENSE-MIT|LICENSE-APACHE|INSTALL\.txt|SHA256SUMS)$' || true)
           if [ -n "$BAD" ]; then
             echo "::error::发布包里出现了预期之外的文件: $BAD"
             exit 1
@@ -243,8 +352,19 @@ jobs:
           tag_name: ${{ env.REF_NAME }}
           name: "钥巢 KeyNest ${{ env.REF_NAME }}"
           body_path: release-notes.md
+          # 这份列表必须覆盖**全部**随包发布的文件。
+          #
+          # 原来漏了 keynest-native-host.exe 与 KeyNest-Extension-*.zip：
+          # 它们是浏览器桥接的必需产物，没上传的话
+          #   - 用户下载到的 Release 里没有原生宿主，桥接装不了
+          #   - SHA256SUMS 里有这两个文件的哈希，却找不到文件，校验会对不上
+          #
+          # 而 `fail_on_unmatched_files` 只管「列出来的文件存不存在」，
+          # 漏列它不会报错——所以这个缺口是静默的。
           files: |
             release-stage/KeyNest.exe
+            release-stage/keynest-native-host.exe
+            release-stage/KeyNest-Extension-*.zip
             release-stage/INSTALL.txt
             release-stage/README.md
             release-stage/README_EN.md

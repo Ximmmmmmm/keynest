@@ -5,6 +5,11 @@ node_modules/
 rust/target/
 target/
 
+# 本地打包出来的可运行副本（二进制产物，不进版本库）
+release-out/
+release-stage/
+ext-stage/
+
 # 测试产物
 test/e2e-data/
 test/e2e-onboard-data/
@@ -60,3 +65,7 @@ dist-egui/
 
 # 旧版 Electron 时期的截图（已被 docs/shots/ 取代，仅本地留存）
 docs/ui/
+
+# 验收脚本的运行产物（每轮不同，不入库）
+test/acceptance/.out/
+.tmp-verify/

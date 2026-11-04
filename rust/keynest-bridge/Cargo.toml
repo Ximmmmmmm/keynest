@@ -1,0 +1,45 @@
+[package]
+name = "keynest-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "钥巢浏览器桥：Native Messaging + 认证加密 Named Pipe"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# 路径解析唯一实现：bridge 与 GUI 必须算出同一目录
+keynest-paths = { path = "../keynest-paths", version = "0.1.0" }
+# 已有依赖的复用，不引入新树
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1", features = ["derive"] }
+getrandom = "0.2"
+thiserror = "2"
+
+# HKDF 与 HMAC 均由 RustCrypto 提供；hmac/sha2 已通过 keynest-core 的 TOTP 进入依赖树。
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+# 会话加密复用 core 已在用的 XChaCha20-Poly1305，不引入第二种 AEAD
+chacha20poly1305 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }
+
+[[bin]]
+name = "keynest-native-host"
+path = "src/bin/native_host.rs"
+
+[dev-dependencies]
+# 进程级集成测试需要一个临时目录放 bridge.key。
+# 版本约束与 keynest-core 一致，避免引入第二个版本。
+tempfile = "3"

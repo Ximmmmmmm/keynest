@@ -14,6 +14,30 @@ pub struct FieldDraft {
     pub label: String,
     pub value: Zeroizing<String>,
     pub secret: bool,
+    /// 输入框里的灰字提示。空串表示不提示。
+    ///
+    /// 与 `FieldTemplate.hint` 对应。「环境」「权限范围」这类字段
+    /// 光有标签不够——用户不知道该填 `prod` 还是「生产环境」。
+    pub hint: String,
+}
+
+/// 打开对话框那一刻的内容快照，用于判断"用户是否真的改过"。
+///
+/// 为什么需要它：`edit.is_some()` 只能说明对话框开着，
+/// 打开又原样关掉也算。锁定时若据此提示"有未保存的修改"，
+/// 会变成噪音，用户很快就不看提示了。
+#[derive(Clone)]
+pub struct EditOriginal {
+    pub title: String,
+    pub username: String,
+    pub password: String,
+    pub url: String,
+    pub notes: String,
+    pub category: String,
+    pub kind: String,
+    pub favorite: bool,
+    pub totp: String,
+    pub field_values: Vec<String>,
 }
 
 pub struct EditState {
@@ -39,6 +63,45 @@ pub struct EditState {
     pub gen: GeneratorState,
     /// 正在播放关闭动画
     pub closing: bool,
+    /// 有未保存内容时点了关闭 —— 现在等他确认。
+    pub confirm_discard: bool,
+    /// 哪些打码字段被临时「看一眼」了（按 `fields` 的下标）。
+    ///
+    /// 关掉对话框就丢——这是**一次性**的查看动作，不是持久设置。
+    /// 不放进 `vault.dat`：一个「我默认显示明文」的开关留在库里，
+    /// 下次打开别人也能看到。
+    pub field_revealed: std::collections::HashSet<usize>,
+    /// 打开时的内容快照（`None` 表示这是新增条目）
+    pub original: Option<EditOriginal>,
+}
+
+/// 某个字段是否超长。
+///
+/// # 为什么是「提示」而不是「禁止输入」
+///
+/// egui 的 `char_limit` 会**阻止**输入超过上限。对粘贴超长内容的用户来说，
+/// 那意味着内容被**静默截断**——他以为粘贴成功了，实际上尾部没了。
+/// 截断比拒绝更难发现。
+///
+/// 所以这里只**提示**：输入照常接受，保存时才由 core 拒绝，
+/// 而且拒绝时的错误信息直说「哪个字段太长、上限多少」。
+pub fn field_over_limit(value: &str, max: usize) -> bool {
+    value.chars().count() > max
+}
+
+/// 在输入框下面显示「已用 / 上限」，超限时标红。
+fn length_hint(ui: &mut egui::Ui, value: &str, max: usize) {
+    let used = value.chars().count();
+    if used == 0 {
+        return; // 没输入就不显示，避免界面上多一行噪音
+    }
+    let over = used > max;
+    let text = format!("{used} / {max}");
+    ui.label(egui::RichText::new(text).size(10.5).color(if over {
+        ui.visuals().error_fg_color
+    } else {
+        ui.visuals().weak_text_color()
+    }));
 }
 
 impl EditState {
@@ -54,7 +117,55 @@ impl EditState {
             .collect()
     }
 
+    /// 用户是否真的动过内容。
+    ///
+    /// 用途：锁定时判断"要不要提示有未保存的编辑"。
+    /// 不能只看 `edit.is_some()`——打开对话框但一字未改也满足那个条件，
+    /// 提示会变成噪音，用户很快就不看了。
+    ///
+    /// 判据：新增条目时只要有任意非空内容就算脏；编辑既有条目时
+    /// 与打开时记下的原始值比较。
+    pub fn is_dirty(&self) -> bool {
+        let has_content = !self.title.trim().is_empty()
+            || !self.username.trim().is_empty()
+            || !self.password.is_empty()
+            || !self.url.trim().is_empty()
+            || !self.notes.trim().is_empty()
+            || !self.totp.is_empty()
+            || self.fields.iter().any(|f| !f.value.is_empty());
+
+        match &self.original {
+            // 新增条目：有内容就算脏
+            None => has_content,
+            // 编辑既有条目：与原始值逐项比较
+            Some(orig) => {
+                orig.title != self.title
+                    || orig.username != self.username
+                    || orig.password.as_str() != self.password.as_str()
+                    || orig.url != self.url
+                    || orig.notes != self.notes
+                    || orig.favorite != self.favorite
+                    || orig.category != self.category
+                    || orig.kind != self.kind
+                    || orig.totp.as_str() != self.totp.as_str()
+                    || orig.field_values.len() != self.fields.len()
+                    || orig
+                        .field_values
+                        .iter()
+                        .zip(self.fields.iter())
+                        .any(|(a, b)| a != b.value.as_str())
+            }
+        }
+    }
+
     /// 切到某个类型时，若还没有任何字段，就按模板预填一份。
+    /// 切换某个字段的「看一眼」状态。
+    pub fn toggle_field_revealed(&mut self, i: usize) {
+        if !self.field_revealed.remove(&i) {
+            self.field_revealed.insert(i);
+        }
+    }
+
     pub fn apply_template(&mut self) {
         if !self.fields.is_empty() {
             return;
@@ -66,6 +177,7 @@ impl EditState {
                 label: t.label.clone(),
                 value: Zeroizing::new(String::new()),
                 secret: t.secret,
+                hint: t.hint.clone(),
             })
             .collect();
     }
@@ -99,7 +211,32 @@ impl EditState {
             generator_open: false,
             gen: GeneratorState::default(),
             closing: false,
+            confirm_discard: false,
+            field_revealed: std::collections::HashSet::new(),
+            original: None,
         }
+    }
+
+    /// 按指定类型新建条目，并把该类型的字段模板填好。
+    ///
+    /// 与 `new_entry` 的区别：那个只设分类，类型固定是「账号」，
+    /// 模板留空——用户在 UI 里改类型时才填。
+    ///
+    /// 但有些入口是「直接新建一个 API Key / 信用卡」——
+    /// 那时用户已经表达了类型意图，不必让他再从下拉里选一次。
+    ///
+    /// `template` 由调用方给（类型定义挂在 `VaultData.types` 上，
+    /// 这里不持有 `VaultData`，硬查内置模板会漏掉用户自定义的类型）。
+    pub fn new_typed(
+        default_category: String,
+        kind: &str,
+        template: &[keynest_core::FieldTemplate],
+    ) -> Self {
+        let mut st = Self::new_entry(default_category);
+        st.kind = kind.to_string();
+        st.template = template.to_vec();
+        st.apply_template();
+        st
     }
 
     pub fn from_entry(e: &keynest_core::vault::Entry) -> Self {
@@ -114,6 +251,9 @@ impl EditState {
                     label: f.label.clone(),
                     value: Zeroizing::new(f.value.clone()),
                     secret: f.secret,
+                    // 编辑既有条目时不给提示：字段里已经有值，
+                    // 灰字提示不会显示，查一遍模板也是白费
+                    hint: String::new(),
                 })
                 .collect(),
             title: e.title.clone(),
@@ -129,6 +269,20 @@ impl EditState {
             generator_open: false,
             gen: GeneratorState::default(),
             closing: false,
+            confirm_discard: false,
+            field_revealed: std::collections::HashSet::new(),
+            original: Some(EditOriginal {
+                title: e.title.clone(),
+                username: e.username.clone(),
+                password: e.password.clone(),
+                url: e.url.clone(),
+                notes: e.notes.clone(),
+                category: e.category.clone(),
+                kind: e.kind.clone(),
+                favorite: e.favorite,
+                totp: e.totp.clone().unwrap_or_default(),
+                field_values: e.fields.iter().map(|f| f.value.clone()).collect(),
+            }),
         }
     }
 }
@@ -190,10 +344,23 @@ fn window_id() -> egui::Id {
     egui::Id::new("edit-window")
 }
 
+/// 用户点了关闭时，要不要拦住并弹确认？
+///
+/// 与设置页的 `should_block_close` 同构。抽成纯函数的原因也一样：
+/// 「拦住了」在界面上表现为「窗口没关」，而 `open` 是 egui `Window`
+/// 的局部状态，测试里没法直接置 false 来触发那条路径。
+fn should_block_edit_close(is_dirty: bool, already_asking: bool) -> bool {
+    is_dirty && !already_asking
+}
+
 pub enum EditIntent {
     None,
     Save,
     Cancel,
+    /// 确认框里点了「放弃并关闭」
+    DiscardConfirmed,
+    /// 确认框里点了「继续编辑」
+    CancelDiscard,
     UseGenerated,
     /// 关闭动画播完，可以真正销毁状态
     Closed,
@@ -267,6 +434,7 @@ pub fn show(
                         [ui.available_width(), 32.0],
                         egui::TextEdit::singleline(&mut st.title).hint_text("例如 GitHub"),
                     );
+                    length_hint(ui, &st.title, keynest_core::vault::MAX_TITLE_CHARS);
                     ui.add_space(10.0);
 
                     // 用户名
@@ -275,6 +443,7 @@ pub fn show(
                         [ui.available_width(), 32.0],
                         egui::TextEdit::singleline(&mut st.username).hint_text("账号 / 邮箱"),
                     );
+                    length_hint(ui, &st.username, keynest_core::vault::MAX_USERNAME_CHARS);
                     ui.add_space(10.0);
 
                     // 密码
@@ -404,19 +573,53 @@ pub fn show(
                     theme::section(ui, "自定义字段");
 
                     let mut remove: Option<usize> = None;
+                    // 先把「哪些字段被看一眼了」拷出来：
+                    // 循环体持有 `st.fields` 的可变借用，同时读 `st.field_revealed`
+                    // 会冲突。拷贝的代价是每帧一个小小的 HashSet，
+                    // 而字段通常只有个位数。
+                    let revealed_snapshot: std::collections::HashSet<usize> =
+                        st.field_revealed.clone();
+                    let mut toggle_reveal: Option<usize> = None;
                     for (i, f) in st.fields.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
                             ui.add_sized(
                                 [120.0, 28.0],
                                 egui::TextEdit::singleline(&mut f.label).hint_text("名称"),
                             );
-                            let w = (ui.available_width() - 96.0).max(80.0);
+
+                            // 眼睛按钮：临时看一眼明文。
+                            //
+                            // 打码字段永远不让人看是不行的——粘贴 API Key
+                            // 之后没法确认粘全了没有，只能存进去再到别处试，
+                            // 而那意味着「先失败一次才知道对不对」。
+                            // 1Password / Bitwarden 都给了这个开关。
+                            let revealed = revealed_snapshot.contains(&i);
+                            let w = (ui.available_width() - 128.0).max(80.0);
                             ui.add_sized(
                                 [w, 28.0],
                                 egui::TextEdit::singleline(&mut *f.value)
-                                    .hint_text("值")
-                                    .password(f.secret),
+                                    .hint_text(if f.hint.is_empty() {
+                                        "值"
+                                    } else {
+                                        f.hint.as_str()
+                                    })
+                                    .password(f.secret && !revealed),
                             );
+
+                            // 只有打码字段才需要这个开关
+                            if f.secret {
+                                let icon = if revealed {
+                                    icons::Icon::EyeOff
+                                } else {
+                                    icons::Icon::Eye
+                                };
+                                if icons::button(ui, icon, "看一眼").clicked() {
+                                    toggle_reveal = Some(i);
+                                }
+                            } else {
+                                ui.add_space(24.0);
+                            }
+
                             let mut secret = f.secret;
                             if ui
                                 .checkbox(&mut secret, "隐藏")
@@ -432,6 +635,17 @@ pub fn show(
                     }
                     if let Some(i) = remove {
                         st.fields.remove(i);
+                        // 删掉一行后，后面所有下标都要前移——
+                        // 不清理就会把「看一眼」状态错位到别的字段上。
+                        st.field_revealed = st
+                            .field_revealed
+                            .iter()
+                            .filter(|x| **x < i)
+                            .copied()
+                            .collect();
+                    }
+                    if let Some(i) = toggle_reveal {
+                        st.toggle_field_revealed(i);
                     }
 
                     if st.fields.len() < keynest_core::vault::MAX_FIELDS
@@ -441,6 +655,7 @@ pub fn show(
                             label: String::new(),
                             value: Zeroizing::new(String::new()),
                             secret: false,
+                            hint: String::new(),
                         });
                     }
 
@@ -454,6 +669,7 @@ pub fn show(
                                 [200.0, 32.0],
                                 egui::TextEdit::singleline(&mut st.url).hint_text("https://"),
                             );
+                            length_hint(ui, &st.url, keynest_core::vault::MAX_URL_CHARS);
                         });
                         ui.add_space(8.0);
                         ui.vertical(|ui| {
@@ -511,6 +727,7 @@ pub fn show(
                         [ui.available_width(), 64.0],
                         egui::TextEdit::multiline(&mut st.notes).hint_text("任意备注"),
                     );
+                    length_hint(ui, &st.notes, keynest_core::vault::MAX_NOTES_CHARS);
 
                     if let Some(err) = &st.error {
                         ui.add_space(8.0);
@@ -528,12 +745,54 @@ pub fn show(
                             intent = EditIntent::Cancel;
                         }
                     });
+
+                    // ---- 未保存内容的确认 ----
+                    if st.confirm_discard {
+                        ui.add_space(10.0);
+                        egui::Frame::new()
+                            .fill(p.surface_alt)
+                            .corner_radius(egui::CornerRadius::same(theme::R_SM))
+                            .inner_margin(egui::Margin::same(10))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new("这条记录还没保存")
+                                        .size(12.5)
+                                        .color(p.warn),
+                                );
+                                ui.add_space(4.0);
+                                ui.label(theme::caption("关闭后你刚填的内容会丢失。"));
+                                ui.add_space(8.0);
+                                ui.horizontal(|ui| {
+                                    if theme::primary_button(ui, "继续编辑", 96.0).clicked() {
+                                        intent = EditIntent::CancelDiscard;
+                                    }
+                                    if theme::ghost_button(ui, "放弃并关闭").clicked() {
+                                        intent = EditIntent::DiscardConfirmed;
+                                    }
+                                    if theme::ghost_button(ui, "保存并关闭").clicked() {
+                                        // 走正常的保存流程：保存成功后由 app.rs 关掉。
+                                        intent = EditIntent::Save;
+                                    }
+                                });
+                            });
+                    }
                 });
         });
 
-    // 用户点了标题栏的 × ：进入关闭动画
+    // 用户点了标题栏的 × ：进入关闭动画。
+    //
+    // **有未保存内容时先问一句**。
+    //
+    // 锁定路径（`app.rs` 的 `request_lock`）早就有这个保护，
+    // 但关编辑框本身没有：写完半条记录、顺手点 ×，内容就静默没了。
+    // 而且那是用户刚敲进去的东西，比设置项更疼。
     if !open && !st.closing && matches!(intent, EditIntent::None) {
-        st.closing = true;
+        if should_block_edit_close(st.is_dirty(), st.confirm_discard) {
+            st.confirm_discard = true;
+            st.closing = false;
+        } else {
+            st.closing = true;
+        }
     }
 
     // 动画播完才真正销毁
@@ -541,4 +800,200 @@ pub fn show(
         return EditIntent::Closed;
     }
     intent
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keynest_core::vault::Entry;
+
+    /// 关编辑框时的拦截判定。
+    ///
+    /// 与设置页的 `should_block_close` 同构，测试理由也一样：
+    /// 「拦住了」在界面上表现为「窗口没关」，而 `open` 是 egui `Window`
+    /// 的局部状态，测试里没法直接置 false 来触发那条路径。
+    #[test]
+    fn edit_close_is_blocked_only_when_there_is_unsaved_content() {
+        assert!(!should_block_edit_close(false, false));
+        assert!(should_block_edit_close(true, false));
+        // 已经在问了 → 不要再拦，否则点了「放弃」还会被拦，出不去
+        assert!(!should_block_edit_close(true, true));
+        assert!(!should_block_edit_close(false, true));
+    }
+
+    /// 新建条目、什么都没填 → 不算脏，关掉不打扰。
+    #[test]
+    fn a_blank_new_entry_is_not_dirty() {
+        let st = EditState::new_entry("网站".into());
+        assert!(!st.is_dirty(), "空白新条目被判为脏，关窗会白弹一次确认");
+    }
+
+    /// 新建条目、填了标题 → 脏。
+    #[test]
+    fn a_new_entry_with_a_title_is_dirty() {
+        let mut st = EditState::new_entry("网站".into());
+        st.title = "某个站点".into();
+        assert!(st.is_dirty());
+    }
+
+    /// 打开既有条目、什么都不改 → 不脏。
+    #[test]
+    fn an_unchanged_existing_entry_is_not_dirty() {
+        let e = sample_entry();
+        let st = EditState::from_entry(&e);
+        assert!(!st.is_dirty(), "没改任何东西就被判为脏");
+    }
+
+    /// 改了密码 → 脏。
+    #[test]
+    fn editing_the_password_makes_it_dirty() {
+        let e = sample_entry();
+        let mut st = EditState::from_entry(&e);
+        st.password = zeroize::Zeroizing::new("a-brand-new-password".into());
+        assert!(st.is_dirty());
+    }
+
+    fn sample_entry() -> Entry {
+        Entry {
+            id: "id-1".into(),
+            title: "站点".into(),
+            username: "user".into(),
+            password: "pw".into(),
+            url: "https://x.test".into(),
+            category: "网站".into(),
+            notes: "note".into(),
+            favorite: false,
+            kind: kinds::LOGIN.to_string(),
+            fields: Vec::new(),
+            totp: None,
+            password_changed_at: None,
+            deleted_at: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn detects_over_limit_fields() {
+        assert!(!field_over_limit(
+            "正常标题",
+            keynest_core::vault::MAX_TITLE_CHARS
+        ));
+        assert!(field_over_limit(
+            &"x".repeat(keynest_core::vault::MAX_TITLE_CHARS + 1),
+            keynest_core::vault::MAX_TITLE_CHARS
+        ));
+    }
+
+    /// 长度按**字符数**算，不是字节数。
+    ///
+    /// 中文一个字占 3 字节——按字节算的话，中文用户在标题里能输入的字数
+    /// 只有预期的三分之一，而且没有任何提示。
+    #[test]
+    fn length_check_counts_characters_not_bytes() {
+        let cjk = "中".repeat(keynest_core::vault::MAX_TITLE_CHARS);
+        assert!(
+            cjk.len() > keynest_core::vault::MAX_TITLE_CHARS,
+            "前提：字节数确实超了"
+        );
+        assert!(
+            !field_over_limit(&cjk, keynest_core::vault::MAX_TITLE_CHARS),
+            "按字节算会误判中文输入超限"
+        );
+    }
+
+    /// 恰好在上限上不算超限（别把边界卡死）。
+    #[test]
+    fn exactly_at_limit_is_not_over() {
+        let max = keynest_core::vault::MAX_NOTES_CHARS;
+        assert!(!field_over_limit(&"x".repeat(max), max));
+        assert!(field_over_limit(&"x".repeat(max + 1), max));
+    }
+
+    /// 打开编辑框但一字未改 → 不算脏。
+    ///
+    /// 这条最关键：锁定时若据此提示"有未保存的修改"，用户每次锁库都会看到
+    /// 一个没有意义的确认框，很快就养成"闭眼点确定"的习惯——
+    /// 那等于把这道防线废掉。
+    #[test]
+    fn untouched_edit_is_not_dirty() {
+        let st = EditState::from_entry(&sample_entry());
+        assert!(!st.is_dirty());
+    }
+
+    #[test]
+    fn changed_title_is_dirty() {
+        let mut st = EditState::from_entry(&sample_entry());
+        st.title = "改过的标题".into();
+        assert!(st.is_dirty());
+    }
+
+    #[test]
+    fn changed_password_is_dirty() {
+        let mut st = EditState::from_entry(&sample_entry());
+        st.password = Zeroizing::new("another".to_string());
+        assert!(st.is_dirty());
+    }
+
+    #[test]
+    fn changed_note_is_dirty() {
+        let mut st = EditState::from_entry(&sample_entry());
+        st.notes.push_str(" 补充");
+        assert!(st.is_dirty());
+    }
+
+    #[test]
+    fn toggled_favorite_is_dirty() {
+        let mut st = EditState::from_entry(&sample_entry());
+        st.favorite = true;
+        assert!(st.is_dirty());
+    }
+
+    /// 改了又改回原值 → 不算脏（比较快照而不是"有没有动过"）。
+    #[test]
+    fn reverted_change_is_not_dirty() {
+        let mut st = EditState::from_entry(&sample_entry());
+        st.title = "临时改的".into();
+        st.title = "站点".into();
+        assert!(!st.is_dirty());
+    }
+
+    /// 新增条目：空表单不算脏，填了内容就算。
+    #[test]
+    fn new_entry_dirty_only_after_input() {
+        let st = EditState::new_entry("网站".into());
+        assert!(!st.is_dirty(), "刚打开的空新增表单不该算脏");
+
+        let mut st = EditState::new_entry("网站".into());
+        st.title = "新站点".into();
+        assert!(st.is_dirty());
+    }
+
+    /// 自定义字段的值变化也要算脏——否则用户改了卡号却收不到提示。
+    #[test]
+    fn changed_custom_field_is_dirty() {
+        let mut e = sample_entry();
+        e.fields = vec![keynest_core::vault::Field {
+            label: "卡号".into(),
+            value: "6222".into(),
+            secret: true,
+        }];
+        let mut st = EditState::from_entry(&e);
+        assert!(!st.is_dirty());
+        st.fields[0].value = Zeroizing::new("6223".to_string());
+        assert!(st.is_dirty());
+    }
+
+    /// 字段数量变化（增/删一行）也要算脏。
+    #[test]
+    fn added_field_row_is_dirty() {
+        let mut st = EditState::from_entry(&sample_entry());
+        st.fields.push(FieldDraft {
+            label: "新字段".into(),
+            value: Zeroizing::new("v".to_string()),
+            secret: false,
+            hint: String::new(),
+        });
+        assert!(st.is_dirty());
+    }
 }

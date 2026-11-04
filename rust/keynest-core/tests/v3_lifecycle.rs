@@ -136,6 +136,57 @@ fn change_master_does_not_touch_body_ciphertext() {
     assert_eq!(reopened.unlock(&new_master).unwrap().entries.len(), 1);
 }
 
+/// 改主密码后，**旧的备份仍然由旧密码保护**。
+///
+/// # 为什么这条值得单独测
+///
+/// 改主密码只换掉 wrap（包裹 DEK 的那层），正文密文不变。
+/// 于是磁盘上的 `.bak.*` 里裹的还是**旧 wrap** —— 只能用**旧密码**打开。
+///
+/// 威胁模型里把这一条列为已知限制：
+/// 「换密码后旧备份 → ❌ 仍由旧密码保护」。
+///
+/// 但用户不知道这一点：界面只提示「主密码已修改」。
+/// 真到了需要从备份恢复的那一天，他用新密码打不开，
+/// 会以为「备份全废了」甚至放弃恢复。
+///
+/// 所以这个事实必须被测试钉住，同时要在界面上说清楚。
+#[test]
+fn old_backups_stay_protected_by_the_old_password_after_change() {
+    let env = Env::new();
+    let mut v = env.vault();
+    v.create(MASTER).unwrap();
+    v.upsert_entry(fake_entry("A", "pw-A")).unwrap();
+
+    let new_master = "y".repeat(MIN_MASTER_LEN + 8);
+    v.change_master(MASTER, &new_master).unwrap();
+
+    // 备份确实存在
+    let backups = v.list_backups();
+    assert!(!backups.is_empty(), "应当有备份");
+
+    // 用**新密码**打开旧备份：必须失败
+    let backup_path = v.backup_slot(1);
+    assert!(
+        backup_path.exists(),
+        "备份文件应当存在: {}",
+        backup_path.display()
+    );
+
+    let mut restored = env.vault();
+    let err = restored
+        .restore_from_backup(&backup_path, &new_master)
+        .expect_err("旧备份不该能用新密码打开");
+    assert_eq!(err.code(), "INVALID_PASSWORD");
+
+    // 用**旧密码**打开：必须成功
+    let mut restored2 = env.vault();
+    restored2
+        .restore_from_backup(&backup_path, MASTER)
+        .expect("旧备份应当仍能用旧密码打开");
+    assert_eq!(restored2.snapshot().unwrap().entries.len(), 1);
+}
+
 #[test]
 fn backups_exist_and_can_be_restored() {
     let env = Env::new();

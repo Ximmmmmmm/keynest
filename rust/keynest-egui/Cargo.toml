@@ -5,11 +5,19 @@ edition = "2021"
 description = "钥巢 — 纯 Rust egui 桌面端"
 license = "MIT OR Apache-2.0"
 
+[build-dependencies]
+# 把 build/icon.ico 与版本信息嵌进 exe，让资源管理器显示应用图标。
+# 用 winresource（winres 的维护版）：winres 已停更，而它需要 .rc 文件与外部工具链。
+winresource = "0.1"
+
 [dependencies]
 eframe = "0.37.0"
 egui = "0.37"
 # 带 version：cargo-deny 会把「只有 path 没有 version」的依赖判为 wildcard
 keynest-core = { path = "../keynest-core", version = "0.4.3" }
+keynest-paths = { path = "../keynest-paths", version = "0.1.0" }
+# 浏览器桥：只暴露 VaultOps trait 与协议类型，GUI 不直接碰管道细节
+keynest-bridge = { path = "../keynest-bridge", version = "0.1.0" }
 raw-window-handle = "0.6"
 zeroize = "1.9.1"
 # 原生文件对话框（Windows IFileDialog），不自己拼路径输入框
@@ -18,6 +26,12 @@ webbrowser = "1"
 rfd = "0.15"
 # 备份文件名里的时间戳
 chrono = "0.4"
+# 启动时把图标解码成 RGBA，交给窗口（任务栏/Alt+Tab 用的就是它）。
+#
+# 版本与特性必须与 eframe 依赖的那份对齐（eframe 传 `features=["png"]`），
+# 否则会多编一份 image，白涨二进制体积。
+# 不引入 `image` 的默认特性：那会拖进 jpeg/tiff/webp 一整套解码器。
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 # 截图工具：把界面渲染成 PNG 做视觉回归

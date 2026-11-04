@@ -36,8 +36,11 @@ Three design rules:
 
 - Master-password unlock, idle auto-lock (uses the shorter of app-idle and system-idle)
 - Entries with title, username, password, URL, category, notes
-- Entry types: login, note, card, identity — and user-defined types with field templates
-- Custom fields (any key/value), each can be individually masked
+- Entry types: login, note, card, identity, **API key** — plus user-defined types with
+  field templates. The API key type manages AI service credentials (provider, the key
+  itself masked, base URL, org, quota, expiry); existing vaults get it on next open
+- Custom fields (user-defined key/value pairs, each length-bounded with a live
+  character counter), each can be individually masked
 - Search across title, username, URL, notes, category, type and custom field values
 - Category and type management (add / rename / delete, kept consistent with entries)
 - Favorites, and a recycle bin (soft delete → restore or permanently delete)
@@ -167,6 +170,18 @@ Also in that directory:
 
 ---
 
+## Browser extension
+
+> **This version does not ship an extension install entry point.**
+>
+> The extension source still lives in `browser-extension/` (you can load and
+> build it yourself), but the desktop app's Settings → Browser page has been
+> removed — this release does not distribute the extension with the program.
+> The bridge protocol and host installer remain complete in
+> `rust/keynest-bridge/`; there is simply no GUI entry for them.
+>
+> To wire it up you would call `keynest_bridge::hostinstall::install()` yourself.
+
 ## Limitations
 
 - Windows x64 only for now.
@@ -175,12 +190,21 @@ Also in that directory:
 - TOTP secrets must be pasted; there is no QR-code scanning.
 - Custom fields are exported to JSON but **not** to CSV (Bitwarden's `fields` column uses a
   private serialisation format).
-- No browser autofill.
+- Browser autofill is **manually triggered**: pick an entry in the extension popup. There is
+  no "fill on page load", deliberately — silent filling would hand a password to a page the
+  user never confirmed.
+- The extension ships four modules: password filling, ad/tracker blocking, reader mode, and
+  dark mode.
 - Rollback attacks (replacing `vault.dat` with an older copy) cannot be detected.
 - Plaintext exports are unencrypted by nature; the program can warn, but cannot protect the
   file afterwards.
-- The UI has no end-to-end click tests; behaviour is covered by unit tests and by rendering
-  screenshots, not by GUI automation.
+- UI automation runs egui headlessly (`Context::run_ui`): it asserts that rendering does not
+  panic, that every filter/sort combination renders, that all settings tabs and the edit
+  dialog render, and that **click hit-testing selects the row you clicked**. It runs inside
+  the test harness, not a real window — font rasterisation, high-DPI scaling and IME
+  behaviour still need manual confirmation.
+- The full chain "unlock → bridge → fill" still requires a GUI acceptance run
+  (`test/acceptance/run.mjs`), which needs headed Chrome.
 
 ---
 

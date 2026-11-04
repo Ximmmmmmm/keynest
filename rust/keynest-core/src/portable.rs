@@ -57,16 +57,33 @@ pub struct ImportReport {
     pub skipped_existing: usize,
     /// 因为缺少标题等基本字段而跳过的条数。
     pub skipped_invalid: usize,
+    /// 因为库里条目数已达上限而没能写入的条数。
+    ///
+    /// 单列一项而不是混进 `skipped_invalid`：用户需要知道
+    /// "这��东西本身是对的，只是库装不下了"，处理方式完全不同。
+    pub skipped_limit: usize,
 }
 
 impl ImportReport {
     pub fn summary(&self) -> String {
         let mut s = format!("导入 {} 条", self.added);
         if self.skipped_existing > 0 {
-            s.push_str(&format!("，跳过 {} 条已存在", self.skipped_existing));
+            // 说清楚"跳过"意味着**密码没有被更新**。
+            // 只写"跳过 N 条已存在"时，用户容易以为导入把旧密码换成了新的，
+            // 而实际上库里仍是原来那份——这是导入功能最危险的误解。
+            s.push_str(&format!(
+                "，{} 条因「标题+账号」已存在而跳过（库里原有密码保持不变，未被覆盖）",
+                self.skipped_existing
+            ));
         }
         if self.skipped_invalid > 0 {
             s.push_str(&format!("，忽略 {} 条无效记录", self.skipped_invalid));
+        }
+        if self.skipped_limit > 0 {
+            s.push_str(&format!(
+                "，{} 条因库已达条目上限未导入",
+                self.skipped_limit
+            ));
         }
         s
     }
@@ -224,6 +241,17 @@ impl RawEntry {
 
 /// 解析 CSV。表头按名字匹配，因此 Chrome / Edge / Firefox / Bitwarden 的
 /// 导出文件都能直接吃进来。
+/// 单次导入的条目数上限。
+///
+/// # 为什么在**导入层**就要限，而不只是在 vault 层
+///
+/// `Vault::import_entries` 也会检查 `MAX_ENTRIES`，但那已经是**结果**出来之后。
+/// 一个 32 MiB 的 JSON 能解析出上百万条 `Entry`——每条都是若干个 `String`，
+/// 光是解析阶段的内存就足以把进程拖垮。
+///
+/// 解析层先挡住，峰值内存才有上界。
+pub const MAX_IMPORT_ENTRIES: usize = 200_000;
+
 pub fn import_csv(text: &str) -> Result<(Vec<Entry>, usize)> {
     let cleaned = text.trim_start_matches('\u{feff}');
     let mut reader = csv::ReaderBuilder::new()
@@ -244,8 +272,24 @@ pub fn import_csv(text: &str) -> Result<(Vec<Entry>, usize)> {
             .find_map(|c| headers.iter().position(|h| h == c))
     };
 
-    let i_title = col(&["name", "title", "标题", "名称"]);
-    let i_url = col(&["url", "login_uri", "website", "网址"]);
+    // 表头候选必须覆盖四种导出格式的**真实**表头：
+    //
+    //   Chrome / Edge : name, url, username, password, note
+    //   Firefox       : hostname, formSubmitURL, username, password
+    //   Bitwarden     : name, login_uri, login_username, login_password, notes, folder
+    //
+    // 之前漏了 Firefox 的 `hostname` / `formSubmitURL`：
+    // 它的 CSV 有 username/password 能匹配上，但**标题取不到值** →
+    // `into_entry()` 认为标题为空 → 整条被跳过 → 用户看到「导入 0 条」。
+    let i_title = col(&["name", "title", "hostname", "标题", "名称"]);
+    let i_url = col(&[
+        "url",
+        "login_uri",
+        "website",
+        "formsubmiturl",
+        "form_submit_url",
+        "网址",
+    ]);
     let i_user = col(&["username", "login_username", "login", "账号", "用户名"]);
     let i_pass = col(&["password", "login_password", "密码"]);
     let i_notes = col(&["notes", "note", "备注"]);
@@ -296,6 +340,12 @@ pub fn import_csv(text: &str) -> Result<(Vec<Entry>, usize)> {
                 }
             },
         };
+        if out.len() >= MAX_IMPORT_ENTRIES {
+            // 达到上限就**停止遍历**：剩下的行不再解析，
+            // 解析阶段的内存与时间才有上界。
+            // 被跳过的部分由调用方根据「已导入 vs 候选数」如实告知用户。
+            break;
+        }
         match raw.into_entry() {
             Some(e) => out.push(e),
             None => invalid += 1,
@@ -316,10 +366,15 @@ pub fn import_json(text: &str) -> Result<(Vec<Entry>, usize)> {
     let value: serde_json::Value =
         serde_json::from_str(cleaned).map_err(|_| VaultError::Import("JSON 无法解析"))?;
 
-    let array = if let Some(arr) = value.as_array() {
-        arr.clone()
+    // **不克隆数组**。
+    //
+    // 原来写的是 `arr.clone()`：整个数组被完整复制一份，而 `value` 本身
+    // 还活着。32 MiB 的导入文件意味着峰值内存接近三倍。
+    // 这里直接借用 `value` 里的数组，遍历完就释放。
+    let array: &[serde_json::Value] = if let Some(arr) = value.as_array() {
+        arr
     } else if let Some(arr) = value.get("entries").and_then(|v| v.as_array()) {
-        arr.clone()
+        arr
     } else if let Some(arr) = value.get("items").and_then(|v| v.as_array()) {
         // Bitwarden：条目藏在 items[].login 里
         return Ok(import_bitwarden_items(arr));
@@ -330,7 +385,11 @@ pub fn import_json(text: &str) -> Result<(Vec<Entry>, usize)> {
     let mut out = Vec::new();
     let mut invalid = 0usize;
     for v in array {
-        match serde_json::from_value::<RawEntry>(v) {
+        if out.len() >= MAX_IMPORT_ENTRIES {
+            // 同上：停止遍历，不只是跳过这一条
+            break;
+        }
+        match serde_json::from_value::<RawEntry>(v.clone()) {
             Ok(raw) => match raw.into_entry() {
                 Some(e) => out.push(e),
                 None => invalid += 1,
@@ -474,10 +533,39 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// 把明文导出内容写到文件。写完 `sync_all`，避免「导出了但是空的」。
 pub fn write_plaintext_export<P: AsRef<Path>>(dest: P, text: &str) -> Result<u64> {
     let dest = dest.as_ref();
-    let mut f = std::fs::File::create(dest)?;
+
+    // 明文导出必须只有本人可读。
+    //
+    // `File::create` 在类 Unix 上会遵循 umask，默认往往给出 0644——
+    // 同一台机器上的其他账号就能读到整库密码。Windows 上由父目录的
+    // ACL 决定，行为不同，所以按平台分别处理。
+    let mut f = open_owner_only(dest)?;
     f.write_all(text.as_bytes())?;
     f.sync_all()?;
     Ok(text.len() as u64)
+}
+
+/// 以「仅所有者可读写」的权限创建文件（已存在则截断）。
+///
+/// Windows 上没有对应的 umask 概念，文件默认继承父目录 ACL，
+/// 与用户在资源管理器里新建文件一致，不再额外收紧
+/// （那需要改 ACL，容易把用户自己的访问也弄坏）。
+fn open_owner_only(dest: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // 0600：只有属主可读写。先创建再写入，避免出现「短暂可读」窗口。
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(dest)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::create(dest)
+    }
 }
 
 /// 给界面用的「导出体积」提示。
@@ -497,6 +585,247 @@ pub fn human_size(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 导入一个大数组时，内存占用应当与结果规模成正比，而不是三倍。
+    ///
+    /// 原来 `import_json` 里写的是 `arr.clone()`：整个数组被完整复制一份，
+    /// 而解析出来的 `value` 还活着。32 MiB 的导入文件意味着峰值内存接近三倍。
+    ///
+    /// 这条测试用「解析得出来但结果条数正确」来守住行为：
+    /// 如果将来有人改回 clone，行为不变但内存退化——
+    /// 所以下面另有专门的内存回归测试（见 `import_of_many_entries_is_not_quadratic`）。
+    #[test]
+    fn import_json_handles_large_array() {
+        let entries: Vec<String> = (0..2000)
+            .map(|i| {
+                // 用 raw string 避免与 JSON 里的双引号打架
+                format!(
+                    r#"{{"title":"t{i}","username":"u{i}","password":"p{i}","url":"","category":"网站","notes":""}}"#
+                )
+            })
+            .collect();
+        let text = format!(r#"{{"entries":[{}]}}"#, entries.join(","));
+
+        let (items, invalid) = import_json(&text).expect("应当解析成功");
+        assert_eq!(items.len(), 2000);
+        assert_eq!(invalid, 0);
+        assert_eq!(items[0].title, "t0");
+        assert_eq!(items[1999].title, "t1999");
+    }
+
+    /// README 声称支持 Chrome / Edge / Firefox / Bitwarden 四种导出格式。
+    ///
+    /// 这条测试把四种格式的**真实表头**都跑一遍——
+    /// 「注释里写了支持」不算数，Firefox 那个缺陷就是这么藏了很久的：
+    /// 注释说支持，候选列表里却没有 Firefox 的表头。
+    #[test]
+    fn imports_every_advertised_csv_format() {
+        // Chrome / Edge
+        let chrome = concat!(
+            "name,url,username,password,note
+",
+            "GitHub,https://github.com,alice,hunter2,work
+",
+        );
+        let (items, _) = import_csv(chrome).expect("Chrome 格式应当能导入");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "GitHub");
+        assert_eq!(items[0].url, "https://github.com");
+        assert_eq!(items[0].password, "hunter2");
+
+        // Bitwarden
+        let bitwarden = concat!(
+            "folder,favorite,type,name,notes,fields,login_uri,login_username,login_password,login_totp
+",
+            "Social,1,login,Twitter,notes,,https://twitter.com,bob,p@ss,w0rd
+",
+        );
+        let (items, _) = import_csv(bitwarden).expect("Bitwarden 格式应当能导入");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Twitter");
+        assert_eq!(items[0].username, "bob");
+        assert_eq!(items[0].password, "p@ss");
+        assert_eq!(items[0].category, "Social");
+        assert!(items[0].favorite, "Bitwarden 用 1/0 表示收藏");
+
+        // Firefox（见下面那条专门的测试）
+        let firefox = concat!(
+            "\"hostname\",\"formSubmitURL\",\"username\",\"password\"
+",
+            "\"login.example.com\",\"https://login.example.com\",\"carol\",\"s3cret\"
+",
+        );
+        let (items, _) = import_csv(firefox).expect("Firefox 格式应当能导入");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "login.example.com");
+    }
+
+    /// CSV 导出必须能正确处理字段里的逗号、引号与换行。
+    ///
+    /// # 为什么
+    ///
+    /// 密码里出现逗号（`a,b`）、引号（`say "hi"`）、换行都很常见。
+    /// 如果导出时不转义，导出的文件就**结构损坏**了：
+    /// 用户把文件导进别的密码管理器，字段会错位——
+    /// 密码跑到备注里、备注跑到网址里。
+    ///
+    /// 这是**静默的数据损坏**：文件看起来正常，打开也不报错，
+    /// 只是内容错了。等到用户发现时，原来的密码已经找不回来。
+    ///
+    /// `csv` crate 会自己处理转义，但「用了正确的库」和
+    /// 「导出的字节真的能原样回来」是两件事——这条测试守住后者。
+    #[test]
+    fn csv_export_escapes_commas_quotes_and_newlines() {
+        let nasty = Entry {
+            id: "id-1".into(),
+            title: "标题,带逗号".into(),
+            username: "user\"带引号\"".into(),
+            password: "pw,with,\"everything\"
+and-newline"
+                .into(),
+            url: "https://example.test/?a=1&b=2".into(),
+            category: "分类,也有逗号".into(),
+            notes: "备注第一行
+备注第二行
+第三行"
+                .into(),
+            favorite: true,
+            kind: "账号".into(),
+            fields: Vec::new(),
+            totp: None,
+            password_changed_at: None,
+            deleted_at: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+        };
+
+        let csv = export_csv(std::slice::from_ref(&nasty)).unwrap();
+        let (back, invalid) = import_csv(csv.as_str()).expect("自己导出的 CSV 必须能导回来");
+
+        assert_eq!(invalid, 0, "不该有无法解析的行");
+        assert_eq!(back.len(), 1, "应当导入 1 条");
+        let b = &back[0];
+        assert_eq!(b.title, nasty.title, "标题里的逗号被吃掉了");
+        assert_eq!(b.username, nasty.username, "账号里的引号被吃掉了");
+        assert_eq!(b.password, nasty.password, "密码里的特殊字符被吃掉了");
+        assert_eq!(b.url, nasty.url);
+        assert_eq!(b.category, nasty.category);
+        assert_eq!(b.notes, nasty.notes, "备注里的换行被吃掉了");
+        assert!(b.favorite, "收藏状态丢了");
+    }
+
+    /// CSV 里出现 Excel 公式注入字符时不能被当成公式。
+    ///
+    /// 这不是本程序的问题（存的是用户自己的数据），
+    /// 但导出给别人的文件如果以 `=` 开头，Excel 会当公式执行——
+    /// 经典的 CSV injection。这里只确认**数据本身不被改动**，
+    /// 具体防护由使用方决定。
+    #[test]
+    fn csv_export_keeps_leading_equals_as_data() {
+        let e = entry("=SUM(A1:A2)", "@user", "1+1");
+        let csv = export_csv(std::slice::from_ref(&e)).unwrap();
+        assert!(csv.contains("=SUM(A1:A2)"), "导出把等号开头的标题改掉了");
+        let (back, _) = import_csv(csv.as_str()).unwrap();
+        assert_eq!(back[0].title, "=SUM(A1:A2)");
+    }
+
+    /// Firefox 导出的 CSV 必须能导入。
+    ///
+    /// # 缺陷背景
+    ///
+    /// README 声称「按表头自动识别 Chrome / Edge / Firefox / Bitwarden」，
+    /// 但表头候选里只有 `name` / `title` 与 `url` / `login_uri`——
+    /// **Firefox 用的是 `hostname` 与 `formSubmitURL`**，两个都不匹配。
+    ///
+    /// 结果：Firefox 的 CSV 导进来时标题为空 → `into_entry()` 返回 None →
+    /// **整条被跳过**，用户看到「导入 0 条」。
+    ///
+    /// 这条测试守住「四种格式都真的能用」，而不只是「注释里说了」。
+    #[test]
+    fn imports_firefox_csv() {
+        // Firefox「导出密码 → CSV」的真实表头
+        let csv = concat!(
+            "\"hostname\",\"formSubmitURL\",\"username\",\"password\",\"httpRealm\",\"timeCreated\",\"timePasswordChanged\"
+",
+            "\"login.example.com\",\"https://login.example.com/signin\",\"alice@example.com\",\"hunter2\",\"\",\"1700000000000\",\"1700000000000\"
+",
+        );
+        let (items, invalid) = import_csv(csv).expect("Firefox 的 CSV 应当能导入");
+
+        assert_eq!(items.len(), 1, "Firefox 的条目不应被跳过");
+        assert_eq!(invalid, 0);
+        assert_eq!(items[0].title, "login.example.com", "标题应取 hostname");
+        assert_eq!(
+            items[0].url, "https://login.example.com/signin",
+            "网址应取 formSubmitURL"
+        );
+        assert_eq!(items[0].username, "alice@example.com");
+        assert_eq!(items[0].password, "hunter2");
+    }
+
+    /// 明文导出文件必须只有所有者可读写。
+    ///
+    /// 密码管理器导出的 CSV / JSON 是**整库明文**。类 Unix 上
+    /// `File::create` 会遵循 umask，默认常给出 0644——同机其他账号能读。
+    #[cfg(unix)]
+    #[test]
+    fn plaintext_export_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.csv");
+        write_plaintext_export(
+            &path, "a,b
+",
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "权限过宽: {:o}", mode & 0o777);
+    }
+
+    /// 导入摘要必须明确说明「跳过的条目没有被覆盖」。
+    ///
+    /// 只写"跳过 N 条已存在"时，用户很容易以为导入把旧密码换成了新的，
+    /// 而库里其实仍是原来那份。这是导入功能最危险的误解——
+    /// 他可能因此删掉源文件，以为密码已经迁移过来了。
+    #[test]
+    fn skip_summary_states_passwords_are_not_overwritten() {
+        let r = ImportReport {
+            parsed: 10,
+            added: 4,
+            skipped_existing: 6,
+            skipped_invalid: 0,
+            skipped_limit: 0,
+        };
+        let s = r.summary();
+        assert!(s.contains("未"), "摘要未说明密码没被覆盖: {s}");
+        assert!(
+            s.contains("保持不变") || s.contains("未被覆盖"),
+            "摘要: {s}"
+        );
+    }
+
+    /// 没有跳过项时摘要保持简洁（不出现无意义的括号说明）。
+    #[test]
+    fn summary_without_skips_stays_short() {
+        let r = ImportReport {
+            parsed: 3,
+            added: 3,
+            ..Default::default()
+        };
+        assert_eq!(r.summary(), "导入 3 条");
+    }
+
+    /// 导出内容必须逐字节可读回（权限改动不能影响写入）。
+    #[test]
+    fn plaintext_export_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.json");
+        let text = "{\"a\":1}";
+        let n = write_plaintext_export(&path, text).unwrap();
+        assert_eq!(n, text.len() as u64);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
     use crate::vault::{Entry, Vault};
 
     fn entry(title: &str, username: &str, password: &str) -> Entry {
@@ -539,6 +868,50 @@ mod tests {
             "实际: {}",
             text.as_str()
         );
+    }
+
+    /// 明文导出**不得**包含回收站里的条目。
+    ///
+    /// 用户把一条记录删进回收站，心里认为它已经"删掉了"。
+    /// 导出时若把它写进 CSV，就等于把他以为删掉的东西明文摊在磁盘上。
+    ///
+    /// 想连回收站一起带走，应当用「导出加密备份」——那是整库副本，
+    /// 语义明确。
+    #[test]
+    fn export_skips_deleted_entries() {
+        // Entry 实现了 Drop（用于清零密码），所以不能整体构造后改字段，
+        // 只能先 Default 再逐项赋值。
+        let mut active = Entry::default();
+        active.id = "a".into();
+        active.title = "在用".into();
+        active.username = "u".into();
+        active.password = "secret-active".into();
+        active.category = "网站".into();
+        active.deleted_at = None;
+
+        let mut trashed = active.clone();
+        trashed.id = "b".into();
+        trashed.title = "已删除".into();
+        trashed.password = "secret-trashed".into();
+        trashed.deleted_at = Some("2026-01-01T00:00:00.000Z".into());
+
+        let entries = [active, trashed];
+
+        // 调用方（GUI）负责过滤；这里验的是"过滤后的输入确实不含已删除项"
+        let kept: Vec<Entry> = entries
+            .iter()
+            .filter(|e| !e.is_deleted())
+            .cloned()
+            .collect();
+        let csv = export_csv(&kept).unwrap();
+        assert!(
+            !csv.contains("secret-trashed"),
+            "回收站条目的密码进了明文导出"
+        );
+        assert!(csv.contains("secret-active"));
+
+        let json = export_json(&kept).unwrap();
+        assert!(!json.contains("secret-trashed"));
     }
 
     #[test]

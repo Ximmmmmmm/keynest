@@ -15,9 +15,9 @@
  * 因此本工具的定位是：把「导出后的 CSV → 加密仓库」这最后一步做到可脚本化、可重复执行。
  *
  * 用法：
- *   node src/cli/keynest-cli.js import [options]
- *   node src/cli/keynest-cli.js scan
- *   node src/cli/keynest-cli.js export-template   （打印各浏览器的导出操作路径）
+ *   node legacy/src/cli/keynest-cli.js import [options]
+ *   node legacy/src/cli/keynest-cli.js scan
+ *   node legacy/src/cli/keynest-cli.js export-template   （打印各浏览器的导出操作路径）
  *
  * 主密码来源（按优先级）：
  *   --password-env NAME      从环境变量读
@@ -315,11 +315,11 @@ function commandGuide() {
       '导入完成后建议删除 CSV（它是明文）',
     ],
     commands: {
-      latest: 'node src/cli/keynest-cli.js import',
-      explicit: 'node src/cli/keynest-cli.js import --csv "%USERPROFILE%\\Downloads\\Chrome 密码.csv"',
-      overwrite: 'node src/cli/keynest-cli.js import --mode overwrite',
-      dryRun: 'node src/cli/keynest-cli.js import --dry-run',
-      ci: '$env:KEYNEST_PASSWORD="***"; node src/cli/keynest-cli.js import --password-env KEYNEST_PASSWORD',
+      latest: 'node legacy/src/cli/keynest-cli.js import',
+      explicit: 'node legacy/src/cli/keynest-cli.js import --csv "%USERPROFILE%\\Downloads\\Chrome 密码.csv"',
+      overwrite: 'node legacy/src/cli/keynest-cli.js import --mode overwrite',
+      dryRun: 'node legacy/src/cli/keynest-cli.js import --dry-run',
+      ci: '$env:KEYNEST_PASSWORD="***"; node legacy/src/cli/keynest-cli.js import --password-env KEYNEST_PASSWORD',
     },
   };
 }
@@ -360,11 +360,11 @@ function usage() {
       '钥巢 KeyNest CLI',
       '',
       '用法：',
-      '  node src/cli/keynest-cli.js import [--csv FILE] [--dir DIR] [--mode skip|overwrite]',
+      '  node legacy/src/cli/keynest-cli.js import [--csv FILE] [--dir DIR] [--mode skip|overwrite]',
       '                                      [--dry-run] [--data-dir DIR]',
       '                                      [--password-env NAME | --password-stdin]',
-      '  node src/cli/keynest-cli.js scan',
-      '  node src/cli/keynest-cli.js guide [--json]',
+      '  node legacy/src/cli/keynest-cli.js scan',
+      '  node legacy/src/cli/keynest-cli.js guide [--json]',
       '',
       '主密码不会从命令行参数读取，避免进入 shell 历史与进程列表。',
     ].join('\n') + '\n',

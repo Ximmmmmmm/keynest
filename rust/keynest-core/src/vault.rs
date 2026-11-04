@@ -97,6 +97,20 @@ const SCRYPT_MEM_LIMIT: u64 = 256 * 1024 * 1024;
 /// 单个库文件的大小上限。库是纯 JSON + base64，64 MiB 对应约 5 万条条目。
 pub const MAX_VAULT_BYTES: u64 = 64 * 1024 * 1024;
 
+/// 单个库的条目数上限。
+///
+/// # 为什么必须在**导入**时也挡住
+///
+/// `MAX_VAULT_BYTES` 只在**读盘**时检查，管不到"内存里刚导入进来的一大批条目"。
+/// 一个 32 MiB 的 CSV 可以轻松造出上百万条记录，随后：
+///
+/// * 每次保存都要序列化全部条目再加密 → 界面卡死
+/// * 加密后的文件远超 64 MiB → 保存失败，库从此写不进去
+/// * 用户已经看到的条目却存不下去 → 实际的数据丢失
+///
+/// 5 万条与 `MAX_VAULT_BYTES` 的估算一致（64 MiB ≈ 5 万条）。
+pub const MAX_ENTRIES: usize = 50_000;
+
 /// 供上层（导出/备份前做预检查）读取的大小上限。
 pub fn max_vault_bytes() -> u64 {
     MAX_VAULT_BYTES
@@ -489,7 +503,11 @@ impl fmt::Debug for VaultFile {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 需要 `PartialEq`：设置页要判断「用户改了但还没保存」。
+///
+/// 这不只是体验问题——自动锁定从 60 分钟改成 5 分钟是**更安全**的方向，
+/// 用户以为改好了、结果没点保存就关了窗口，程序仍然 60 分钟才锁。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(rename = "autoLockMinutes")]
     pub auto_lock_minutes: u32,
@@ -500,6 +518,28 @@ pub struct Settings {
     #[serde(rename = "importPrompted")]
     pub import_prompted: bool,
 }
+
+/// 自动锁定上限（分钟）。1440 = 24 小时。
+///
+/// 为什么要有上限：自动锁定是密码管理器最基本的防线。设成几年
+/// 等于把它关掉，而用户往往是在「嫌它太频繁」的时候随手填个大数，
+/// 并不会意识到自己刚刚关掉了什么。
+pub const MAX_AUTO_LOCK_MINUTES: u32 = 1440;
+
+/// 剪贴板清理间隔上限（秒）。
+///
+/// 密码在剪贴板里停留越久，被其他程序读取的机会越多。
+/// 300 秒已经足够完成粘贴，再长就没有安全意义了。
+pub const MAX_CLIPBOARD_SECONDS: u32 = 300;
+
+/// 密码显示时长上限（秒）。
+pub const MAX_REVEAL_SECONDS: u32 = 300;
+
+/// 剪贴板清理间隔下限（秒）。
+///
+/// 低于 3 秒时，用户还没切到目标窗口内容就被清掉了，
+/// 表现为「点了复制但粘贴出来是空的」。
+pub const MIN_CLIPBOARD_SECONDS: u32 = 3;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -523,8 +563,15 @@ pub mod kinds {
     pub const CARD: &str = "信用卡";
     pub const IDENTITY: &str = "身份";
 
+    /// AI 服务的 API Key（OpenAI / Anthropic / 自建…）。
+    ///
+    /// 做成一个类型而不是专门功能：类型系统本来就是「标签 + 字段模板」，
+    /// API Key 只是又一组字段。这样它自动获得搜索、筛选、收藏、回收站、
+    /// 导入导出、字段打码，不需要为它写一套 UI 或改 `vault.dat` 格式。
+    pub const APIKEY: &str = "API Key";
+
     /// 默认的类型列表。
-    pub const DEFAULT_TYPES: [&str; 4] = [LOGIN, NOTE, CARD, IDENTITY];
+    pub const DEFAULT_TYPES: [&str; 5] = [LOGIN, NOTE, CARD, IDENTITY, APIKEY];
 
     /// 老版本把类型存成 `login` / `card` 这种英文 id，读进来要换成中文名。
     pub fn migrate_legacy(value: &str) -> Option<&'static str> {
@@ -537,22 +584,54 @@ pub mod kinds {
         }
     }
 
-    /// 这种类型默认带哪些字段标签（只有内置类型有模板）。
-    pub fn template(name: &str) -> &'static [(&'static str, bool)] {
+    /// 这种类型默认带哪些字段（只有内置类型有模板）。
+    /// 返回（标签, 是否打码, 输入提示）。
+    ///
+    /// 提示语是**纯增量**的：老库里存的模板没有 hint，读进来是空串，
+    /// 编辑框就不显示灰字。这不需要数据迁移。
+    pub fn template(name: &str) -> &'static [(&'static str, bool, &'static str)] {
         match name {
             CARD => &[
-                ("持卡人", false),
-                ("卡号", true),
-                ("有效期", false),
-                ("安全码", true),
-                ("发卡行", false),
+                ("持卡人", false, "持卡人姓名"),
+                ("卡号", true, "16 位卡号"),
+                ("有效期", false, "MM/YY"),
+                ("安全码", true, "背面 3–4 位"),
+                ("发卡行", false, "例如 招商银行"),
             ],
             IDENTITY => &[
-                ("姓名", false),
-                ("证件号", true),
-                ("出生日期", false),
-                ("地址", false),
-                ("电话", false),
+                ("姓名", false, "证件上的姓名"),
+                ("证件号", true, "身份证 / 护照号"),
+                ("出生日期", false, "YYYY-MM-DD"),
+                ("地址", false, "常住地址"),
+                ("电话", false, "带国家码，如 +86 138…"),
+            ],
+            // API Key 的字段设计见 docs/design-ai-apikey-type.md
+            //
+            // 字段取舍的依据（对照 1Password 的 API Credential 类别、
+            // AWS Secrets Manager 的密钥结构建议、以及社区提案）：
+            //
+            // * **两段式凭据要有位置放**：AWS / 阿里云这类是「访问密钥 ID +
+            //   访问密钥 Secret」两段，只存一个 Secret 等于存不全，用户还得
+            //   用备注补——那就白做了。所以「Key ID」和「Secret」分开。
+            // * **环境必须能筛**：同一个服务在 dev / prod 各有一把 key 是常态。
+            //   没有这个字段，两条记录长得一模一样，靠标题里的 `(prod)` 硬分，
+            //   迟早出错。做成一等字段才能按它筛。
+            // * **scope 决定泄露后的影响面**：只读还是读写、能访问哪些资源。
+            //   这条写下来，出事时才知道该慌到什么程度。
+            // * **轮换周期**比「到期时间」更有用：很多 key 根本不过期，
+            //   但该多久换一次是运维纪律。
+            //
+            // 全部用 `secret: true` 的只有 Secret 本身。Key ID 不是秘密
+            // （它会出现在请求头与日志里），打码只会让人核对不了。
+            APIKEY => &[
+                ("服务商", false, "OpenAI / Anthropic / AWS / 自建…"),
+                ("环境", false, "prod / staging / dev"),
+                ("Key ID", false, "AKIA… 这类公开标识，没有就留空"),
+                ("Secret", true, "sk-… / 访问密钥，粘贴进来"),
+                ("权限范围", false, "只读 / 读写 / 具体 scope"),
+                ("Base URL", false, "走代理或自建时填，官方留空"),
+                ("到期时间", false, "YYYY-MM-DD，不过期就留空"),
+                ("轮换周期", false, "例如 90 天"),
             ],
             _ => &[],
         }
@@ -577,6 +656,16 @@ pub struct FieldTemplate {
     pub label: String,
     #[serde(default)]
     pub secret: bool,
+    /// 输入框里的灰字提示（`hint_text`）。
+    ///
+    /// 「环境」「权限范围」这类字段光有标签不够——用户不知道
+    /// 该填 `prod` 还是「生产环境」，也不知道 scope 要不要写全。
+    /// 一句示例比一整段说明更容易被读完。
+    ///
+    /// `serde(default)`：老库里的模板没有这个字段，读进来是空串，
+    /// 编辑框就不显示提示。这是**纯增量**的改动，不需要数据迁移。
+    #[serde(default)]
+    pub hint: String,
 }
 
 /// 兼容两种写法：老库里 `types` 是字符串数组，新格式是对象数组。
@@ -627,9 +716,10 @@ impl TypeDef {
 fn builtin_template(name: &str) -> Vec<FieldTemplate> {
     kinds::template(name)
         .iter()
-        .map(|(label, secret)| FieldTemplate {
+        .map(|(label, secret, hint)| FieldTemplate {
             label: (*label).to_string(),
             secret: *secret,
+            hint: (*hint).to_string(),
         })
         .collect()
 }
@@ -665,12 +755,77 @@ impl fmt::Debug for Field {
 /// 字段数量上限。防御畸形库/导入文件把界面撑爆。
 pub const MAX_FIELDS: usize = 50;
 
+/// 条目各字段的长度上限（字符数，不是字节数）。
+///
+/// # 为什么要有
+///
+/// 没有上限时，一个 100 MB 的备注字段就能让整个密码库超过
+/// `MAX_VAULT_BYTES`（64 MiB）——从此**再也保存不了**：
+/// 每��保存都被文件大小挡住，用户只能手工改文件。
+///
+/// 这不只是"数据脏"，是**库被永久写坏**。
+///
+/// # 为什么与 bridge 的限制一致
+///
+/// `keynest-bridge` 的 `limits.rs` 里已经有一组同样的上限
+/// （title 256 / username 320 / password 1024 / url 2048）。
+/// 浏览器填充进来的条目会被 bridge 挡下，但从 GUI 直接添加的不会——
+/// 两条路径的限制必须一致，否则「换个入口就能绕过」。
+pub const MAX_TITLE_CHARS: usize = 256;
+pub const MAX_USERNAME_CHARS: usize = 320;
+pub const MAX_PASSWORD_CHARS: usize = 1024;
+pub const MAX_URL_CHARS: usize = 2048;
+pub const MAX_NOTES_CHARS: usize = 64 * 1024;
+pub const MAX_CATEGORY_CHARS: usize = 64;
+pub const MAX_KIND_CHARS: usize = 64;
+
+/// TOTP 配置的长度上限。
+///
+/// TOTP 密钥是 Base32，正常是 16–32 字符。上限给到 512 足够，
+/// 又能挡住"误粘贴了一个几 MB 的文件"。
+pub const MAX_TOTP_CHARS: usize = 512;
+
 impl VaultData {
+    /// 找出重复的条目 id。
+    ///
+    /// `upsert_entry` 靠 `id` 定位条目。两条同 id 的记录会让
+    /// 「编辑其中一条」变成「覆盖排在前面的那条」，另一条永远改不动也删不掉。
+    ///
+    /// 正常情况下 id 由 `Uuid::new_v4` 生成，不可能重复。
+    /// 但库文件被手工编辑过、或由第三方工具生成时可能出现——
+    /// 解锁后检查一次，能给出「库里有 N 组重复记录」这种具体提示，
+    /// 而不是让用户在编辑时莫名发现内容串了。
+    ///
+    /// 返回去重后的 id 列表（顺序按首次出现）。
+    pub fn find_duplicate_ids(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut dups = Vec::new();
+        for e in &self.entries {
+            if !seen.insert(e.id.as_str()) && !dups.iter().any(|d: &String| d == &e.id) {
+                dups.push(e.id.clone());
+            }
+        }
+        dups
+    }
     /// 兼容老数据：类型曾经是 `login` / `card` 这样的英文 id，现在存中文名。
     ///
     /// 必须在**读入之后、任何界面逻辑之前**做掉——否则老库里的条目会显示成
     /// `login`，而且不在任何类型筛选里。
     fn migrate_legacy(&mut self) {
+        // 旧库里可能已经存着危险设置值（老版本没做夹紧，或库文件被手工改过）。
+        // 只在**打开时**修一次内存副本——不改磁盘上的文件，
+        // 用户下次在设置页点保存时才会写回新值。这样不会在用户不知情的
+        // 情况下改写他的库。
+        self.settings.auto_lock_minutes = self
+            .settings
+            .auto_lock_minutes
+            .clamp(1, MAX_AUTO_LOCK_MINUTES);
+        self.settings.clipboard_clear_seconds = self
+            .settings
+            .clipboard_clear_seconds
+            .clamp(MIN_CLIPBOARD_SECONDS, MAX_CLIPBOARD_SECONDS);
+        self.settings.reveal_seconds = self.settings.reveal_seconds.clamp(1, MAX_REVEAL_SECONDS);
+
         for e in self.entries.iter_mut() {
             if let Some(name) = kinds::migrate_legacy(&e.kind) {
                 e.kind = name.to_string();
@@ -688,6 +843,17 @@ impl VaultData {
         }
         if self.types.is_empty() {
             self.types = default_types();
+        }
+
+        // 「API Key」是后加的内置类型。类型表存在库文件里，
+        // 所以**已有的库不会自动出现它**——这里补一次。
+        //
+        // 只补这一个，不碰其它内置类型：用户可能主动删了「笔记」，
+        // 每次打开都加回去会很烦。API Key 是这版新增的，
+        // 老库里不可能「被用户删过」，所以补它是安全的。
+        if !self.types.iter().any(|t| t.label == kinds::APIKEY) {
+            self.types
+                .push(TypeDef::new(kinds::APIKEY, builtin_template(kinds::APIKEY)));
         }
         // 条目用到了但类型表里没有的，补进去（否则它会从类型下拉里消失）
         let used: Vec<String> = self.entries.iter().map(|e| e.kind.clone()).collect();
@@ -772,6 +938,26 @@ impl Drop for Entry {
         self.password.zeroize();
         self.url.zeroize();
         self.notes.zeroize();
+
+        // TOTP 密钥与密码**同等敏感**：拿到它就能无限生成有效的动态验证码，
+        // 二次验证因此完全失效。此前漏在清零范围之外。
+        if let Some(t) = self.totp.as_mut() {
+            t.zeroize();
+        }
+
+        // 自定义字段里可能存卡号、证件号（`secret: true`），
+        // 全部擦除——非敏感字段多擦一遍的成本可以忽略。
+        for f in self.fields.iter_mut() {
+            f.value.zeroize();
+            f.label.zeroize();
+        }
+    }
+}
+
+impl Drop for Field {
+    fn drop(&mut self) {
+        self.label.zeroize();
+        self.value.zeroize();
     }
 }
 
@@ -894,6 +1080,23 @@ fn tmp_path(path: &Path) -> PathBuf {
 /// 相比原实现补上了 `sync_all()`：
 /// 没有 fsync 时，rename 只保证目录项改名，文件内容可能还在页缓存里，
 /// 断电会留下「文件名对、内容是半截」的库。
+/// 构造「写失败且旧文件也没能挪回来」时的错误文案。
+///
+/// 单独抽出来是为了能测：真实的双重失败在文件系统上很难稳定复现，
+/// 但这句文案是用户唯一的线索——必须包含留档文件的**完整名字**，
+/// 否则他不知道该把哪个文件改回 `vault.dat`。
+fn rollback_failure_message(write_err: &str, aside: &Path) -> String {
+    let name = aside
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| aside.display().to_string());
+    format!(
+        "写入失败（{write_err}），且旧库文件无法还原。
+你的数据仍在「{name}」里（与 vault.dat 同一目录）。
+请手工把它改回 vault.dat 后再打开钥巢。"
+    )
+}
+
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let tmp = tmp_path(path);
     {
@@ -1255,6 +1458,51 @@ fn open_any(any: &AnyFile, master: &str) -> Result<Opened> {
     }
 }
 
+/// 用**已有密钥**重新解开磁盘上的一份文件。
+///
+/// 与 `open_any` 的区别：不派生 KDF（不要求主密码），直接用现有密钥解密。
+/// 用于 `reload()`：库被外部改动后重新载入，此时会话里的密钥仍然有效。
+///
+/// 密钥与文件不匹配时解密会失败——恰好能区分"同一个库被改过"
+/// 与"换成了别的库"，不需要额外的身份标记。
+///
+/// 返回 `(数据, v3 的正文缓存)`。
+fn open_with_key(
+    any: &AnyFile,
+    key_bytes: &[u8],
+) -> Result<(VaultData, Option<(CipherParams, String)>)> {
+    match any {
+        AnyFile::Legacy(f) => {
+            let mut tmp = [0u8; KEY_LEN];
+            if key_bytes.len() != KEY_LEN {
+                return Err(VaultError::Corrupt);
+            }
+            tmp.copy_from_slice(key_bytes);
+            let plain = open(f, &tmp)?;
+            let mut data: VaultData =
+                serde_json::from_slice(plain.as_slice()).map_err(|_| VaultError::Corrupt)?;
+            data.migrate_legacy();
+            Ok((data, None))
+        }
+        AnyFile::V3(f) => {
+            // 复制一份再交给 SecretKey（它会把传入数组清零）。
+            // 不能把会话里那把密钥的字节直接传进去——那会被清零，
+            // 之后整个会话就再也保存不了了。
+            let mut tmp = [0u8; KEY_LEN];
+            if key_bytes.len() != KEY_LEN {
+                return Err(VaultError::Corrupt);
+            }
+            tmp.copy_from_slice(key_bytes);
+            let dek = SecretKey::new(tmp);
+            let plain = open_body(&dek, &f.cipher, &f.payload)?;
+            let mut data: VaultData =
+                serde_json::from_slice(plain.as_slice()).map_err(|_| VaultError::Corrupt)?;
+            data.migrate_legacy();
+            Ok((data, Some((f.cipher.clone(), f.payload.clone()))))
+        }
+    }
+}
+
 /// 推荐的 KDF 下限。
 ///
 /// 这不是"能不能解开"的门槛，而是"够不够扛离线爆破"的门槛。
@@ -1290,6 +1538,30 @@ fn sanitize_fields(fields: Vec<Field>) -> Vec<Field> {
         }
     }
     out
+}
+
+/// 检查条目各字段的长度上限。
+///
+/// 长度按**字符数**算而不是字节数：中文一个字占 3 字节，
+/// 按字节算会让中文用户实际能用到的长度只有预期的三分之一。
+fn check_entry_lengths(e: &Entry) -> Result<()> {
+    fn check(name: &str, len: usize, max: usize) -> Result<()> {
+        if len > max {
+            return Err(VaultError::FieldTooLong(name.to_string(), max));
+        }
+        Ok(())
+    }
+    check("标题", e.title.chars().count(), MAX_TITLE_CHARS)?;
+    check("账号", e.username.chars().count(), MAX_USERNAME_CHARS)?;
+    check("密码", e.password.chars().count(), MAX_PASSWORD_CHARS)?;
+    check("网址", e.url.chars().count(), MAX_URL_CHARS)?;
+    check("备注", e.notes.chars().count(), MAX_NOTES_CHARS)?;
+    check("分类", e.category.chars().count(), MAX_CATEGORY_CHARS)?;
+    check("类型", e.kind.chars().count(), MAX_KIND_CHARS)?;
+    if let Some(t) = e.totp.as_deref() {
+        check("验证码配置", t.chars().count(), MAX_TOTP_CHARS)?;
+    }
+    Ok(())
 }
 
 /// 取 32 字节随机数据密钥。
@@ -1463,6 +1735,19 @@ pub struct BackupInfo {
     pub bytes: u64,
     /// 该备份内数据的最后更新时间（RFC3339）。解析失败时为空串。
     pub updated_at: String,
+}
+
+/// 一份「恢复留档」：从备份恢复时把原来那份挪到一边留下的文件。
+///
+/// 里面的内容可能是损坏的库，也可能是用户手工改坏的版本。
+/// 保留它是为了"还能抢救"，但不是让人一直攒着——
+/// 所以设置页要能看到并能清理。
+#[derive(Clone, Debug)]
+pub struct RecoveryLeftover {
+    pub path: PathBuf,
+    pub bytes: u64,
+    /// 文件修改时间（RFC3339，秒精度）。取不到时为空串。
+    pub modified: String,
 }
 
 pub struct Vault {
@@ -1706,17 +1991,26 @@ impl Vault {
                 _ => return Err(VaultError::ExternalChange),
             }
         }
-        self.rotate_backup(current.as_deref())?;
-
+        // 备份轮转**不能**放在这里。
+        //
+        // 原来是在写新文件之前轮转，于是：写盘失败时库内容没变，
+        // 备份却已经整体移位了一代。连试几次（磁盘满、杀毒软件反复锁文件），
+        // 若干代真实历史会被同一个旧内容挤空——这是数据完整性缺陷。
+        //
+        // 现在改成：先写成功，再由各写盘路径自己去轮转。
+        // 这样"备份"永远只记录已经成功落盘过的内容。
         if self.wrap.is_some() {
-            self.save_v3(reuse_body)
+            self.save_v3(reuse_body, current.as_deref())
         } else {
-            self.save_legacy()
+            self.save_legacy(current.as_deref())
         }
     }
 
     /// v3 写盘：DEK 加密正文，KEK 包裹块原样写回。
-    fn save_v3(&mut self, reuse_body: bool) -> Result<()> {
+    ///
+    /// `previous` 是写盘**之前**盘上的旧内容。新文件成功落盘之后，
+    /// 才用它轮转备份——顺序反了会在写盘失败时把历史挤掉。
+    fn save_v3(&mut self, reuse_body: bool, previous: Option<&[u8]>) -> Result<()> {
         let kdf = self.header.clone().ok_or(VaultError::Locked)?;
         let wrap = self.wrap.clone().ok_or(VaultError::Locked)?;
 
@@ -1743,6 +2037,10 @@ impl Vault {
         let len = json.len() as u64;
         write_atomic(&self.path, json.as_bytes())?;
 
+        // 新内容已经落盘，现在才把旧内容推进备份。
+        // 即使这一步失败，用户的库也是完好的——只是少了一代历史。
+        self.rotate_backup(previous)?;
+
         self.body_cache = Some((cipher, payload));
         self.on_disk = Some(DiskStamp {
             len,
@@ -1752,7 +2050,9 @@ impl Vault {
     }
 
     /// v1 / v2 写盘：主密钥直接加密正文（旧路径，保持原行为）。
-    fn save_legacy(&mut self) -> Result<()> {
+    ///
+    /// 与 v3 一样：先写成功，再轮转备份。
+    fn save_legacy(&mut self, previous: Option<&[u8]>) -> Result<()> {
         let key = self.key.as_ref().ok_or(VaultError::Locked)?;
         let header = self.header.clone().ok_or(VaultError::Locked)?;
 
@@ -1781,6 +2081,8 @@ impl Vault {
         let json = Zeroizing::new(serde_json::to_string_pretty(&file)?);
         let len = json.len() as u64;
         write_atomic(&self.path, json.as_bytes())?;
+
+        self.rotate_backup(previous)?;
 
         self.on_disk = Some(DiskStamp {
             len,
@@ -1858,8 +2160,18 @@ impl Vault {
         // —— 到这里备份已被证明可用，才开始动磁盘 ——
         let aside = self.set_aside_current()?;
         if let Err(e) = write_atomic(&self.path, &bytes) {
+            // 写新文件失败：把旧文件挪回原位。
+            //
+            // **还原失败必须让用户知道**。原来这里是 `let _ = fs::rename(...)`，
+            // 失败了也照样只报「写入失败」——而实际上库文件已经不在原位，
+            // 只剩一份 `vault.dat.corrupt-*`。用户会以为库还在，重启后
+            // 才发现打不开，而且不知道该去找哪个文件。
             if let Some(aside) = aside.as_ref() {
-                let _ = fs::rename(aside, &self.path);
+                if fs::rename(aside, &self.path).is_err() {
+                    return Err(VaultError::Io(std::io::Error::other(
+                        rollback_failure_message(&e.to_string(), aside),
+                    )));
+                }
             }
             return Err(e);
         }
@@ -1877,6 +2189,16 @@ impl Vault {
         if entry.title.trim().is_empty() {
             return Err(VaultError::InvalidEntry);
         }
+
+        // 字段长度上限。
+        //
+        // 超长时**拒绝**而不是截断：截断会静默丢掉用户的输入，
+        // 而他以为自己保存成功了——那是更难发现的数据丢失。
+        //
+        // 没有这道闸，一个超长备注就能把库撑过 `MAX_VAULT_BYTES`，
+        // 从此**再也保存不了**。
+        check_entry_lengths(&entry)?;
+
         // 字段清洗：去空、去重标签、限量。导入的文件里什么都可能有。
         entry.fields = sanitize_fields(std::mem::take(&mut entry.fields));
 
@@ -1927,6 +2249,36 @@ impl Vault {
         Ok(entry)
     }
 
+    /// 批量导入，并带上**解析阶段**的统计。
+    ///
+    /// # 为什么单独一个方法
+    ///
+    /// 解析阶段（CSV/JSON → Entry）已经会丢掉一些条目：没有标题的、
+    /// 格式不对的、超出 `MAX_IMPORT_ENTRIES` 的。如果只调用
+    /// [`Vault::import_entries`]，这些"在进库之前就丢掉"的条目
+    /// **完全不出现在报告里**——用户看到「导入 100 条」，
+    /// 而文件里其实有 5000 条，其中 4900 条被悄悄扔了。
+    ///
+    /// `skipped_invalid` 这个字段本来就在报告里，只是没人给它赋值。
+    /// 这个方法把两边的统计合到一起。
+    ///
+    /// # 去重规则不变
+    ///
+    /// 「标题 + 账号」已存在就跳过，**绝不覆盖**。
+    pub fn import_entries_with_stats(
+        &mut self,
+        incoming: Vec<Entry>,
+        parsed_total: usize,
+        invalid: usize,
+    ) -> Result<crate::portable::ImportReport> {
+        let mut report = self.import_entries(incoming)?;
+        // parsed 要包含解析阶段就丢掉的部分——否则「源文件里有 N 条」
+        // 这个数字是错的。
+        report.parsed = report.parsed.max(parsed_total);
+        report.skipped_invalid += invalid;
+        Ok(report)
+    }
+
     /// 批量导入：整批只写一次盘，失败整体回滚。
     ///
     /// 去重规则是「标题 + 账号」已存在就跳过，**绝不覆盖**。
@@ -1944,6 +2296,14 @@ impl Vault {
 
         {
             let data = self.data.as_mut().ok_or(VaultError::Locked)?;
+            // 上限在**导入时**就要挡：读盘时的 MAX_VAULT_BYTES 管不到
+            // "内存里刚导入进来的一大批条目"。放任它冲进库里的后果是
+            // 每次保存都要序列化全部条目、加密结果远超文件上限、
+            // 最终保存失败——用户已经看到的条目却存不下去。
+            //
+            // 注意这里**不提前整体拒绝**：已达上限时仍然走一遍循环，
+            // 把每一条如实计入 `skipped_limit`。用户需要看到
+            // "有 5 条没导进来"，而不是一个笼统的失败。
             // 只把「活跃」条目算作已存在：用户删掉某条之后重新导入，
             // 说明他想要它回来，不该被回收站里的旧记录挡住。
             let mut seen: std::collections::HashSet<(String, String)> = data
@@ -1978,6 +2338,19 @@ impl Vault {
                     report.skipped_existing += 1;
                     continue;
                 }
+
+                // 超长字段：跳过这一条，**不要让整批失败**。
+                //
+                // 导入是「尽力而为」的批量操作：一条有问题不该毁掉另外 999 条。
+                // 但也不能放它进去——超长字段会让库超出 MAX_VAULT_BYTES，
+                // 从此再也保存不了。
+                if let Err(e) = check_entry_lengths(&e) {
+                    if e.code() == "FIELD_TOO_LONG" {
+                        report.skipped_invalid += 1;
+                        continue;
+                    }
+                    return Err(e);
+                }
                 seen.insert(key);
 
                 e.id = Uuid::new_v4().to_string();
@@ -1989,6 +2362,12 @@ impl Vault {
                 }
                 if !data.categories.iter().any(|c| c == &e.category) {
                     data.categories.push(e.category.clone());
+                }
+                if data.entries.len() >= MAX_ENTRIES {
+                    // 达到上限就停，把"没导进去"如实计入报告，
+                    // 而不是让整批失败——已经导进来的部分是有价值的。
+                    report.skipped_limit += 1;
+                    continue;
                 }
                 data.entries.push(e);
                 report.added += 1;
@@ -2113,11 +2492,6 @@ impl Vault {
                 Err(e)
             }
         }
-    }
-
-    /// 直接替换内存数据（供设置/分类等批量修改使用）。
-    pub fn replace_data(&mut self, data: VaultData) {
-        self.data = Some(data);
     }
 
     /// 新增条目类型。
@@ -2285,7 +2659,18 @@ impl Vault {
         Ok(trimmed.to_string())
     }
 
-    pub fn update_settings(&mut self, settings: Settings) -> Result<()> {
+    pub fn update_settings(&mut self, mut settings: Settings) -> Result<()> {
+        // 夹紧到安全范围。
+        //
+        // 在**写入这一层**做，而不是只在 UI 层：UI 可能有多个入口
+        // （设置页、将来的快捷键、导入的库），漏一个就会写进危险值。
+        // 而且这些值还可能来自旧版本或手工编辑过的库文件。
+        settings.auto_lock_minutes = settings.auto_lock_minutes.clamp(1, MAX_AUTO_LOCK_MINUTES);
+        settings.clipboard_clear_seconds = settings
+            .clipboard_clear_seconds
+            .clamp(MIN_CLIPBOARD_SECONDS, MAX_CLIPBOARD_SECONDS);
+        settings.reveal_seconds = settings.reveal_seconds.clamp(1, MAX_REVEAL_SECONDS);
+
         let before = self.data.as_ref().ok_or(VaultError::Locked)?.clone();
         {
             let data = self.data.as_mut().ok_or(VaultError::Locked)?;
@@ -2328,10 +2713,27 @@ impl Vault {
             let new_kek = derive_key(new_password, &new_salt, &new_header)?;
             let new_wrap = wrap_dek(&new_kek, &new_header, current.as_bytes())?;
 
+            // **先把旧状态取出来，改完再写盘，失败就回滚。**
+            //
+            // 这里不能直接改 self 再保存：写盘失败时内存里已是新 wrap，
+            // 磁盘上还是旧库，此后任何一次保存都会把"新 wrap + 旧密码承诺"
+            // 写进去——用户重启后旧密码打不开，新密码也从未真正生效。
+            // 那是不可逆的数据丢失（库还在，但没人能打开）。
+            let old_header = self.header.take();
+            let old_wrap = self.wrap.take();
+
             self.header = Some(new_header);
             self.wrap = Some(new_wrap);
             // 正文不重新加密——这正是 DEK / KEK 分离存在的理由。
-            return self.save_inner(true);
+            return match self.save_inner(true) {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    // 回滚到旧 header/wrap，让库继续用旧密码
+                    self.header = old_header;
+                    self.wrap = old_wrap;
+                    Err(e)
+                }
+            };
         }
 
         // ---------- v1 / v2 ----------
@@ -2350,10 +2752,66 @@ impl Vault {
         };
         let new_key = derive_key(new_password, &new_salt, &new_header)?;
 
-        self.key = Some(new_key); // 旧 key 被 drop → 清零
+        // 与 v3 同样的回滚要求：旧库没有 DEK，换密码要整体重加密，
+        // 失败时磁盘内容没变，内存里的 key/header 也必须退回去。
+        let old_key = self.key.take();
+        let old_header = self.header.take();
+
+        self.key = Some(new_key);
         self.header = Some(new_header);
-        self.save()?;
-        Ok(())
+        match self.save() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.key = old_key;
+                self.header = old_header;
+                Err(e)
+            }
+        }
+    }
+
+    /// 放弃本地未保存的改动，重新载入磁盘上的库。
+    ///
+    /// # 这个方法解决的现实问题
+    ///
+    /// 库放在网盘同步目录里，另一台机器改了它、同步过来——`save_inner` 会
+    /// 返回 `ExternalChange` 并拒绝保存（这是对的：覆盖会丢掉对方的改动）。
+    ///
+    /// 但在加这个方法之前，用户**没有任何恢复路径**：`on_disk` 一旦对不上
+    /// 就永久对不上，此后每次保存都失败，只能重启程序（丢掉未保存的编辑）
+    /// 或手动删文件。
+    ///
+    /// # 它做什么、不做什么
+    ///
+    /// - 重新读盘、重新解密，用**已解锁的密钥**重建内存状态
+    /// - 不重置 `key` / `header` / `wrap`：密钥还是那一套，只是数据换成盘上的
+    /// - 磁盘上的文件如果不是同一个库（换了主密码 / 换了 salt），
+    ///   解密会失败——此时返回错误，内存状态保持不变（不会变成半截状态）
+    ///
+    /// 调用方（GUI）应当先确认用户愿意放弃本地改动。
+    pub fn reload(&mut self) -> Result<VaultData> {
+        // 未解锁时无从校验密钥，直接拒绝——这不是「载入」而是「打开」，
+        // 应当走 `unlock`。
+        let key = self.key.as_ref().ok_or(VaultError::Locked)?;
+
+        let bytes = read_vault_bytes(&self.path)?;
+        let any = AnyFile::parse(&bytes)?;
+        any.validate()?;
+
+        // 用现有密钥解开磁盘上的那一份。
+        // `open_with_key` 只在密钥与文件的 wrap/header 匹配时成功——
+        // 恰好能区分"同一个库被改过" 与 "换成了别的库"。
+        let (data, body_cache) = open_with_key(&any, key.as_bytes())?;
+
+        let stamp = DiskStamp {
+            len: bytes.len() as u64,
+            updated_at: any.updated_at().to_string(),
+        };
+
+        // —— 到这里磁盘上的内容已被证明可用，才开始改内存状态 ——
+        self.data = Some(data.clone());
+        self.body_cache = body_cache;
+        self.on_disk = Some(stamp);
+        Ok(data)
     }
 
     /// 把任意旧格式（v1 / v2）显式升级为 v3（KEK 包裹随机 DEK）。
@@ -2463,6 +2921,83 @@ impl Vault {
         Ok(())
     }
 
+    /// 列出所有「恢复留档」文件（`vault.dat.corrupt-*`）。
+    ///
+    /// # 为什么需要它
+    ///
+    /// 每次从备份恢复都会把原来那份（可能是损坏的）留档到一边，而不是删除——
+    /// 这是对的：用户可能还想抢救它。
+    ///
+    /// 但此前**没有任何途径看到这些文件**。反复恢复失败的用户会在磁盘上
+    /// 攒下一堆几百 KB 的留档，既占空间又让人困惑（"这些到底是什么？"），
+    /// 而界面上完全无迹可寻。
+    ///
+    /// 返回按修改时间倒序（最新的在前），便于用户判断哪一份是刚才那次。
+    pub fn list_recovery_leftovers(&self) -> Vec<RecoveryLeftover> {
+        let Some(dir) = self.path.parent() else {
+            return Vec::new();
+        };
+        let Some(name) = self.path.file_name() else {
+            return Vec::new();
+        };
+        let prefix = format!("{}.{}", name.to_string_lossy(), CORRUPT_PREFIX);
+
+        let Ok(rd) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+
+        let mut out: Vec<RecoveryLeftover> = rd
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+            .filter_map(|e| {
+                let meta = e.metadata().ok()?;
+                if !meta.is_file() {
+                    return None;
+                }
+                Some(RecoveryLeftover {
+                    path: e.path(),
+                    bytes: meta.len(),
+                    // 时间取修改时间；取不到就留空，不编造。
+                    modified: meta
+                        .modified()
+                        .ok()
+                        .map(|t| {
+                            let dt: chrono::DateTime<chrono::Utc> = t.into();
+                            dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                        })
+                        .unwrap_or_default(),
+                })
+            })
+            .collect();
+
+        // 新的在前：用户最可能想处理的是刚才那次留下的
+        out.sort_by(|a, b| b.modified.cmp(&a.modified));
+        out
+    }
+
+    /// 删除所有恢复留档，返回删除的数量。
+    ///
+    /// 只在用户**明确要求**时调用（设置页里那个按钮）。
+    /// 与 `wipe()` 不同：这里不动库、不动备份，只清留档。
+    pub fn clear_recovery_leftovers(&self) -> Result<usize> {
+        let items = self.list_recovery_leftovers();
+        let mut removed = 0usize;
+        let mut first_err: Option<std::io::Error> = None;
+        for it in items {
+            match fs::remove_file(&it.path) {
+                Ok(()) => removed += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(VaultError::Io(e)),
+            None => Ok(removed),
+        }
+    }
+
     /// 彻底删除仓库、所有备份代、恢复留档与临时文件。
     ///
     /// 返回第一个真实失败（`NotFound` 不算失败）——原实现全部 `let _ =`，
@@ -2513,6 +3048,145 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 「API Key」类型的字段模板必须齐全，且 Secret 本身要打码。
+    ///
+    /// 打码不是审美问题：API Key 泄露的经济后果与密码同级
+    /// （有人拿它刷你的额度），而它经常被投屏、截屏、录屏。
+    #[test]
+    fn api_key_template_masks_the_secret_only() {
+        let tpl = kinds::template(kinds::APIKEY);
+        assert!(!tpl.is_empty(), "API Key 类型应当有字段模板");
+
+        let secret_field = tpl
+            .iter()
+            .find(|(label, _, _)| *label == "Secret")
+            .expect("模板里必须有「Secret」字段");
+        assert!(secret_field.1, "「Secret」字段必须打码");
+
+        // 其余字段是辅助信息，不该打码：
+        // Key ID 会出现在请求头与日志里，根本不是秘密；
+        // 服务商/环境/scope 打码只会让人核对不了。
+        for (label, secret, _) in tpl {
+            if *label != "Secret" {
+                assert!(!secret, "「{label}」不该打码");
+            }
+        }
+    }
+
+    /// 两段式凭据要有地方放：Key ID 与 Secret 必须是**两个**字段。
+    ///
+    /// AWS / 阿里云这类是「访问密钥 ID + 访问密钥 Secret」两段。
+    /// 只给一个 Secret 字段等于存不全，用户只能拿备注补——
+    /// 备注不参与搜索高亮、也不能单独复制。
+    #[test]
+    fn api_key_type_supports_two_part_credentials() {
+        let labels: Vec<&str> = kinds::template(kinds::APIKEY)
+            .iter()
+            .map(|(l, _, _)| *l)
+            .collect();
+        assert!(labels.contains(&"Key ID"), "缺 Key ID 字段：{labels:?}");
+        assert!(labels.contains(&"Secret"), "缺 Secret 字段：{labels:?}");
+    }
+
+    /// 环境必须是一等字段——同一服务在 dev / prod 各有一把 key 是常态。
+    ///
+    /// 没有这个字段，两条记录长得一模一样，只能靠标题里写 `(prod)` 硬分，
+    /// 迟早出事故：在开发机上跑了生产 key，或者在生产上跑了测试 key。
+    #[test]
+    fn api_key_type_has_an_environment_field() {
+        let labels: Vec<&str> = kinds::template(kinds::APIKEY)
+            .iter()
+            .map(|(l, _, _)| *l)
+            .collect();
+        assert!(labels.contains(&"环境"), "缺「环境」字段：{labels:?}");
+    }
+
+    /// 每个内置字段都要有**非空**提示语。
+    ///
+    /// 「环境」「权限范围」这类字段光有标签不够——用户不知道
+    /// 该填 `prod` 还是「生产环境」，也不知道 scope 要不要写全。
+    /// 一句示例比一整段说明更容易被读完。
+    #[test]
+    fn every_builtin_field_has_a_hint() {
+        for name in kinds::DEFAULT_TYPES {
+            for (label, _, hint) in kinds::template(name) {
+                assert!(!hint.is_empty(), "「{name}」的「{label}」字段没有输入提示");
+            }
+        }
+    }
+
+    /// 「API Key」必须在默认类型列表里，且带模板。
+    #[test]
+    fn api_key_is_a_default_type_with_a_template() {
+        assert!(
+            kinds::DEFAULT_TYPES.contains(&kinds::APIKEY),
+            "API Key 应当是内置类型"
+        );
+        let defs = default_types();
+        let found = defs
+            .iter()
+            .find(|t| t.label == kinds::APIKEY)
+            .expect("默认类型里应当有 API Key");
+        assert!(
+            !found.template.is_empty(),
+            "默认类型里的 API Key 必须带字段模板"
+        );
+    }
+
+    /// **老库打开后必须出现「API Key」类型。**
+    ///
+    /// 类型表存在库文件里，所以新加的内置类型不会自动出现在已有库中。
+    /// 不补这一步，用户升级后根本找不到这个类型——功能等于没加。
+    #[test]
+    fn opening_an_old_vault_adds_the_api_key_type() {
+        // 造一个「旧库」：只有四个内置类型，没有 API Key
+        let mut data = VaultData::default();
+        data.types.retain(|t| t.label != kinds::APIKEY);
+        assert!(!data.types.iter().any(|t| t.label == kinds::APIKEY));
+
+        data.migrate_legacy();
+
+        let added = data
+            .types
+            .iter()
+            .find(|t| t.label == kinds::APIKEY)
+            .expect("打开旧库后应当补上 API Key 类型");
+        assert!(!added.template.is_empty(), "补上的类型要带字段模板");
+    }
+
+    /// 已经有了就不能重复添加（反复打开库不该堆出五个 API Key）。
+    #[test]
+    fn migration_is_idempotent_for_the_api_key_type() {
+        let mut data = VaultData::default();
+        data.migrate_legacy();
+        data.migrate_legacy();
+        data.migrate_legacy();
+
+        let n = data
+            .types
+            .iter()
+            .filter(|t| t.label == kinds::APIKEY)
+            .count();
+        assert_eq!(n, 1, "迁移不幂等，出现了 {n} 个 API Key 类型");
+    }
+
+    /// 用户**主动删掉**别的内置类型时，迁移不该强行加回来。
+    ///
+    /// 否则用户每次打开库都会发现自己删掉的类型又冒出来。
+    #[test]
+    fn migration_does_not_resurrect_user_deleted_types() {
+        let mut data = VaultData::default();
+        data.types.retain(|t| t.label != kinds::NOTE);
+        assert!(!data.types.iter().any(|t| t.label == kinds::NOTE));
+
+        data.migrate_legacy();
+
+        assert!(
+            !data.types.iter().any(|t| t.label == kinds::NOTE),
+            "迁移把用户删掉的「笔记」类型加回来了"
+        );
+    }
 
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
@@ -2691,6 +3365,47 @@ mod tests {
             "包裹块必须换新"
         );
         assert_ne!(before["kdf"]["salt"], after["kdf"]["salt"], "盐必须换新");
+    }
+
+    /// 换主密码写盘失败时，内存状态必须回滚。
+    ///
+    /// 缺陷：v3 路径先把 `self.header` / `self.wrap` 换成了新密码派生的那一套，
+    /// 然后才 `save_inner(true)`。如果写盘失败：
+    ///
+    ///   * 磁盘上还是旧密码保护的库（用户看不出异常）
+    ///   * 内存里却已经是新 wrap
+    ///   * 之后任何一次保存都会把**新 wrap + 旧密码承诺**写进去
+    ///     → 用户重启后旧密码打不开，新密码也从未真正生效过
+    ///
+    /// 这是不可逆的数据丢失：库还在，但没人能打开。
+    #[test]
+    fn failed_change_master_keeps_old_password_working() {
+        let dir = tmp();
+        let path = dir.path().join("vault.dat");
+        let mut v = fast_vault(dir.path());
+        v.upsert_entry(entry("A", "pw-A")).unwrap();
+
+        // 让写盘失败
+        let tmp_file = super::tmp_path(&v.path);
+        std::fs::create_dir(&tmp_file).unwrap();
+        let r = v.change_master("master-password-123", "new-master-password-456");
+        let _ = std::fs::remove_dir(&tmp_file);
+
+        assert!(r.is_err(), "前提：这次换密码本该失败");
+
+        // 失败之后，内存里的库必须还能正常用（内部状态已回滚）
+        v.upsert_entry(entry("B", "pw-B")).unwrap();
+        v.lock();
+
+        // 关键断言：旧密码仍然能打开，并且能看到失败之后新增的 B
+        let mut reopened = Vault::new(&path);
+        let data = reopened
+            .unlock("master-password-123")
+            .expect("换密码失败后，旧密码必须仍然可用");
+        assert!(
+            data.entries.iter().any(|e| e.title == "B"),
+            "失败回滚后新增的条目应当已落盘"
+        );
     }
 
     #[test]
@@ -3009,6 +3724,60 @@ mod tests {
         );
     }
 
+    /// 写盘失败时，**不能把备份轮转掉**。
+    ///
+    /// 数据完整性缺陷：`save_inner` 先 `rotate_backup` 再写新文件。
+    /// 如果写新文件失败（磁盘满、权限、杀毒软件锁文件），库内容其实没变，
+    /// 但备份已经整体移位了一代——连试几次，若干代真实历史会被同一个旧内容挤空。
+    ///
+    /// 正确顺序：**先写成功（临时文件 + fsync + rename），再轮转备份。**
+    /// 这样"备份"永远只记录已经成功落盘过的内容。
+    #[test]
+    fn failed_save_does_not_rotate_backups() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        // 造出多代可区分的历史
+        for i in 0..3 {
+            v.upsert_entry(entry(&format!("gen{i}"), "p")).unwrap();
+        }
+        let before = backup_fingerprint(&v);
+        assert!(
+            before.iter().filter(|x| x.is_some()).count() >= 2,
+            "前提：应当已有多个备份代"
+        );
+
+        // 让下一次写盘必然失败：把临时文件路径占成一个目录。
+        // （比改文件权限可靠——Windows 上以管理员运行的程序不受只读位限制。）
+        let tmp_file = super::tmp_path(&v.path);
+        std::fs::create_dir(&tmp_file).unwrap();
+
+        let r = v.save();
+        let after = backup_fingerprint(&v);
+        let _ = std::fs::remove_dir(&tmp_file);
+
+        assert!(r.is_err(), "前提：这次保存本该失败");
+        assert_eq!(
+            before, after,
+            "写盘失败后备份不得移位——否则连续失败会把真实历史挤空"
+        );
+    }
+
+    /// 备份指纹：每代取 (长度, 内容前 32 字节) 的简易摘要。
+    ///
+    /// 只用于比较"是否变化"，不需要密码学强度；
+    /// 直接把整份密文放进断言消息会让失败输出无法阅读。
+    fn backup_fingerprint(v: &Vault) -> Vec<Option<(usize, Vec<u8>)>> {
+        (1..=BACKUP_GENERATIONS)
+            .map(|i| {
+                std::fs::read(v.backup_slot(i)).ok().map(|b| {
+                    let head = b.iter().take(32).copied().collect();
+                    (b.len(), head)
+                })
+            })
+            .collect()
+    }
+
     #[test]
     fn restore_from_backup_recovers_data() {
         let dir = tmp();
@@ -3071,6 +3840,552 @@ mod tests {
             before,
             "认证失败不得改动磁盘上的任何字节"
         );
+    }
+
+    /// 检测到外部改动后，必须有一条**用户能走通的路**。
+    ///
+    /// 现实场景：库放在网盘同步目录里，另一台机器改了它，同步过来。
+    /// 此时应当提示"文件被别处改过"，然后让用户选择：
+    /// 放弃本地改动重新载入，或者另存为一份新库。
+    ///
+    /// 缺陷：`on_disk` 一旦对不上就永久对不上——`save_inner` 每次都返回
+    /// `ExternalChange`，而没有任何公开方法能让它重新对齐。
+    /// 用户只能重启程序（丢掉未保存的编辑）或手动删文件。
+    /// `Entry` 被丢弃时必须清零敏感字段。
+    ///
+    /// 直接验"drop 之后内存是 0"不可行——那块内存已经归还给分配器，
+    /// 再去读是未定义行为。所以用**同一套 zeroize 语义**的对照组来验：
+    /// `Zeroizing<String>` 会在 drop 时清零，而 `Entry::drop` 对每个字段
+    /// 调用的正是同一个 `Zeroize::zeroize()`。
+    ///
+    /// 这条测试的真正价值是**盯着 `impl Drop for Entry` 别被删掉**：
+    /// 有人重构时把那个 impl 去掉，测试不会失败，但在真实使用中
+    /// 密码会留在堆上。为了防止这种情况，这里同时检查源码里
+    /// 那五个字段都被显式 zeroize 了——用 include_str! 读自己的源文件。
+    /// `Entry` 被丢弃时必须清零敏感字段。
+    ///
+    /// 直接验"drop 之后内存是 0"不可行——那块内存已经归还给分配器，
+    /// 再去读是未定义行为。所以盯源码：这个测试的价值是**挡住
+    /// "重构时顺手删掉某个 zeroize"**。
+    ///
+    /// # 截取范围必须精确到函数体
+    ///
+    /// 第一次写这条时用 `src.split("impl Drop for Entry").nth(1)`，
+    /// 得到的是**从这里到文件末尾**的全部内容——里面包含下面这个测试自己，
+    /// 于是"源码里有没有 self.totp"永远为真，守卫完全失效（实测过两次）。
+    ///
+    /// 现在按行截到第一个行首 `}`，并断言范围里确实有 `fn drop`，
+    /// 防止将来锚点改名后测试悄悄变成空断言。
+    #[test]
+    fn entry_drop_zeroizes_sensitive_fields() {
+        let src = include_str!("vault.rs");
+        let after_sig = src
+            .split("impl Drop for Entry {")
+            .nth(1)
+            .expect("Entry 必须实现 Drop（否则密码不会清零）");
+
+        // 截到**第 0 缩进**的 `}`（即 impl 块自己的结尾）。
+        // 只用 `trim() != "}"` 会停在函数里第一个内层块（if/for）的右花括号上，
+        // 于是后面的字段检查全部落空——守卫看起来通过，实际什么都没验。
+        let body = after_sig
+            .lines()
+            .take_while(|l| *l != "}")
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+
+        assert!(
+            body.contains("fn drop"),
+            "截取范围里没有 drop 函数体，测试锚点失效"
+        );
+        // 自检：截取范围必须覆盖到函数体结尾，否则所有字段断言都在空范围内
+        assert!(
+            body.contains("self.notes.zeroize()"),
+            "截取范围过短，守卫测试已失效"
+        );
+
+        for field in ["title", "username", "password", "url", "notes"] {
+            assert!(
+                body.contains(&format!("self.{field}.zeroize()")),
+                "Entry::drop 没有清零字段 {field}"
+            );
+        }
+        // TOTP 密钥拿到就能无限生成动态码，二次验证因此失效——
+        // 与密码同等敏感，必须在清零范围内。
+        // 只检查 "含 self.totp" 不够：`let _ = &self.totp;` 也能通过，
+        // 而它什么都没清零。要检查"取出来之后确实调了 zeroize"。
+        assert!(
+            body.contains("self.totp.as_mut()") && body.contains("t.zeroize()"),
+            "Entry::drop 没有清零 totp（TOTP 密钥可生成所有未来的验证码）"
+        );
+        assert!(
+            body.contains("for f in self.fields.iter_mut()") && body.contains("f.value.zeroize()"),
+            "Entry::drop 没有清零自定义字段（可能存卡号/证件号）"
+        );
+    }
+
+    /// 还原失败时的错误信息必须**指明数据在哪**。
+    ///
+    /// 原来那一步是 `let _ = fs::rename(aside, &self.path)`：失败了也照样
+    /// 只报「写入失败」。而实际上库文件已经不在原位，只剩一份
+    /// `vault.dat.corrupt-*`——用户以为库还在，重启才发现打不开，
+    /// 而且不知道该去找哪个文件。
+    ///
+    /// # 为什么直接测错误构造，而不是构造真实的双重失败
+    ///
+    /// 要让「写新文件」和「把留档挪回来」**同时**失败，需要精确控制文件系统
+    /// 状态；而 `set_aside_current` 会先把目标挪走，目标路径空出来后
+    /// 写入往往反而成功（试过：把 vault.dat 换成目录，恢复照样成功）。
+    ///
+    /// 这种测试即使写出来也是在与平台行为博弈，很容易变成"看起来在测、
+    /// 实际没测到"。所以退一步：直接验错误信息的构造，保证一旦真的发生，
+    /// 用户能看懂该去哪个文件。
+    #[test]
+    fn rollback_failure_message_points_at_the_aside_file() {
+        let aside = PathBuf::from("vault.dat.corrupt-1700000000");
+        let msg = rollback_failure_message("磁盘已满", &aside);
+        assert!(msg.contains("无法还原"), "没说明还原失败: {msg}");
+        assert!(
+            msg.contains("vault.dat.corrupt-1700000000"),
+            "没给出留档文件名，用户无从下手: {msg}"
+        );
+        assert!(msg.contains("磁盘已满"), "没保留原始错误原因: {msg}");
+    }
+
+    /// 恢复留档必须能被**列出来**。    /// 恢复留档必须能被**列出来**。
+    ///
+    /// 此前只有 `wipe()` 会碰这些文件（全部删掉）。用户反复从备份恢复失败时，
+    /// 磁盘上会攒下一堆 `vault.dat.corrupt-*`，界面上却完全看不到——
+    /// 既占空间，也让人困惑「这些到底是什么」。
+    #[test]
+    fn recovery_leftovers_are_listed() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+        v.upsert_entry(entry("A", "p")).unwrap();
+
+        // 手工造两个留档（正常路径要用 restore 触发，这里直接放文件更直观）
+        let base = v.path.to_string_lossy().to_string();
+        std::fs::write(format!("{base}.corrupt-1000"), b"old-one").unwrap();
+        std::fs::write(format!("{base}.corrupt-2000"), b"old-two-longer").unwrap();
+
+        let items = v.list_recovery_leftovers();
+        assert_eq!(items.len(), 2, "应当列出两份留档: {items:?}");
+        // 大小如实反映
+        assert!(items
+            .iter()
+            .any(|i| i.bytes == b"old-two-longer".len() as u64));
+    }
+
+    /// 没有留档时返回空列表，不报错。
+    #[test]
+    fn no_leftovers_yields_empty_list() {
+        let dir = tmp();
+        let v = fast_vault(dir.path());
+        assert!(v.list_recovery_leftovers().is_empty());
+    }
+
+    /// 清理只删留档，**不动库与备份**。
+    ///
+    /// 这是与 `wipe()` 的关键区别：用户想清掉垃圾文件，
+    /// 不该顺便把自己的库和备份一起删了。
+    #[test]
+    fn clearing_leftovers_keeps_vault_and_backups() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+        v.upsert_entry(entry("A", "p")).unwrap();
+        v.upsert_entry(entry("B", "p")).unwrap(); // 触发一次备份
+
+        let base = v.path.to_string_lossy().to_string();
+        std::fs::write(format!("{base}.corrupt-1000"), b"junk").unwrap();
+        std::fs::write(format!("{base}.corrupt-2000"), b"junk").unwrap();
+
+        let removed = v.clear_recovery_leftovers().unwrap();
+        assert_eq!(removed, 2);
+        assert!(v.list_recovery_leftovers().is_empty());
+
+        // 库还在，备份还在
+        assert!(v.path.exists(), "库文件不该被删");
+        assert!(v.backup_slot(1).exists(), "备份不该被删");
+
+        // 库仍然可用
+        v.lock();
+        let mut v2 = Vault::new(&v.path);
+        assert_eq!(v2.unlock("master-password-123").unwrap().entries.len(), 2);
+    }
+
+    /// 留档之外的文件（比如备份）不能被误当成留档列出来。
+    #[test]
+    fn backups_are_not_listed_as_leftovers() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+        v.upsert_entry(entry("A", "p")).unwrap();
+        v.upsert_entry(entry("B", "p")).unwrap();
+        assert!(v.backup_slot(1).exists(), "前提：应当已有备份");
+
+        assert!(
+            v.list_recovery_leftovers().is_empty(),
+            "备份不该被当成恢复留档"
+        );
+    }
+
+    /// 设置项必须被夹紧到安全范围，否则库会变成「打不开也用不了」。
+    ///
+    /// 具体后果：
+    /// * `auto_lock_minutes = 0` → `should_auto_lock` 每帧都为真，
+    ///   用户解锁后立刻又被锁，程序完全不可用
+    /// * `clipboard_clear_seconds = 0` → 刚写入就被定时器清空，
+    ///   表现为「点了复制但剪贴板是空的」
+    /// * `reveal_seconds = 0` → 密码一显示就消失
+    ///
+    /// 这些值可能来自旧版本、手工编辑库文件，或将来某个 UI 缺陷。
+    /// 在写入这一层夹紧，比在 UI 层修补更可靠——UI 可能有多个入口。
+    #[test]
+    fn update_settings_clamps_dangerous_values() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        let bad = Settings {
+            auto_lock_minutes: 0,
+            clipboard_clear_seconds: 0,
+            reveal_seconds: 0,
+            ..Default::default()
+        };
+        v.update_settings(bad).unwrap();
+
+        let s = v.snapshot().unwrap().settings;
+        assert!(
+            s.auto_lock_minutes >= 1,
+            "自动锁定不得为 0: {}",
+            s.auto_lock_minutes
+        );
+        assert!(
+            s.clipboard_clear_seconds >= 3,
+            "剪贴板清理间隔过短: {}",
+            s.clipboard_clear_seconds
+        );
+        assert!(
+            s.reveal_seconds >= 1,
+            "显示时长不得为 0: {}",
+            s.reveal_seconds
+        );
+    }
+
+    /// 过大的值也要夹紧：自动锁定设成几年等于关掉这个安全功能，
+    /// 而它是密码管理器最基本的一道防线。
+    #[test]
+    fn update_settings_caps_huge_values() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        let bad = Settings {
+            auto_lock_minutes: 100_000,
+            clipboard_clear_seconds: 100_000,
+            reveal_seconds: 100_000,
+            ..Default::default()
+        };
+        v.update_settings(bad).unwrap();
+
+        let s = v.snapshot().unwrap().settings;
+        assert!(
+            s.auto_lock_minutes <= MAX_AUTO_LOCK_MINUTES,
+            "{}",
+            s.auto_lock_minutes
+        );
+        assert!(s.clipboard_clear_seconds <= MAX_CLIPBOARD_SECONDS);
+        assert!(s.reveal_seconds <= MAX_REVEAL_SECONDS);
+    }
+
+    /// 打开旧库时，里面已存的危险设置值也要被夹紧。
+    ///
+    /// 否则「升级程序」对已有库没有效果：用户解锁后仍然立刻被锁，
+    /// 而他并不知道问题出在库文件里存的那个 0。
+    #[test]
+    fn opening_legacy_vault_clamps_settings_in_memory() {
+        let dir = tmp();
+        let path = dir.path().join("vault.dat");
+        let mut v = fast_vault(dir.path());
+        // 直接把危险值写进内存数据并保存（模拟旧版本写出的库）
+        {
+            let data = v.data.as_mut().unwrap();
+            data.settings.auto_lock_minutes = 0;
+            data.settings.clipboard_clear_seconds = 0;
+            data.settings.reveal_seconds = 0;
+        }
+        v.save().unwrap();
+        v.lock();
+
+        let mut v2 = Vault::new(&path);
+        let data = v2.unlock("master-password-123").unwrap();
+        assert!(data.settings.auto_lock_minutes >= 1, "解锁后仍为 0");
+        assert!(data.settings.clipboard_clear_seconds >= MIN_CLIPBOARD_SECONDS);
+        assert!(data.settings.reveal_seconds >= 1);
+    }
+
+    /// 正常值必须原样保留，不能被"顺手"改掉。
+    #[test]
+    fn update_settings_keeps_valid_values() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+        let good = Settings {
+            auto_lock_minutes: 15,
+            clipboard_clear_seconds: 30,
+            reveal_seconds: 10,
+            ..Default::default()
+        };
+        v.update_settings(good.clone()).unwrap();
+        let s = v.snapshot().unwrap().settings;
+        assert_eq!(s.auto_lock_minutes, 15);
+        assert_eq!(s.clipboard_clear_seconds, 30);
+        assert_eq!(s.reveal_seconds, 10);
+    }
+
+    /// 库里出现重复 id 时必须被检出。
+    ///
+    /// 为什么这条重要：`upsert_entry` 靠 `id` 定位条目。两条同 id 的记录会让
+    /// 「编辑其中一条」变成「覆盖排在前面的那条」，另一条永远改不动也删不掉。
+    ///
+    /// 现实中怎么出现：
+    /// * 用户手工编辑过库文件（哪怕只是复制粘贴了一段）
+    /// * 第三方工具生成的库
+    /// * 导入时若将来放宽去重规则，可能引入
+    ///
+    /// 检出时机是**解锁之后**——那时才拿到明文，也才有机会在不破坏文件的前提下
+    /// 提示用户。这里直接验 `VaultData::find_duplicate_ids`。
+    #[test]
+    fn duplicate_entry_ids_are_detected() {
+        let mut data = VaultData::default();
+        let mut a = entry("A", "p");
+        a.id = "same-id".into();
+        let mut b = entry("B", "p");
+        b.id = "same-id".into();
+        data.entries = vec![a, b];
+
+        let dup = data.find_duplicate_ids();
+        assert_eq!(dup, vec!["same-id".to_string()], "应当检出重复 id");
+    }
+
+    /// 正常库不应报告重复。
+    #[test]
+    fn unique_ids_report_nothing() {
+        let mut data = VaultData::default();
+        let mut a = entry("A", "p");
+        a.id = "id-a".into();
+        let mut b = entry("B", "p");
+        b.id = "id-b".into();
+        data.entries = vec![a, b];
+        assert!(data.find_duplicate_ids().is_empty());
+    }
+
+    /// 超长的字段必须被**拒绝**，而不是截断。
+    ///
+    /// # 为什么这是数据完整性问题而不只是"输入校验"
+    ///
+    /// `MAX_VAULT_BYTES` 是 64 MiB。没有字段长度上限时，
+    /// 一个 100 MB 的备注就能让库超出这个上限——
+    /// 此后**每次保存都被文件大小挡住**，用户再也存不进任何东西。
+    /// 库从此写不坏也写不好。
+    ///
+    /// 截断比拒绝更糟：用户以为保存成功了，实际上尾部被悄悄丢掉。
+    #[test]
+    fn oversized_fields_are_rejected_not_truncated() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        // 超长备注
+        let mut e = entry("A", "pw");
+        e.notes = "x".repeat(MAX_NOTES_CHARS + 1);
+        let err = v.upsert_entry(e).unwrap_err();
+        assert_eq!(err.code(), "FIELD_TOO_LONG");
+        assert!(
+            err.to_string().contains("备注"),
+            "错误信息要指出是哪个字段: {err}"
+        );
+
+        // 超长标题
+        let mut e = entry("B", "pw");
+        e.title = "x".repeat(MAX_TITLE_CHARS + 1);
+        assert_eq!(v.upsert_entry(e).unwrap_err().code(), "FIELD_TOO_LONG");
+
+        // 超长 TOTP 配置
+        let mut e = entry("C", "pw");
+        e.totp = Some("x".repeat(MAX_TOTP_CHARS + 1));
+        assert_eq!(v.upsert_entry(e).unwrap_err().code(), "FIELD_TOO_LONG");
+
+        // 库里确实什么都没进去
+        assert_eq!(v.snapshot().unwrap().entries.len(), 0);
+    }
+
+    /// 刚好在上限上的内容必须能存进去（别把合法输入也挡了）。
+    #[test]
+    fn fields_at_the_limit_are_accepted() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        let mut e = entry("A", "pw");
+        e.title = "x".repeat(MAX_TITLE_CHARS);
+        e.notes = "y".repeat(MAX_NOTES_CHARS);
+        v.upsert_entry(e).unwrap();
+        assert_eq!(v.snapshot().unwrap().entries.len(), 1);
+    }
+
+    /// 长度按**字符数**算，不是字节数。
+    ///
+    /// 中文一个字占 3 字节——按字节算的话，中文用户实际能用到的
+    /// 长度只有预期的三分之一，而且没有任何提示。
+    #[test]
+    fn length_limits_count_characters_not_bytes() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        let mut e = entry("标题", "pw");
+        // 每个中文字符 3 字节；按字节算会超限，按字符算正好在限内
+        e.notes = "中".repeat(MAX_NOTES_CHARS);
+        assert!(e.notes.len() > MAX_NOTES_CHARS, "前提：字节数确实超了");
+        v.upsert_entry(e).unwrap();
+        assert_eq!(v.snapshot().unwrap().entries.len(), 1);
+    }
+
+    /// 导入必须有条目上限，且超限时**保留已导入的部分**。
+    ///
+    /// 没有上限时：一个 32 MiB 的 CSV 能造出上百万条记录，
+    /// 每次保存都要序列化全部条目 → 界面卡死；
+    /// 加密结果远超 `MAX_VAULT_BYTES` → 保存失败，库从此写不进去。
+    /// 用户已经看到那些条目，却存不下去——实际的数据丢失。
+    #[test]
+    fn import_stops_at_entry_limit() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        // 造到上限前一点，避免测试本身太慢：直接替换内存数据
+        {
+            let data = v.data.as_mut().unwrap();
+            data.entries = (0..MAX_ENTRIES)
+                .map(|i| {
+                    let mut e = entry(&format!("filler{i}"), "p");
+                    e.id = format!("id-{i}");
+                    e
+                })
+                .collect();
+        }
+
+        let incoming: Vec<Entry> = (0..5).map(|i| entry(&format!("new{i}"), "p")).collect();
+        let report = v.import_entries(incoming).unwrap();
+
+        assert_eq!(report.added, 0, "已达上限，不该再写入");
+        assert_eq!(report.skipped_limit, 5, "被上限挡下的条数要如实计入报告");
+        assert!(report.summary().contains("条目上限"), "摘要要说明原因");
+    }
+
+    /// 导入时遇到超长字段：**跳过这一条**，不要让整批失败。
+    ///
+    /// 导入是「尽力而为」的批量操作：一条有问题不该毁掉另外 999 条。
+    /// 但也不能放它进去——超长字段会让库超出 MAX_VAULT_BYTES，从此再也保存不了。
+    #[test]
+    fn import_skips_oversized_entries_without_failing_the_batch() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        let mut huge = entry("Huge", "pw");
+        huge.notes = "x".repeat(MAX_NOTES_CHARS + 1);
+
+        let report = v
+            .import_entries(vec![huge, entry("Good1", "pw"), entry("Good2", "pw")])
+            .unwrap();
+
+        assert_eq!(report.added, 2, "正常条目必须照样导入");
+        assert_eq!(report.skipped_invalid, 1, "超长那条要计入跳过数");
+        assert_eq!(v.snapshot().unwrap().entries.len(), 2);
+    }
+
+    /// 解析阶段丢掉的条目必须出现在报告里。
+    ///
+    /// 缺陷：解析阶段（CSV/JSON → Entry）会丢掉格式不对的条目，
+    /// 但 GUI 原来把 invalid 计数**丢掉了**（`_invalid`），
+    /// 于是报告里的 `skipped_invalid` 永远是 0。
+    ///
+    /// 用户看到的是「导入 100 条」，而文件里其实有 5000 条、
+    /// 4900 条在进库之前就被悄悄扔了——他完全不知道。
+    #[test]
+    fn import_report_includes_entries_dropped_during_parsing() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+
+        let incoming = vec![entry("A", "p"), entry("B", "p")];
+        // 源文件里识别出 100 条，其中 3 条格式不对
+        let report = v.import_entries_with_stats(incoming, 100, 3).unwrap();
+
+        assert_eq!(report.added, 2, "两条都应当写入");
+        assert_eq!(report.parsed, 100, "parsed 要反映源文件里的候选条数");
+        assert_eq!(report.skipped_invalid, 3, "解析阶段丢掉的 3 条必须被计入");
+    }
+
+    /// 未达上限时导入照常，且 `skipped_limit` 为 0。
+    #[test]
+    fn import_below_limit_is_unaffected() {
+        let dir = tmp();
+        let mut v = fast_vault(dir.path());
+        let report = v
+            .import_entries((0..3).map(|i| entry(&format!("n{i}"), "p")).collect())
+            .unwrap();
+        assert_eq!(report.added, 3);
+        assert_eq!(report.skipped_limit, 0);
+    }
+
+    #[test]
+    fn can_reload_after_external_change() {
+        let dir = tmp();
+        let path = dir.path().join("vault.dat");
+        let mut v = fast_vault(dir.path());
+        v.upsert_entry(entry("A", "p")).unwrap();
+
+        // 模拟另一个进程写入了新内容（版本号变了但仍是同一个库）
+        let mut json = read_json(&path);
+        json["updatedAt"] = serde_json::json!("2000-01-01T00:00:00.000Z");
+        write_json(&path, &json);
+
+        let err = v.upsert_entry(entry("B", "p")).unwrap_err();
+        assert_eq!(err.code(), "EXTERNAL_CHANGE");
+
+        // 用户选择「重新载入」——必须成功，且之后能正常保存
+        v.reload().expect("应当能重新载入磁盘上的库");
+        v.upsert_entry(entry("C", "p"))
+            .expect("重新载入之后应当能正常保存");
+
+        v.lock();
+        let mut reopened = Vault::new(&path);
+        let data = reopened.unlock("master-password-123").unwrap();
+        assert!(data.entries.iter().any(|e| e.title == "C"));
+    }
+
+    /// 磁盘上被换成**另一个库**时，`reload` 必须失败且不破坏内存状态。
+    ///
+    /// 现实场景：用户把另一台机器的 vault.dat 拷进来覆盖了。
+    /// 那不是"同一个库被改过"，而是"换了一个库"——
+    /// 用旧会话的密钥解不开它，此时绝不能把内存清空或留下半截状态。
+    #[test]
+    fn reload_rejects_a_different_vault() {
+        let dir = tmp();
+        let path = dir.path().join("vault.dat");
+        let mut v = fast_vault(dir.path());
+        v.upsert_entry(entry("mine", "p")).unwrap();
+        let before = v.snapshot().unwrap().entries.len();
+
+        // 造一个"别人的库"覆盖上去
+        let other = dir.path().join("other.dat");
+        {
+            let mut o = Vault::new(&other);
+            o.create("another-master-password").unwrap();
+        }
+        std::fs::copy(&other, &path).unwrap();
+
+        let r = v.reload();
+        assert!(r.is_err(), "换了库却 reload 成功——旧密钥不该能解开新库");
+
+        // 内存状态必须保持原样：用户还没决定要放弃本地数据
+        let after = v.snapshot().unwrap().entries.len();
+        assert_eq!(after, before, "reload 失败时不得清空或改动内存状态");
     }
 
     #[test]
@@ -3293,13 +4608,26 @@ mod tests {
         assert!(card.template.iter().any(|f| f.label == "卡号"));
     }
 
+    /// 新库应当带上**全部**内置类型。
+    ///
+    /// 断言写的是 `DEFAULT_TYPES.len()` 而不是字面量 4/5——
+    /// 原来这里写死 `4`，加「API Key」类型时它立刻变红。
+    /// 那不是缺陷被发现，而是测试在提醒「你改了内置类型集合，
+    /// 确认一下别的数字有没有跟着变」。改成引用常量后，
+    /// 它验的是「默认类型一个不少」，这才是真正想守的东西。
     #[test]
-    fn types_default_to_four_builtins() {
+    fn types_default_to_all_builtins() {
         let dir = tmp();
         let v = fast_vault(dir.path());
         let data = v.snapshot().unwrap();
-        assert_eq!(data.types.len(), 4);
-        assert!(data.types.iter().any(|t| t.label == kinds::LOGIN));
+        assert_eq!(data.types.len(), kinds::DEFAULT_TYPES.len());
+        for name in kinds::DEFAULT_TYPES {
+            assert!(
+                data.types.iter().any(|t| t.label == name),
+                "默认类型里缺「{name}」"
+            );
+        }
+        assert_eq!(data.types.len(), 5, "内置类型数量变化时请同步这行");
     }
 
     #[test]

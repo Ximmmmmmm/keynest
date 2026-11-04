@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>KeyNest</title>
+  </head>
+  <body>
+    <header>
+      <h1>KeyNest</h1>
+      <span id="status" class="badge">检查中…</span>
+    </header>
+
+    <!-- 面板容器。每个模块往这里贡献一块，由 popup/panel-host.js 管理。
+         加新功能不需要改这个文件。 -->
+    <main id="panels"></main>
+
+    <section id="error" class="note error hidden"></section>
+
+    <footer>
+      <button id="refresh" class="ghost">刷新</button>
+      <button id="open-options" class="ghost">设置</button>
+      <span class="foot-note">不会读取或修改浏览器保存的密码</span>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

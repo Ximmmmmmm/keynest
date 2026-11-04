@@ -52,11 +52,66 @@ pub fn validate_new_master(master: &str, confirm: &str) -> Result<(), String> {
 /// 计算「应用闲置」与「系统闲置」中较小的那个，再与阈值比较。
 ///
 /// 抽成纯函数是为了能脱离 egui 单测：自动锁定的正确性不该依赖窗口是否可见。
+/// 「空闲了多久」= 应用内空闲与系统空闲里**较短**的那个。
+///
+/// # 为什么取 min
+///
+/// - 系统空闲 5 分钟 → 用户离开了电脑 → **该锁**
+/// - 应用内空闲 5 分钟但系统不空闲 → 用户正在别的程序里忙活
+///   （可能正在把密码填到别处）→ **不该锁**
+///
+/// # 为什么要防「系统空闲未知」
+///
+/// `system_idle()` 在拿不到系统状态时返回 `Duration::MAX` 而不是 0。
+/// 若返回 0，`min` 会让结果恒为 0，**自动锁定永远不触发**——
+/// 密码库就这么一直开着。所以「未知」必须往保守方向倒。
+///
+/// 这个函数因此也是本项目里最容易悄悄失效的一个：它没有异常、没有日志，
+/// 失效的表现只是「好像不锁了」。
 pub fn idle_since(app_idle: Duration, sys_idle: Duration) -> Duration {
     app_idle.min(sys_idle)
 }
 
 /// 是否应当自动锁定。
+/// 算出「验证码该在剪贴板里待多少秒」。
+///
+/// 返回 `None` 表示不该复制——剩余时间太短，复制出去立刻就是过期码。
+///
+/// # 为什么单独抽出来
+///
+/// 原实现写成 `.min(remaining).max(3)`，`max(3)` 会把「只剩 1 秒」
+/// 拉成 3 秒，正好制造了它想避免的情况。这类**下限与上限打架**的
+/// 边界只有写成纯函数才容易被测到，留在 UI 事件处理里没人会去验。
+pub fn totp_clipboard_ttl(configured: u32, remaining: u32) -> Option<u32> {
+    // 剩余不足 3 秒：粘贴时多半已经失效，别复制
+    if remaining < 3 {
+        return None;
+    }
+    // 夹到配置范围，再截到当前时间步结束
+    Some(configured.clamp(3, 300).min(remaining))
+}
+
+/// 清空所有筛选条件（含搜索词）并回到「全部」。
+///
+/// 抽成纯函数是为了能测：`App` 的构造需要 `eframe::CreationContext`，
+/// 单元测试里造不出来。而这几个字段的联动恰恰是容易出错的地方
+/// （原来的实现只重置了 filter，忘了 search）。
+pub fn clear_all_filters(search: &mut String, filter: &mut Filter, focus_search: &mut bool) {
+    *filter = Filter::All;
+    search.clear();
+    // 不要把焦点抢到搜索框：用户点的是「清除」，不是「开始搜索」
+    *focus_search = false;
+}
+
+/// 明文导出实际会写入的条数（**不含回收站**）。
+///
+/// 确认框与导出后的提示都要用这个数字——用 `entries.len()` 的话，
+/// 用户看到「导出 500 条」而文件里只有 480 条，数字对不上，
+/// 用户会以为导出出了问题。
+pub fn plaintext_export_count(data: &keynest_core::vault::VaultData) -> usize {
+    data.entries.iter().filter(|e| !e.is_deleted()).count()
+}
+
 pub fn should_auto_lock(limit_minutes: u32, app_idle: Duration, sys_idle: Duration) -> bool {
     let limit = Duration::from_secs(limit_minutes as u64 * 60);
     idle_since(app_idle, sys_idle) >= limit
@@ -203,6 +258,9 @@ struct Job {
 pub struct App {
     pub path: PathBuf,
 
+    /// 浏览器桥服务。只在解锁期间运行；锁定时必须停止。
+    pub bridge: crate::bridge::BridgeService,
+
     pub state: AppState,
 
     /// 单实例锁。**持有即生效**，不读它的值；drop（进程退出）时由操作系统释放。
@@ -221,6 +279,15 @@ pub struct App {
     /// 最后复制的内容，锁定时用于精确清除剪贴板。
     last_copied: Option<Zeroizing<String>>,
 
+    /// 手动锁定时，若编辑框里有未保存的改动，先弹确认。
+    pending_lock_confirm: bool,
+
+    /// 上一次已提示过的「剪贴板清除失败」原因。
+    ///
+    /// 去重用的：`check_clipboard_clear_failure` 每帧都跑，
+    /// 同一个失败只该提示一次，否则每帧都刷一条 toast。
+    reported_clipboard_failure: Option<String>,
+
     /// 界面态
     pub search: String,
     pub filter: Filter,
@@ -231,6 +298,13 @@ pub struct App {
     pub edit: Option<EditState>,
     pub settings: Option<SettingsState>,
     pub confirm_delete: Option<String>,
+    /// 「永久删除」的确认。
+    ///
+    /// 与 `confirm_empty_trash` 同样的理由：这是不可撤销的操作。
+    /// 原来单条永久删除**没有任何确认**，点了就执行——用户本想点旁边的
+    /// 「恢复」，手一抖就永久没了。而「清空回收站」反倒是有确认的，
+    /// 两处标准不一致。
+    pub confirm_purge: Option<String>,
     /// 明文导出前的确认弹窗。明文导出是不可逆的数据外流，必须显式确认。
     pub pending_export: Option<ExportKind>,
     /// 「清空回收站」的确认弹窗。这是一次性永久删除，不能一键就做。
@@ -283,8 +357,14 @@ impl App {
             AppState::NoVault
         };
 
+        let mut bridge = crate::bridge::BridgeService::new(keynest_paths::resolve_data_dir());
+        // 把 UI 上下文交给桥接层：后台线程收到请求时用它唤醒界面。
+        // 必须在 start() 之前绑定。
+        bridge.attach_ctx(cc.egui_ctx.clone());
+
         Self {
             path,
+            bridge,
             state,
             _instance: instance,
             create_master: Zeroizing::new(String::new()),
@@ -292,6 +372,8 @@ impl App {
             create_error: None,
             job: None,
             last_copied: None,
+            pending_lock_confirm: false,
+            reported_clipboard_failure: None,
             search: String::new(),
             filter: Filter::All,
             sort: SortBy::UpdatedDesc,
@@ -300,6 +382,7 @@ impl App {
             edit: None,
             settings: None,
             confirm_delete: None,
+            confirm_purge: None,
             pending_export: None,
             confirm_empty_trash: false,
             new_category_buf: String::new(),
@@ -347,6 +430,15 @@ impl App {
                         self.search.clear();
                         self.filter = Filter::All;
                         self.unlock_failures = 0;
+
+                        // 解锁后检查一次重复 id。
+                        //
+                        // 正常情况下 id 由 Uuid 生成，不可能重复；但库文件被手工
+                        // 编辑过、或由第三方工具生成时会出现。那时的表现是
+                        // 「编辑某条记录却改了另一条」，用户完全无从判断。
+                        // 这里主动提示，把「莫名其妙」变成「明确告知」。
+                        let dup_ids = data.find_duplicate_ids();
+
                         self.state = AppState::Unlocked {
                             vault,
                             data,
@@ -354,6 +446,14 @@ impl App {
                             reveal: None,
                             copy_banner: None,
                         };
+                        self.bridge.start();
+
+                        if !dup_ids.is_empty() {
+                            self.set_toast(format!(
+                                "库里有 {} 组重复的记录 id，编辑时可能改到错误的那条；                                 建议导出 JSON 备份后联系维护者",
+                                dup_ids.len()
+                            ));
+                        }
                     }
                     Err(e) => {
                         let msg = e.to_string();
@@ -471,6 +571,7 @@ impl App {
                     reveal: None,
                     copy_banner: None,
                 };
+                self.bridge.start();
                 self.set_toast("已从备份恢复，原文件已改名留档");
             }
             Err(e) => {
@@ -512,8 +613,29 @@ impl App {
         self.spawn(JobKind::Unlock, pw);
     }
 
+    /// 用户主动点「锁定」时走这里：编辑框里有未保存的改动就先问一句。
+    ///
+    /// 为什么不直接锁：用户可能只是顺手点了锁定，而编辑框里刚填了半条记录。
+    /// 静默丢掉之后他不会知道东西去哪了——那是最让人恼火的一类数据丢失。
+    ///
+    /// 只对**手动**锁定这么做。自动锁定、关窗口、退出都必须无条件立即锁：
+    /// 那些时刻弹确认框会让库一直处于未锁定状态，比丢编辑严重得多。
+    pub fn request_lock(&mut self) {
+        if !matches!(self.state, AppState::Unlocked { .. }) {
+            return;
+        }
+        if self.edit.as_ref().map(|e| e.is_dirty()).unwrap_or(false) {
+            self.pending_lock_confirm = true;
+            return;
+        }
+        self.lock_now();
+    }
+
     /// 锁定：清密钥、丢数据、清剪贴板。
+    ///
+    /// **不询问**：用于自动锁定、窗口关闭、退出这些必须马上锁的路径。
     pub fn lock_now(&mut self) {
+        self.pending_lock_confirm = false;
         if !matches!(self.state, AppState::Unlocked { .. }) {
             return;
         }
@@ -534,12 +656,16 @@ impl App {
             // vault 在此 drop，key 由 Zeroizing 清零
         }
 
+        // 锁定即断开浏览器桥：不留任何能读密码的通道
+        self.bridge.stop();
+
         clipboard::clear_on_lock(&mut self.last_copied);
 
         // 关闭所有浮层，清掉选中与展开的明文
         self.edit = None;
         self.settings = None;
         self.confirm_delete = None;
+        self.confirm_purge = None;
         self.confirm_empty_trash = false;
         self.pending_export = None;
         self.selected_id = None;
@@ -584,12 +710,186 @@ impl App {
                     "INVALID_ENTRY" | "INVALID_CATEGORY" => {
                         "名称无效：不能为空、不能重名、「其他」不可删除".to_string()
                     }
-                    _ => format!("操作失败：{e}"),
+                    _ => self.explain_error(&e),
                 };
                 if let Some(st) = self.settings.as_mut() {
                     st.error = Some(msg);
                 }
             }
+        }
+    }
+
+    /// 消费浏览器桥的请求。
+    ///
+    /// 所有密码库访问都在这里发生——UI 线程持有 `&mut Vault`，
+    /// 后台线程只能通过通道请求，拿不到 Vault。
+    fn pump_bridge(&mut self) {
+        use crate::bridge::Call;
+        use keynest_bridge::protocol::{EntrySummary, LockState};
+
+        let calls = self.bridge.collect_calls();
+        if calls.is_empty() {
+            return;
+        }
+
+        for call in calls {
+            match call {
+                Call::LockState(reply) => {
+                    let locked = !matches!(self.state, AppState::Unlocked { .. });
+                    let _ = reply.send(if locked {
+                        LockState::Locked
+                    } else {
+                        LockState::Unlocked
+                    });
+                }
+                Call::Version(reply) => {
+                    let _ = reply.send(env!("CARGO_PKG_VERSION").to_string());
+                }
+                Call::Query { origin, reply } => {
+                    let out = self.bridge_query(&origin);
+                    let _ = reply.send(out);
+                }
+                Call::Fill {
+                    entry_id,
+                    origin,
+                    reply,
+                } => {
+                    let out = self.bridge_fill(&entry_id, &origin);
+                    let _ = reply.send(out);
+                }
+                Call::Save { payload, reply } => {
+                    let out = self.bridge_save(payload);
+                    let _ = reply.send(out);
+                }
+                Call::Conflicts(reply) => {
+                    // 冲突裁决在阶段 5，这里先回空数组而不是报错——
+                    // 扩展需要能区分"没有冲突"和"功能没做"
+                    let _ = reply.send(Ok(keynest_bridge::serde_json::json!([])));
+                }
+            }
+        }
+        let _ = EntrySummary {
+            id: String::new(),
+            title: String::new(),
+            username: String::new(),
+            url: String::new(),
+        };
+    }
+
+    /// 只读查询：绝不返回密码。
+    fn bridge_query(
+        &mut self,
+        origin: &str,
+    ) -> Result<Vec<keynest_bridge::protocol::EntrySummary>, keynest_bridge::BridgeError> {
+        use keynest_bridge::protocol::EntrySummary;
+        let AppState::Unlocked { data, .. } = &self.state else {
+            return Err(keynest_bridge::BridgeError::VaultLocked);
+        };
+
+        // 精确 origin 匹配：不做子串、不做子域通配
+        let want = crate::bridge::origin::normalize(origin)
+            .ok_or(keynest_bridge::BridgeError::InvalidRequest("origin 不合法"))?;
+
+        Ok(data
+            .entries
+            .iter()
+            .filter(|e| !e.is_deleted())
+            .filter(|e| {
+                crate::bridge::origin::normalize(&e.url)
+                    .map(|u| u == want)
+                    .unwrap_or(false)
+            })
+            .map(|e| EntrySummary {
+                id: e.id.clone(),
+                title: e.title.clone(),
+                username: e.username.clone(),
+                url: e.url.clone(),
+            })
+            .collect())
+    }
+
+    /// 取密码。每次调用都重新检查解锁状态与条目状态，不缓存。
+    fn bridge_fill(
+        &mut self,
+        entry_id: &str,
+        origin: &str,
+    ) -> Result<Zeroizing<String>, keynest_bridge::BridgeError> {
+        let AppState::Unlocked { data, .. } = &self.state else {
+            return Err(keynest_bridge::BridgeError::VaultLocked);
+        };
+
+        let want = crate::bridge::origin::normalize(origin)
+            .ok_or(keynest_bridge::BridgeError::InvalidRequest("origin 不合法"))?;
+
+        let e = data
+            .entries
+            .iter()
+            .find(|e| e.id == entry_id && !e.is_deleted())
+            .ok_or(keynest_bridge::BridgeError::InvalidRequest("条目不存在"))?;
+
+        // 二次校验：请求里声明的 origin 必须与条目真实 origin 一致，
+        // 否则就是跨站填充
+        let entry_origin = crate::bridge::origin::normalize(&e.url).ok_or(
+            keynest_bridge::BridgeError::InvalidRequest("条目没有有效网址"),
+        )?;
+        if entry_origin != want {
+            return Err(keynest_bridge::BridgeError::InvalidRequest(
+                "origin 与条目不匹配",
+            ));
+        }
+
+        // Zeroizing 保证：这份明文离开本函数即被擦除，
+        // 而不是留在某个 String 里等着被 core dump 捞走
+        Ok(Zeroizing::new(e.password.clone()))
+    }
+
+    fn bridge_save(
+        &mut self,
+        payload: keynest_bridge::protocol::SavePayload,
+    ) -> Result<String, keynest_bridge::BridgeError> {
+        let AppState::Unlocked { .. } = &self.state else {
+            return Err(keynest_bridge::BridgeError::VaultLocked);
+        };
+        // 写入路径在阶段 3（自动保存）实现；现在明确拒绝，避免半成品埋数据
+        let _ = payload;
+        Err(keynest_bridge::BridgeError::InvalidRequest(
+            "保存功能尚未启用（阶段 3）",
+        ))
+    }
+
+    /// 把 `VaultError` 翻成**用户能照着做**的话。
+    ///
+    /// 为什么需要这一层：`Display` 实现是给日志用的（"仓库文件已被其他程序修改"），
+    /// 用户看完仍然不知道该点哪里。这几类错误在实际使用中都会遇到，
+    /// 而且都需要具体动作，不是"重试一下"能解决的：
+    ///
+    /// * `EXTERNAL_CHANGE` —— 库放在网盘同步目录、或另一台机器改过它
+    /// * `IO` —— 磁盘满、目录只读、杀毒软件锁文件
+    /// * `CORRUPT` —— 文件被写坏，需要从备份恢复
+    fn explain_error(&self, e: &VaultError) -> String {
+        match e.code() {
+            "EXTERNAL_CHANGE" => "密码库文件在你打开之后被别处改过（常见于网盘同步或另一台机器）。
+
+                 已中止保存，以免覆盖对方的改动。
+
+                 如果那些改动不是你做的：先关掉同步盘，再重新打开钥巢。
+                 如果确实是你改的：本次修改需要重新做一遍。"
+                .to_string(),
+            "IO" => format!(
+                "{e}
+
+                 常见原因：磁盘已满、目录不可写、或安全软件正在扫描该文件。
+                 处理后可重试；你的修改还留在界面上。"
+            ),
+            "CORRUPT" | "UNSUPPORTED_FORMAT" => format!(
+                "{e}
+
+                 库文件的结构已损坏。设置里可以从备份恢复。"
+            ),
+            "NO_BACKUP" => "没有可用的备份。".to_string(),
+            "LOCKED" => "密码库已锁定，请重新解锁。".to_string(),
+            "INVALID_PASSWORD" => "主密码错误。".to_string(),
+            _ => format!("操作失败：{e}"),
         }
     }
 
@@ -614,6 +914,25 @@ impl App {
             last_activity.elapsed(),
             secure::system_idle(),
         )
+    }
+
+    /// 自动清除剪贴板失败时，把这件事告诉用户。
+    ///
+    /// 为什么需要单独一条：清除失败时**密码仍然留在剪贴板里**，
+    /// 而用户以为 20 秒后它已经没了。这是安全属性上的静默失效——
+    /// 比任何功能失败都更该主动提示。
+    ///
+    /// 每帧调一次；同一次失败只提示一次（靠记录上次提示过的文案去重）。
+    fn check_clipboard_clear_failure(&mut self) {
+        let Some(reason) = keynest_core::secure::last_clear_failure() else {
+            self.reported_clipboard_failure = None;
+            return;
+        };
+        if self.reported_clipboard_failure.as_deref() == Some(reason.as_str()) {
+            return; // 已经提示过这一次
+        }
+        self.reported_clipboard_failure = Some(reason);
+        self.set_toast("剪贴板自动清除失败，请手动复制别的内容或清空剪贴板");
     }
 
     fn check_auto_lock(&mut self) {
@@ -647,7 +966,10 @@ impl App {
         let Some(e) = data.entries.iter().find(|e| e.id == id) else {
             return;
         };
-        let pw = e.password.clone();
+        // 用 Zeroizing 包住：裸 String 在 drop 时只是把内存还给分配器，
+        // 内容仍留在那里，直到那块内存被复用。库里某条记录的密码
+        // 在进程存活期间可能因此在堆上停留很久。
+        let pw = Zeroizing::new(e.password.clone());
         // 夹取 TTL：配置万一被写成 0，会导致「刚写入就被定时器清空」，
         // 表现为「点了复制但剪贴板是空的」。
         let ttl = data.settings.clipboard_clear_seconds.clamp(3, 300);
@@ -657,7 +979,7 @@ impl App {
                 // 回读校验：只有剪贴板里确实是我们的内容才算成功。
                 // Windows 上别的程序占用剪贴板时 SetClipboardData 可能静默失败。
                 let ok = keynest_core::secure::clipboard_text()
-                    .map(|t| t == pw)
+                    .map(|t| t == pw.as_str())
                     .unwrap_or(false);
                 if ok {
                     if let AppState::Unlocked { copy_banner, .. } = &mut self.state {
@@ -678,7 +1000,9 @@ impl App {
         let Some(e) = data.entries.iter().find(|e| e.id == id) else {
             return;
         };
-        let name = e.username.clone();
+        // 与密码同样的理由：账号也是「看到就等于泄漏一半」的信息，
+        // 裸 String 在 drop 后内容仍留在堆上。
+        let name = Zeroizing::new(e.username.clone());
         if name.is_empty() {
             return;
         }
@@ -687,7 +1011,7 @@ impl App {
         match clipboard::copy_remembered(&name, ttl, &mut self.last_copied) {
             Ok(banner) => {
                 let ok = keynest_core::secure::clipboard_text()
-                    .map(|t| t == name)
+                    .map(|t| t == name.as_str())
                     .unwrap_or(false);
                 if ok {
                     if let AppState::Unlocked { copy_banner, .. } = &mut self.state {
@@ -803,9 +1127,12 @@ impl App {
                 self.selected_id = Some(saved_id);
             }
             Err(e) => {
-                // 保留用户输入，把错误回填到对话框，并取消关闭
+                // 保留用户输入，把错误回填到对话框，并取消关闭。
+                // 用 explain_error 而不是 e.to_string()：
+                // 保存失败的原因大多需要用户做具体动作，光说"失败了"没用。
+                let msg = self.explain_error(&e);
                 if let Some(st) = self.edit.as_mut() {
-                    st.error = Some(e.to_string());
+                    st.error = Some(msg);
                     st.closing = false;
                 }
             }
@@ -828,6 +1155,12 @@ impl App {
                 if let AppState::Unlocked { reveal, .. } = &mut self.state {
                     *reveal = None;
                 }
+                // 剪贴板里如果还是这条的密码，一并清掉。
+                //
+                // 用户删掉一条记录，往往是因为怀疑它已经泄露。
+                // 而这时密码可能还躺在剪贴板里（默认停留 20 秒）——
+                // 屏幕上清干净了、剪贴板里还留着，等于没删干净。
+                clipboard::clear_on_lock(&mut self.last_copied);
                 self.set_toast("已删除");
             }
             Err(e) => self.set_toast(format!("删除失败：{e}")),
@@ -835,6 +1168,105 @@ impl App {
     }
 
     /* ---------------- 设置相关 ---------------- */
+
+    /// 放弃本地未保存的改动，重新载入磁盘上的库。
+    ///
+    /// 这是「库文件被别处改过」之后唯一能走通的路：
+    /// 没有它，用户只能重启程序（丢掉编辑）或手动删文件。
+    ///
+    /// 失败时**不破坏当前会话**——`reload()` 内部保证磁盘内容先被证明可用，
+    /// 才动内存状态。
+    /// 清空恢复留档，然后刷新设置页里那份列表。
+    ///
+    /// 只删 `vault.dat.corrupt-*`，不动库与备份——
+    /// 用户想清的是垃圾文件，不该顺手把数据一起删了。
+    fn apply_clear_leftovers(&mut self) {
+        enum Outcome {
+            Cleared(usize),
+            Failed(String),
+        }
+
+        let outcome = {
+            let AppState::Unlocked { vault, .. } = &self.state else {
+                return;
+            };
+            match vault.clear_recovery_leftovers() {
+                Ok(n) => Outcome::Cleared(n),
+                Err(e) => Outcome::Failed(e.to_string()),
+            }
+        };
+
+        // 列表与提示都要刷；两者都需要 &mut self，所以放在借用结束之后
+        let left = {
+            let AppState::Unlocked { vault, .. } = &self.state else {
+                return;
+            };
+            vault.list_recovery_leftovers()
+        };
+
+        match outcome {
+            Outcome::Cleared(n) => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.leftovers_bytes = left.iter().map(|l| l.bytes).sum();
+                    st.leftovers = left;
+                    st.confirm_clear_leftovers = false;
+                    st.notice = Some(format!("已清空 {n} 个恢复留档"));
+                    st.error = None;
+                }
+            }
+            Outcome::Failed(msg) => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.error = Some(format!("清理失败：{msg}"));
+                    st.confirm_clear_leftovers = false;
+                }
+            }
+        }
+    }
+
+    fn apply_reload_from_disk(&mut self) {
+        // 结果先在窄作用域里算出来，避免与 &mut self 的其它部分同时借用。
+        enum Outcome {
+            Reloaded,
+            Failed(String),
+        }
+
+        let outcome = {
+            let AppState::Unlocked { vault, data, .. } = &mut self.state else {
+                return;
+            };
+            match vault.reload() {
+                Err(e) => Outcome::Failed(e.to_string()),
+                Ok(fresh) => {
+                    *data = fresh;
+                    Outcome::Reloaded
+                }
+            }
+        };
+
+        match outcome {
+            Outcome::Failed(msg) => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.error = Some(msg);
+                }
+            }
+            Outcome::Reloaded => {
+                // 选中项可能已经不在新数据里
+                let still_there = match (&self.selected_id, &self.state) {
+                    (Some(id), AppState::Unlocked { data, .. }) => {
+                        data.entries.iter().any(|x| x.id == *id)
+                    }
+                    _ => false,
+                };
+                if !still_there {
+                    self.selected_id = None;
+                }
+                if let Some(st) = self.settings.as_mut() {
+                    st.error = None;
+                }
+                self.set_toast("已重新载入磁盘上的库");
+            }
+        }
+    }
 
     fn apply_settings_save(&mut self) {
         let Some(st) = self.settings.as_mut() else {
@@ -854,12 +1286,17 @@ impl App {
                 if let Some(st) = self.settings.as_mut() {
                     st.notice = Some("设置已保存".into());
                     st.error = None;
+                    // 保存成功后草稿变成新的「原始值」，脏标记随之清除。
+                    // 不调用的话：保存完再点关闭，仍会被问「设置还没保存」——
+                    // 用户刚保存过，这提示会让他以为没生效。
+                    st.mark_saved();
                 }
             }
             Err(e) => {
                 if let Some(st) = self.settings.as_mut() {
                     st.error = Some(e.to_string());
                     st.notice = None;
+                    st.changing_master = false;
                 }
             }
         }
@@ -883,14 +1320,28 @@ impl App {
             return;
         }
 
+        // 防重入：Argon2id 要在 UI 线程上派生两次（旧 KEK + 新 KEK），
+        // 160–400ms 的冻结是真实的。没有这道闸，用户会反复点按钮，
+        // 排队多次 change_master——第二次因旧密码已变而失败，
+        // 于是看到一个莫名其妙的错误。
+        if st.changing_master {
+            return;
+        }
+
         let old = st.old_pw.clone();
         let new = st.new_pw.clone();
+        st.changing_master = true;
+        // 让"正在修改…"先画出来再开始阻塞，否则用户看到的仍是冻结
+        self.repaint_fast = true;
 
         let AppState::Unlocked { vault, .. } = &mut self.state else {
+            if let Some(st) = self.settings.as_mut() {
+                st.changing_master = false;
+            }
             return;
         };
 
-        // 注意：这里会在 UI 线程阻塞约 100–300ms（Argon2id 两次派生）
+        // 注意：这里会在 UI 线程阻塞约 160–400ms（Argon2id 两次派生）
         match vault.change_master(old.as_str(), new.as_str()) {
             Ok(()) => {
                 if let Some(st) = self.settings.as_mut() {
@@ -898,14 +1349,21 @@ impl App {
                     st.new_pw = Zeroizing::new(String::new());
                     st.new_pw2 = Zeroizing::new(String::new());
                     st.error = None;
-                    st.notice = Some("主密码已修改".into());
+                    // 成功的提示也要提旧备份的事——用户可能没看表单上方那行说明，
+                    // 而这条信息在他需要从备份恢复的那天才会变得重要。
+                    st.notice = Some(
+                        "主密码已修改。已有的备份（.bak.*）仍由旧密码保护，                         用旧密码才能恢复它们。"
+                            .into(),
+                    );
+                    st.changing_master = false;
                 }
-                self.set_toast("主密码已修改");
+                self.set_toast("主密码已修改（旧备份仍需旧密码）");
             }
             Err(e) => {
                 if let Some(st) = self.settings.as_mut() {
                     st.error = Some(e.to_string());
                     st.notice = None;
+                    st.changing_master = false;
                 }
             }
         }
@@ -915,9 +1373,19 @@ impl App {
         let Some(st) = self.settings.as_mut() else {
             return;
         };
+        // 与改主密码同样的理由：这次要派生 KEK + 重写整个库，
+        // 阻塞比 change_master 更久。没有闸门就会排队多次升级。
+        if st.upgrading {
+            return;
+        }
         let pw = st.upgrade_pw.clone();
+        st.upgrading = true;
+        self.repaint_fast = true;
 
         let AppState::Unlocked { vault, .. } = &mut self.state else {
+            if let Some(st) = self.settings.as_mut() {
+                st.upgrading = false;
+            }
             return;
         };
 
@@ -931,6 +1399,7 @@ impl App {
                     st.upgrade_pw = Zeroizing::new(String::new());
                     st.error = None;
                     st.notice = Some("已升级到 v3 格式".into());
+                    st.upgrading = false;
                 }
                 self.set_toast("已升级到 v3 格式");
             }
@@ -938,6 +1407,9 @@ impl App {
                 if let Some(st) = self.settings.as_mut() {
                     st.error = Some(e.to_string());
                     st.notice = None;
+                    // 注意是 upgrading 不是 changing_master——
+                    // 这两个标志属于不同的流程，写错会让另一个按钮永久变灰。
+                    st.upgrading = false;
                 }
             }
         }
@@ -974,13 +1446,111 @@ impl App {
         let AppState::Unlocked { data, .. } = &self.state else {
             return Err(VaultError::Locked);
         };
+
+        // **只导出活跃条目**，回收站里的不进明文文件。
+        //
+        // 用户把一条记录删进回收站，心里认为它已经"删掉了"。
+        // 导出时若把它一并写进 CSV，就等于把他以为删掉的东西
+        // 明文摊在磁盘上——那是实打实的数据外泄，而且他不会察觉。
+        //
+        // 想连回收站一起带走，应当用「导出加密备份」（那是整库副本，
+        // 语义明确），而不是明文导出。
+        let active: Vec<keynest_core::vault::Entry> = data
+            .entries
+            .iter()
+            .filter(|e| !e.is_deleted())
+            .cloned()
+            .collect();
+
         // 导出结果里是明文密码，`Zeroizing` 保证写盘后缓冲区被清零。
         let text = match kind {
-            ExportKind::Csv => portable::export_csv(&data.entries)?,
-            ExportKind::Json => portable::export_json(&data.entries)?,
+            ExportKind::Csv => portable::export_csv(&active)?,
+            ExportKind::Json => portable::export_json(&active)?,
         };
         let bytes = portable::write_plaintext_export(path, text.as_str())?;
-        Ok((data.entries.len(), bytes))
+        Ok((active.len(), bytes))
+    }
+
+    /// 宿主 exe 的来源：与 GUI 同目录（发布包里的布局）。
+    ///
+    /// 找不到就返回 None——调用方要给出可操作的提示，
+    /// 而不是「安装失败」。
+    fn native_host_exe(&self) -> Option<std::path::PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let dir = exe.parent()?;
+        let candidate = dir.join(keynest_bridge::hostinstall::HOST_EXE_NAME);
+        if candidate.exists() {
+            Some(candidate)
+        } else {
+            None
+        }
+    }
+
+    /// 安装浏览器桥接宿主。
+    fn install_bridge(&mut self) {
+        let Some(id_text) = self
+            .settings
+            .as_ref()
+            .map(|s| s.bridge_ext_id.trim().to_string())
+        else {
+            return;
+        };
+        let Some(exe) = self.native_host_exe() else {
+            if let Some(st) = self.settings.as_mut() {
+                st.bridge_status = Some(format!(
+                    "找不到 {}。它应当与本程序在同一个目录里。",
+                    keynest_bridge::hostinstall::HOST_EXE_NAME
+                ));
+            }
+            return;
+        };
+
+        let data_dir = keynest_paths::resolve_data_dir();
+        match keynest_bridge::hostinstall::install(&data_dir, &exe, &[id_text]) {
+            Ok(report) => {
+                let msg = report.summary();
+                if let Some(st) = self.settings.as_mut() {
+                    st.bridge_installed = true;
+                    st.bridge_status = Some(msg.clone());
+                }
+                self.set_toast(msg);
+            }
+            Err(e) => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.bridge_installed = false;
+                    st.bridge_status = Some(format!("安装失败：{e}"));
+                }
+                self.set_toast(format!("安装失败：{e}"));
+            }
+        }
+    }
+
+    /// 卸载浏览器桥接宿主。
+    fn uninstall_bridge(&mut self) {
+        let data_dir = keynest_paths::resolve_data_dir();
+        match keynest_bridge::hostinstall::uninstall(&data_dir) {
+            Ok(report) => {
+                let msg = if report.registered_browsers.is_empty() {
+                    "已卸载浏览器桥接".to_string()
+                } else {
+                    format!(
+                        "已从 {} 卸载浏览器桥接",
+                        report.registered_browsers.join("、")
+                    )
+                };
+                if let Some(st) = self.settings.as_mut() {
+                    st.bridge_installed = false;
+                    st.bridge_status = Some(msg.clone());
+                }
+                self.set_toast(msg);
+            }
+            Err(e) => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.bridge_status = Some(format!("卸载失败：{e}"));
+                }
+                self.set_toast(format!("卸载失败：{e}"));
+            }
+        }
     }
 
     fn do_plaintext_export(&mut self, kind: ExportKind) {
@@ -1038,12 +1608,16 @@ impl App {
         let text =
             String::from_utf8(bytes).map_err(|_| VaultError::Import("文件不是 UTF-8 文本"))?;
 
-        let (entries, _invalid) = portable::detect_and_import(&text)?;
+        let (entries, invalid) = portable::detect_and_import(&text)?;
+        // 源文件里识别出的候选条数 = 解析成功的 + 解析阶段就丢掉的
+        let parsed_total = entries.len() + invalid;
 
         let AppState::Unlocked { vault, data, .. } = &mut self.state else {
             return Err(VaultError::Locked);
         };
-        let report = vault.import_entries(entries)?;
+        // 把解析阶段的统计一起带进报告——否则"源文件里有 N 条、
+        // 其中 M 条格式不对"这件事用户永远看不到。
+        let report = vault.import_entries_with_stats(entries, parsed_total, invalid)?;
         if let Ok(fresh) = vault.snapshot() {
             *data = fresh;
         }
@@ -1078,8 +1652,11 @@ impl App {
         match intent {
             MainIntent::None => {}
             MainIntent::Lock => {
-                self.lock_now();
-                self.set_toast("已锁定");
+                // 可能被拦下（编辑框有未保存内容），此时不提示"已锁定"
+                self.request_lock();
+                if !self.pending_lock_confirm {
+                    self.set_toast("已锁定");
+                }
             }
             MainIntent::OpenSettings => {
                 if let AppState::Unlocked { vault, data, .. } = &self.state {
@@ -1088,7 +1665,10 @@ impl App {
                     let dark = crate::ui::theme::is_dark();
                     self.settings = Some(SettingsState::new(
                         &data.settings,
+                        // 编辑框里有没有未保存内容——用来决定
+                        // 「重新载入」那条警告要不要显示。
                         SettingsContext {
+                            edit_unsaved: self.edit.as_ref().map(|e| e.is_dirty()).unwrap_or(false),
                             categories: data.categories.clone(),
                             types: data.types.clone(),
                             legacy: vault.is_legacy(),
@@ -1097,8 +1677,12 @@ impl App {
                             key_locked: vault.key_memory_locked(),
                             kdf_ok: vault.kdf_meets_floor(),
                             security,
+                            leftovers: vault.list_recovery_leftovers(),
                             font_note: font,
                             dark,
+                            bridge_installed: keynest_bridge::hostinstall::is_installed(
+                                &keynest_paths::resolve_data_dir(),
+                            ),
                         },
                     ));
                 }
@@ -1128,6 +1712,12 @@ impl App {
                 self.filter = f;
                 self.hide_reveal();
             }
+            MainIntent::ClearAllFilters => {
+                // 搜索词也要清：只重置 filter 的话，用户点了「清除搜索与筛选」
+                // 仍然看到空列表，会以为按钮坏了。
+                clear_all_filters(&mut self.search, &mut self.filter, &mut self.focus_search);
+                self.hide_reveal();
+            }
             MainIntent::SetSort(s) => {
                 self.sort = s;
             }
@@ -1153,11 +1743,20 @@ impl App {
                 };
                 let code = totp.code_now();
                 let ttl = data.settings.clipboard_clear_seconds.clamp(3, 300);
+
                 // 验证码只在当前时间步内有效，TTL 不能超过剩余秒数，
                 // 否则剪贴板里留着一个已经过期的码，比不复制更糟。
-                let ttl = ttl
-                    .min(totp.remaining(keynest_core::totp::now_secs()) as u32)
-                    .max(3);
+                //
+                // **剩余时间过短时直接拒绝，而不是把 TTL 拉长到下限。**
+                // 原来写的是 `.min(remaining).max(3)`，`.max(3)` 会把
+                // 「只剩 1 秒」拉成 3 秒——正好制造了它想避免的那种情况：
+                // 剪贴板里留着一个已过期的码。
+                let left = totp.remaining(keynest_core::totp::now_secs()) as u32;
+                let Some(ttl) = totp_clipboard_ttl(ttl, left) else {
+                    self.set_toast("验证码即将失效，请稍候再复制");
+                    return;
+                };
+
                 match clipboard::copy_remembered(&code, ttl, &mut self.last_copied) {
                     Ok(banner) => {
                         if let AppState::Unlocked { copy_banner, .. } = &mut self.state {
@@ -1243,6 +1842,9 @@ impl App {
                 }
             }
             MainIntent::Purge(id) => {
+                self.confirm_purge = Some(id);
+            }
+            MainIntent::PurgeConfirmed(id) => {
                 let AppState::Unlocked { vault, data, .. } = &mut self.state else {
                     return;
                 };
@@ -1254,6 +1856,12 @@ impl App {
                         if self.selected_id.as_deref() == Some(id.as_str()) {
                             self.selected_id = None;
                         }
+                        // 永久删除是「彻底消失」这一步，剪贴板也必须干净。
+                        //
+                        // 与「移入回收站」同样的理由，但更严格：
+                        // 用户点「永久删除」时，他要的是这东西**没有留下任何痕迹**。
+                        // 屏幕上清掉了、剪贴板里还留着，等于没做到。
+                        clipboard::clear_on_lock(&mut self.last_copied);
                         self.set_toast("已永久删除");
                     }
                     Err(e) => self.set_toast(format!("删除失败：{e}")),
@@ -1285,6 +1893,8 @@ impl App {
             SettingsIntent::None => {}
             SettingsIntent::Close => self.settings = None,
             SettingsIntent::Save => self.apply_settings_save(),
+            SettingsIntent::ReloadFromDisk => self.apply_reload_from_disk(),
+            SettingsIntent::ClearLeftovers => self.apply_clear_leftovers(),
             SettingsIntent::ChangeMaster => self.apply_change_master(),
             SettingsIntent::Upgrade => self.apply_upgrade(),
             SettingsIntent::OpenWipe => {
@@ -1299,6 +1909,56 @@ impl App {
                 }
             }
             SettingsIntent::Wipe => self.apply_wipe(),
+            SettingsIntent::AskDiscard => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.confirm_discard = true;
+                }
+            }
+            SettingsIntent::CancelDiscard => {
+                if let Some(st) = self.settings.as_mut() {
+                    st.confirm_discard = false;
+                    // 用户选「继续编辑」：那次跳转的意图作废，留在设置页。
+                    st.pending_jump = None;
+                }
+            }
+            SettingsIntent::DiscardConfirmed => {
+                // 用户明确选择放弃改动：直接丢掉整份状态。
+                // 不做「自动保存」——他要的就是不要这些改动。
+                //
+                // 如果这次确认是被「查看弱密码 / 查看重复」触发的，
+                // 放弃之后要接着跳到那个筛选——用户点那两个按钮的
+                // 本意就是去看列表，不该因为中途跳了个确认框就作废。
+                let jump = self
+                    .settings
+                    .as_ref()
+                    .and_then(|st| st.pending_jump.clone());
+                self.settings = None;
+                if let Some(f) = jump {
+                    self.filter = f;
+                    self.search.clear();
+                }
+            }
+            SettingsIntent::SaveAndClose => {
+                self.apply_settings_save();
+                // 只有保存成功才关。失败时窗口留着，错误信息在 st.error 里，
+                // 用户还能继续改。
+                let ok = self
+                    .settings
+                    .as_ref()
+                    .map(|st| st.error.is_none())
+                    .unwrap_or(false);
+                if ok {
+                    let jump = self
+                        .settings
+                        .as_ref()
+                        .and_then(|st| st.pending_jump.clone());
+                    self.settings = None;
+                    if let Some(f) = jump {
+                        self.filter = f;
+                        self.search.clear();
+                    }
+                }
+            }
             SettingsIntent::Closed => self.settings = None,
             SettingsIntent::SetTheme(dark) => {
                 // 主题切换会重建 visuals，字体已在启动时注册，不受影响
@@ -1355,6 +2015,8 @@ impl App {
                 self.settings = None;
                 self.filter = Filter::Reused;
             }
+            SettingsIntent::InstallBridge => self.install_bridge(),
+            SettingsIntent::UninstallBridge => self.uninstall_bridge(),
             SettingsIntent::ExportCsv => self.pending_export = Some(ExportKind::Csv),
             SettingsIntent::ExportJson => self.pending_export = Some(ExportKind::Json),
             SettingsIntent::ExportBackup => self.do_export_backup(),
@@ -1385,6 +2047,15 @@ impl App {
                     st.password = Zeroizing::new(st.gen.preview.to_string());
                 }
             }
+            EditIntent::CancelDiscard => {
+                if let Some(e) = self.edit.as_mut() {
+                    e.confirm_discard = false;
+                }
+            }
+            EditIntent::DiscardConfirmed => {
+                // 用户明确选择放弃：直接丢掉编辑状态。
+                self.edit = None;
+            }
             EditIntent::Closed => self.edit = None,
         }
     }
@@ -1400,8 +2071,11 @@ impl App {
         let Some(kind) = self.pending_export else {
             return;
         };
+        // 条数要按**实际导出的数量**算：回收站里的条目不进导出文件。
+        // 用 data.entries.len()（含回收站）会让用户看到「导出 500 条」，
+        // 而文件里只有 480 条——数字对不上，用户会以为导出出了问题。
         let count = match &self.state {
-            AppState::Unlocked { data, .. } => data.entries.len(),
+            AppState::Unlocked { data, .. } => plaintext_export_count(data),
             _ => {
                 self.pending_export = None;
                 return;
@@ -1461,6 +2135,9 @@ impl App {
                     *data = fresh;
                 }
                 self.selected_id = None;
+                // 一次清掉几十条之后，剪贴板里大概率还留着其中某条的密码。
+                // 这是最彻底的删除操作，剪贴板也不该有残留。
+                clipboard::clear_on_lock(&mut self.last_copied);
                 self.set_toast(format!("已清空回收站（{n} 条，无法恢复）"));
             }
             Err(e) => self.set_toast(format!("清空失败：{e}")),
@@ -1517,6 +2194,171 @@ impl App {
         }
     }
 
+    /// 「编辑框里有未保存的改动，确定要锁定吗？」
+    ///
+    /// 三个选项而不是两个：用户常常只是想先把内容存下来再锁，
+    /// 逼他在"丢"和"不锁"之间二选一不合理。
+    fn draw_confirm_lock(&mut self, ctx: &egui::Context) {
+        if !self.pending_lock_confirm {
+            return;
+        }
+
+        #[allow(deprecated)]
+        let resp = egui::Modal::new(egui::Id::new("confirm-lock")).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.label(egui::RichText::new("还有未保存的修改").size(16.0).strong());
+            ui.add_space(8.0);
+            ui.label("正在编辑的这条记录还没保存。锁定之后这些内容会丢失。");
+            ui.add_space(12.0);
+
+            let mut action = 0u8; // 0=不动 1=先保存再锁 2=丢弃并锁定 3=取消
+            ui.horizontal(|ui| {
+                if ui.button("保存后锁定").clicked() {
+                    action = 1;
+                }
+                if ui
+                    .button(
+                        egui::RichText::new("丢弃并锁定")
+                            .color(egui::Color32::from_rgb(190, 60, 60)),
+                    )
+                    .clicked()
+                {
+                    action = 2;
+                }
+                if ui.button("取消").clicked() {
+                    action = 3;
+                }
+            });
+            action
+        });
+
+        // 点遮罩也算取消：用户没明确选择时不该丢掉任何东西
+        let action = if resp.inner != 0 {
+            resp.inner
+        } else if resp.should_close() {
+            3
+        } else {
+            0
+        };
+
+        match action {
+            1 => {
+                // 先走正常的保存流程；保存成功与否由 upsert 的错误处理决定。
+                // 无论成败都不在这里强行锁定——保存失败时锁掉会丢内容。
+                self.save_edit_and_lock();
+            }
+            2 => {
+                self.pending_lock_confirm = false;
+                self.edit = None;
+                self.lock_now();
+                self.set_toast("已锁定");
+            }
+            3 => {
+                self.pending_lock_confirm = false;
+            }
+            _ => {}
+        }
+    }
+
+    /// 保存当前编辑内容，成功后再锁定。
+    ///
+    /// `save_edit` 没有返回值，所以这里用「保存后编辑框里是否出现 error」
+    /// 判断成败：失败时它会把错误写回 `st.error` 并取消关闭，
+    /// 那时**不能锁**——锁掉就等于把用户刚填的内容丢了。
+    fn save_edit_and_lock(&mut self) {
+        self.pending_lock_confirm = false;
+        self.save_edit();
+
+        let failed = self
+            .edit
+            .as_ref()
+            .map(|st| st.error.is_some())
+            .unwrap_or(false);
+        if failed {
+            // 错误已经回填在对话框里，用户能看见；这次锁定作废
+            return;
+        }
+
+        // 保存成功：走正常的退场动画，然后立即锁定。
+        // 顺序不能反——先锁会把 `edit` 一起丢掉。
+        if let Some(st) = self.edit.as_mut() {
+            st.closing = true;
+        }
+        self.edit = None;
+        self.lock_now();
+        self.set_toast("已保存并锁定");
+    }
+
+    /// 「永久删除这一条？」的确认。
+    ///
+    /// 与「清空回收站」同样的理由：不可撤销的操作必须二次确认。
+    /// 回收站里每行都有「恢复」和「永久删除」两个按钮，挨得很近，
+    /// 手一抖就从「想恢复」变成「永久没了」。
+    fn draw_confirm_purge(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.confirm_purge.clone() else {
+            return;
+        };
+
+        let title = match &self.state {
+            AppState::Unlocked { data, .. } => data
+                .entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.title.clone())
+                .unwrap_or_else(|| "该条目".to_string()),
+            _ => return,
+        };
+
+        #[allow(deprecated)]
+        let resp = egui::Modal::new(egui::Id::new("confirm-purge")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(egui::RichText::new("永久删除").size(16.0).strong());
+            ui.add_space(8.0);
+            ui.label(format!("「{title}」将被彻底删除，无法恢复。"));
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("如果只是想先放一边，可以用「恢复」把它放回列表。")
+                    .size(11.0)
+                    .color(ui.visuals().weak_text_color()),
+            );
+            ui.add_space(12.0);
+
+            let mut action = 0u8; // 0=不动 1=确认 2=取消
+            ui.horizontal(|ui| {
+                if ui
+                    .button(
+                        egui::RichText::new("永久删除").color(egui::Color32::from_rgb(190, 60, 60)),
+                    )
+                    .clicked()
+                {
+                    action = 1;
+                }
+                if ui.button("取消").clicked() {
+                    action = 2;
+                }
+            });
+            action
+        });
+
+        // 点遮罩也算取消：没明确选择时不该删任何东西
+        let action = if resp.inner != 0 {
+            resp.inner
+        } else if resp.should_close() {
+            2
+        } else {
+            0
+        };
+
+        match action {
+            1 => {
+                self.confirm_purge = None;
+                self.apply_main_intent(MainIntent::PurgeConfirmed(id));
+            }
+            2 => self.confirm_purge = None,
+            _ => {}
+        }
+    }
+
     fn draw_confirm_delete(&mut self, ctx: &egui::Context) {
         let Some(id) = self.confirm_delete.clone() else {
             return;
@@ -1537,7 +2379,21 @@ impl App {
             ui.set_width(360.0);
             ui.label(egui::RichText::new("确认删除").size(16.0).strong());
             ui.add_space(8.0);
-            ui.label(format!("确定要删除「{title}」吗？此操作无法撤销。"));
+            // 文案必须与实际行为一致。
+            //
+            // 删除是**软删除**：条目进回收站，随时可以恢复（`delete_entry`
+            // 只设置 deleted_at）。原来这里写「此操作无法撤销」，既不准确，
+            // 也会让用户以为没有回收站而不敢用删除——
+            // 或者反过来，在真正需要谨慎的「永久删除」时以为还能恢复。
+            ui.label(format!("把「{title}」移到回收站？"));
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(
+                    "之后可以在左侧「回收站」里恢复。要真正删除，需在回收站里再删一次。",
+                )
+                .size(11.0)
+                .color(ui.visuals().weak_text_color()),
+            );
             ui.add_space(12.0);
             let mut do_delete = false;
             let mut cancel = false;
@@ -1558,9 +2414,11 @@ impl App {
         let (do_delete, cancel) = resp.inner;
         if do_delete {
             self.confirm_delete = None;
+            self.confirm_purge = None;
             self.delete_entry(&id);
         } else if cancel || resp.should_close() {
             self.confirm_delete = None;
+            self.confirm_purge = None;
         }
     }
 }
@@ -1572,6 +2430,15 @@ impl App {
 impl eframe::App for App {
     /// 每帧在 `ui` 之前调用：处理输入活跃度、后台任务、自动锁定、过期清理。
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 浏览器桥：把后台线程积压的请求在 UI 线程里执行。
+        // 放在最前面，保证每次请求都读取"当前这一帧"的解锁状态与条目内容。
+        //
+        // 唤醒由**后台线程**负责（`VaultProxy` 入队成功后调 `request_repaint()`），
+        // 这里不再无条件请求 16ms 重绘——那会让空闲 GUI 持续约 60 FPS 空转。
+        // 兜底见函数末尾：桥接运行时把既有调度从 500ms 收紧到 100ms，
+        // 即使唤醒回调失效，请求最坏也只延迟 100ms（远小于 5s 超时）。
+        self.pump_bridge();
+
         // 窗口关闭：先锁库
         if ctx.input(|i| i.viewport().close_requested()) {
             self.lock_now();
@@ -1599,7 +2466,12 @@ impl eframe::App for App {
                 self.edit = Some(EditState::new_entry(cat));
             }
             if lock {
-                self.lock_now();
+                // Ctrl+L 与点「锁定」按钮同属用户主动操作，
+                // 同样要照顾编辑框里的未保存内容。
+                self.request_lock();
+                if !self.pending_lock_confirm {
+                    self.set_toast("已锁定");
+                }
                 return;
             }
         }
@@ -1630,11 +2502,19 @@ impl eframe::App for App {
 
         self.poll_job();
         self.check_auto_lock();
+        self.check_clipboard_clear_failure();
         self.expire_transient();
 
-        // 有倒计时在动就快刷，否则 500ms 一次足够
+        // 有倒计时在动就快刷，否则 500ms 一次足够。
+        //
+        // 桥接运行时收紧到 100ms 作为**兜底**：正常情况下后台线程会用
+        // `request_repaint()` 立即唤醒，这里只保证"即使唤醒失效也不会让
+        // 请求等到 500ms 之后"。100ms 远小于浏览器侧 5s 超时，且比 16ms
+        // 空转省得多（10 FPS vs 60 FPS）。
         if self.repaint_fast {
             ctx.request_repaint_after(Duration::from_millis(50));
+        } else if self.bridge.is_running() {
+            ctx.request_repaint_after(Duration::from_millis(100));
         } else {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
@@ -1770,6 +2650,8 @@ impl eframe::App for App {
         self.apply_main_intent(main_intent);
         self.apply_settings_intent(settings_intent);
         self.apply_edit_intent(edit_intent);
+        self.draw_confirm_lock(ui.ctx());
+        self.draw_confirm_purge(ui.ctx());
         self.draw_confirm_delete(ui.ctx());
         self.draw_export_confirm(ui.ctx());
         self.draw_confirm_empty_trash(ui.ctx());
@@ -1784,6 +2666,134 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **所有**「让条目消失」的路径都必须清剪贴板。
+    ///
+    /// # 为什么用源码扫描
+    ///
+    /// 这几条路径都要真实的 `Vault`、解锁状态、确认弹窗才能走到，
+    /// 在单元测试里把它们逐个跑通成本很高。而这里的失败模式是
+    /// **漏掉一处**——新增一个删除入口时忘了清剪贴板。
+    ///
+    /// 所以扫源码：数一数 `clear_on_lock` 出现了几次，
+    /// 少了就说明有人加了新路径却没清剪贴板。
+    ///
+    /// # 这条测试自身的可靠性
+    ///
+    /// 它靠「数量下限 + 关键字」两个约束。故意删掉任意一处调用会让它变红；
+    /// 我已经验证过一次（见提交信息里的记录）。
+    ///
+    /// 局限：它不能证明「某一处具体在哪」。但这比完全没有护栏好，
+    /// 而且新增路径时它会立刻提醒「你该想想剪贴板了」。
+    #[test]
+    fn every_path_that_removes_an_entry_also_clears_the_clipboard() {
+        let full = include_str!("app.rs");
+        // **必须先切掉测试模块**。
+        //
+        // `include_str!` 把整个文件（含这段测试自己）都包含进来，
+        // 而下面的说明文字里就写着 `clipboard::clear_on_lock`——
+        // 不切掉的话，计数永远够，这条断言永远绿。
+        //
+        // 我第一版就是这么写的，然后故意删掉一处调用，
+        // 测试**没变红**才发现。
+        let src = match full.find("#[cfg(test)]") {
+            Some(i) => &full[..i],
+            None => full,
+        };
+
+        // 1) 数量下限：锁定、移入回收站、清库、永久删除、清空回收站 = 5 处。
+        //
+        //    写 5 而不是「>= 5」：新增了路径就该把它算进来，
+        //    这条断言会提醒作者「你加了一处清理，确认一下是不是漏了别的」。
+        let n = src.matches("clipboard::clear_on_lock").count();
+        assert!(
+            n >= 5,
+            "只找到 {n} 处 clipboard::clear_on_lock，至少要 5 处             （锁定 / 移入回收站 / 清库 / 永久删除 / 清空回收站）。             新增删除路径时请一并清剪贴板。"
+        );
+
+        // 2) 关键字：这几条路径的函数体里必须真的出现这行调用。
+        //
+        //    `purge_entry` / `empty_trash` / `delete_entry` 是三个独立的
+        //    删除入口，任何一个漏了都会留下「删了但剪贴板里还有」的口子。
+        for fname in ["fn delete_entry", "fn do_empty_trash"] {
+            let at = src
+                .find(fname)
+                .unwrap_or_else(|| panic!("找不到 {fname}——函数改名了？请同步更新这条测试"));
+            // 取该函数之后 2500 字节作为它的近似范围
+            let body = &src[at..src.len().min(at + 2500)];
+            assert!(
+                body.contains("clipboard::clear_on_lock"),
+                "{fname} 里没有清剪贴板——删掉的条目其密码会留在剪贴板里"
+            );
+        }
+    }
+
+    /// 「系统空闲未知」时，自动锁定必须**照常工作**。
+    ///
+    /// 这是本轮修的一个真实缺陷：`system_idle()` 拿不到系统状态时
+    /// 返回 0，而 `idle_since` 取的是 min —— 结果恒为 0，
+    /// **自动锁定永远不触发**，密码库一直开着。
+    #[test]
+    fn auto_lock_still_works_when_system_idle_is_unknown() {
+        let app_idle = Duration::from_secs(600); // 应用内已空闲 10 分钟
+        let sys_unknown = keynest_core::secure::SYSTEM_IDLE_UNKNOWN; // 系统状态拿不到
+
+        // 应当按应用内空闲算 → 超过 5 分钟上限 → 该锁
+        assert!(
+            should_auto_lock(5, app_idle, sys_unknown),
+            "系统空闲未知时，自动锁定必须照常触发"
+        );
+    }
+
+    /// 系统空闲未知但应用刚用过 → 不该锁。
+    #[test]
+    fn no_lock_when_app_just_used_even_if_system_idle_unknown() {
+        let app_idle = Duration::from_secs(2);
+        assert!(!should_auto_lock(5, app_idle, Duration::MAX));
+    }
+
+    /// 用户在别的程序里忙活（系统不空闲）→ 不该锁。
+    #[test]
+    fn no_lock_when_system_is_busy_but_app_is_idle() {
+        let app_idle = Duration::from_secs(600);
+        let sys_busy = Duration::from_secs(1);
+        assert!(
+            !should_auto_lock(5, app_idle, sys_busy),
+            "用户正在别的程序里操作，不该把他锁在外面"
+        );
+    }
+
+    /// 用户离开了电脑（两边都空闲）→ 该锁。
+    #[test]
+    fn locks_when_both_are_idle() {
+        let idle = Duration::from_secs(600);
+        assert!(should_auto_lock(5, idle, idle));
+    }
+
+    /// 应用刚被用过 → 不锁。
+    ///
+    /// 注意：`app_idle` 小而 `sys_idle` 大在物理上不会同时出现
+    /// （在 app 里点一下，系统输入时间也是那一刻）。
+    /// 但真出现了也要按 `min` 语义走：刚用过就不锁。
+    #[test]
+    fn no_lock_when_app_was_just_used() {
+        assert!(!should_auto_lock(
+            5,
+            Duration::from_secs(1),
+            Duration::from_secs(600)
+        ));
+    }
+
+    /// 剩余时间在系统空闲未知时也要算得出来，不能变成负数或溢出。
+    #[test]
+    fn remaining_seconds_is_sane_when_system_idle_unknown() {
+        let left = idle_remaining_secs(
+            5,
+            Duration::from_secs(60),
+            keynest_core::secure::SYSTEM_IDLE_UNKNOWN,
+        );
+        assert!(left > 0 && left <= 300, "实际 {left}");
+    }
 
     #[test]
     fn rejects_short_master() {
@@ -1808,6 +2818,114 @@ mod tests {
         let sys = Duration::from_secs(60);
         assert_eq!(idle_since(app, sys), Duration::from_secs(60));
         assert_eq!(idle_since(sys, app), Duration::from_secs(60));
+    }
+
+    /// 长阻塞操作的重入闸必须能独立开关。
+    ///
+    /// 改主密码与升级格式都会在 UI 线程上跑 Argon2id（160–400ms）。
+    /// 没有闸门时用户会反复点，排队多次操作——第二次因为旧密码/旧格式
+    /// 已经变了而失败，用户看到一个莫名其妙的错误。
+    ///
+    /// 这条测的是**两个标志互不干扰**：修的过程中真的把它写错过一次
+    /// （升级的错误分支里清了 `changing_master`），后果是另一个按钮
+    /// 永久变灰，而升级那个反而一直可点。
+    #[test]
+    fn busy_flags_are_independent() {
+        let mut st = SettingsState::new(
+            &keynest_core::vault::Settings::default(),
+            crate::views::settings::SettingsContext::default(),
+        );
+
+        st.changing_master = true;
+        assert!(!st.upgrading, "清一个不该影响另一个");
+
+        st.upgrading = true;
+        assert!(st.changing_master, "两个可以同时为真");
+
+        st.changing_master = false;
+        assert!(st.upgrading, "清 changing_master 不该清 upgrading");
+    }
+
+    /// 明文导出的条数必须**不含回收站**。
+    ///
+    /// 确认框里写着「导出 N 条」，文件里就应当真的有 N 条。
+    /// 用 `entries.len()`（含回收站）会出现「说 500、实际 480」，
+    /// 用户会以为导出出了问题。
+    #[test]
+    fn plaintext_export_count_excludes_trashed_entries() {
+        let mut data = keynest_core::vault::VaultData::default();
+        let mut a = keynest_core::vault::Entry::default();
+        a.id = "a".into();
+        a.title = "A".into();
+        let mut b = a.clone();
+        b.id = "b".into();
+        b.title = "B".into();
+        b.deleted_at = Some("2026-01-01T00:00:00.000Z".into());
+        data.entries = vec![a, b];
+
+        assert_eq!(data.entries.len(), 2, "前提：库里有两条（含一条已删除）");
+        assert_eq!(
+            plaintext_export_count(&data),
+            1,
+            "导出条数不应把回收站里的算进去"
+        );
+    }
+
+    /// 「清除搜索与筛选」必须**同时**清掉搜索词与筛选条件。
+    ///
+    /// 缺陷：原来那个按钮只发 `SetFilter(Filter::All)`，不动 `search`。
+    /// 用户搜了关键词、看到「没有匹配的条目」，点按钮后仍然空着——
+    /// 因为搜索词还在输入框里。按钮的名字承诺了它做不到的事，
+    /// 而用户只会觉得「这个按钮坏了」。
+    ///
+    /// 这里测的是纯函数 `clear_all_filters`：`App` 的构造需要
+    /// `eframe::CreationContext`，测试里造不出来，所以把行为抽出来测。
+    #[test]
+    fn clear_all_filters_resets_both_search_and_filter() {
+        let mut search = "招商".to_string();
+        let mut filter = Filter::Weak;
+        let mut focus = true;
+
+        clear_all_filters(&mut search, &mut filter, &mut focus);
+
+        assert_eq!(filter, Filter::All, "筛选没重置");
+        assert!(search.is_empty(), "搜索词没清空: {search:?}");
+        assert!(!focus, "不该把焦点抢到搜索框");
+    }
+
+    /// 「清除搜索与筛选」对已经干净的状态是幂等的。
+    #[test]
+    fn clear_all_filters_is_idempotent() {
+        let mut search = String::new();
+        let mut filter = Filter::All;
+        let mut focus = false;
+        clear_all_filters(&mut search, &mut filter, &mut focus);
+        assert!(search.is_empty());
+        assert_eq!(filter, Filter::All);
+        assert!(!focus);
+    }
+
+    /// 验证码的剪贴板 TTL 不得**超过**当前时间步剩余秒数。
+    ///
+    /// 原实现是 `.min(remaining).max(3)`：剩余 1 秒时被 `max(3)` 拉成 3 秒，
+    /// 剪贴板里于是留着一个已经过期的码——正是那段代码的注释想避免的情况。
+    #[test]
+    fn totp_ttl_never_outlives_the_time_step() {
+        // 正常情况：截到剩余时间
+        assert_eq!(totp_clipboard_ttl(20, 12), Some(12));
+        // 剩余很少：宁可不复制，也不复制一个立刻过期的码
+        assert_eq!(totp_clipboard_ttl(20, 2), None);
+        assert_eq!(totp_clipboard_ttl(20, 0), None);
+        // 配置值本身越界也要夹紧
+        assert_eq!(totp_clipboard_ttl(1000, 60), Some(60));
+        assert_eq!(totp_clipboard_ttl(1, 60), Some(3));
+    }
+
+    /// 边界：剩余正好 3 秒时允许复制，TTL 恰好 3。
+    #[test]
+    fn totp_ttl_allows_exactly_three_seconds() {
+        assert_eq!(totp_clipboard_ttl(20, 3), Some(3));
+        assert_eq!(totp_clipboard_ttl(20, 4), Some(4));
     }
 
     #[test]

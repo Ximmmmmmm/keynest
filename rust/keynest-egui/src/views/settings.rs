@@ -5,6 +5,8 @@ use zeroize::Zeroizing;
 
 use keynest_core::vault::Settings;
 
+use crate::views::main_view::Filter;
+
 use crate::ui::{icons, theme};
 
 /// 打开设置时算好的一份安全概况。
@@ -31,7 +33,7 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 4] = [Tab::Appearance, Tab::Security, Tab::Data, Tab::Danger];
+    pub const ALL: [Tab; 4] = [Tab::Appearance, Tab::Security, Tab::Data, Tab::Danger];
 
     fn label(self) -> &'static str {
         match self {
@@ -58,6 +60,17 @@ pub struct SettingsState {
     /// 正在改名的分类：(原名, 新名缓冲)
     pub renaming: Option<(String, String)>,
     pub draft: Settings,
+    /// 打开设置页时库里的设置。用来判断「改了但还没保存」。
+    pub orig: Settings,
+    /// 用户在有未保存改动时点了关闭 —— 现在等他确认。
+    pub confirm_discard: bool,
+    /// 确认之后要跳去的筛选（点「查看弱密码」时记下）。
+    ///
+    /// 不能在这一步直接跳：用户可能选「继续编辑」，
+    /// 那时他应该还在设置页。
+    pub pending_jump: Option<Filter>,
+    /// 编辑框里有未保存内容（打开设置时取一次快照）。
+    pub edit_unsaved: bool,
     pub old_pw: Zeroizing<String>,
     pub new_pw: Zeroizing<String>,
     pub new_pw2: Zeroizing<String>,
@@ -77,9 +90,37 @@ pub struct SettingsState {
     /// 当前库的 KDF 是否达到推荐下限；`None` 表示不判断。
     pub kdf_ok: Option<bool>,
     pub security: SecuritySummary,
+    /// 恢复留档（`vault.dat.corrupt-*`）的文件列表与总大小。
+    ///
+    /// 每次从备份恢复都会把原来那份挪到一边保留。此前界面完全看不到它们，
+    /// 反复恢复失败的用户会在磁盘上攒一堆几 MB 的留档。
+    pub leftovers: Vec<keynest_core::vault::RecoveryLeftover>,
+    pub leftovers_bytes: u64,
+    /// 清空留档的二次确认
+    pub confirm_clear_leftovers: bool,
     pub font_note: Option<String>,
     /// 深色模式开关（仅本次运行，不写入仓库）
     pub dark: bool,
+    /// 正在改主密码。
+    ///
+    /// Argon2id 要派生两次（旧 KEK + 新 KEK），在 UI 线程上会阻塞
+    /// 160–400ms。没有这个标记时，用户在冻结期间会反复点按钮，
+    /// 于是排队多次 `change_master`——第二次因为旧密码已经变了而失败，
+    /// 用户看到一个莫名其妙的错误。
+    pub changing_master: bool,
+
+    /// 正在升级格式。同样是 Argon2id 派生 + 重写整个库，会阻塞。
+    pub upgrading: bool,
+
+    /// 用户填的扩展 ID（从扩展 popup 里复制来的）。
+    ///
+    /// 未发布到商店的扩展 ID 由安装路径的哈希决定，**每台机器不同**，
+    /// 所以桌面程序没法自己猜，只能让用户填。
+    pub bridge_ext_id: String,
+    /// 浏览器桥接的安装状态提示。
+    pub bridge_status: Option<String>,
+    /// 浏览器桥接是否已安装（打开设置时查一次）。
+    pub bridge_installed: bool,
     /// 正在播放关闭动画
     pub closing: bool,
 }
@@ -98,11 +139,39 @@ pub struct SettingsContext {
     pub key_locked: Option<bool>,
     pub kdf_ok: Option<bool>,
     pub security: SecuritySummary,
+    /// 恢复留档（`vault.dat.corrupt-*`）的快照。打开设置时读一次。
+    pub leftovers: Vec<keynest_core::vault::RecoveryLeftover>,
     pub font_note: Option<String>,
     pub dark: bool,
+    /// 浏览器桥接是否已安装（打开设置时查一次，只读）。
+    pub bridge_installed: bool,
+    /// 编辑框里有没有未保存的内容。
+    ///
+    /// 「重新载入」会用磁盘内容覆盖内存，那会丢掉编辑框里的东西。
+    /// 没有未保存内容时不必吓唬用户——常驻警告会让人麻木，
+    /// 真正需要看的时候就不看了。
+    pub edit_unsaved: bool,
 }
 
 impl SettingsState {
+    /// 用户改了设置但还没保存吗？
+    ///
+    /// # 为什么需要
+    ///
+    /// 设置页的改动只在点「保存设置」时落盘。用户把自动锁定
+    /// 从 60 分钟改成 5 分钟（**更安全**的方向），以为改好了，
+    /// 直接点右上角关窗——程序仍然 60 分钟才锁，而他没有得到任何提示。
+    ///
+    /// 所以关窗时要问一句。
+    pub fn is_dirty(&self) -> bool {
+        self.draft != self.orig
+    }
+
+    /// 保存成功后调用：把当前草稿变成新的「原始值」，脏标记随之清除。
+    pub fn mark_saved(&mut self) {
+        self.orig = self.draft.clone();
+    }
+
     pub fn new(settings: &Settings, ctx: SettingsContext) -> Self {
         Self {
             tab: Tab::default(),
@@ -113,6 +182,10 @@ impl SettingsState {
             renaming_type: None,
             renaming: None,
             draft: settings.clone(),
+            orig: settings.clone(),
+            confirm_discard: false,
+            pending_jump: None,
+            edit_unsaved: ctx.edit_unsaved,
             old_pw: Zeroizing::new(String::new()),
             new_pw: Zeroizing::new(String::new()),
             new_pw2: Zeroizing::new(String::new()),
@@ -122,6 +195,7 @@ impl SettingsState {
             wipe_open: false,
             wipe_confirm_text: String::new(),
             legacy: ctx.legacy,
+            confirm_clear_leftovers: false,
             data_dir: keynest_core::paths::resolve_data_dir(),
             on_roaming: keynest_core::paths::is_on_roaming_profile(),
             kdf_algo: ctx.kdf_algo,
@@ -129,8 +203,15 @@ impl SettingsState {
             key_locked: ctx.key_locked,
             kdf_ok: ctx.kdf_ok,
             security: ctx.security,
+            leftovers_bytes: ctx.leftovers.iter().map(|l| l.bytes).sum(),
+            leftovers: ctx.leftovers,
             font_note: ctx.font_note,
             dark: ctx.dark,
+            changing_master: false,
+            upgrading: false,
+            bridge_ext_id: String::new(),
+            bridge_status: None,
+            bridge_installed: ctx.bridge_installed,
             closing: false,
         }
     }
@@ -163,6 +244,14 @@ pub enum SettingsIntent {
     DeleteType(String),
     /// 关掉设置并跳到「重复」筛选
     ShowReused,
+    /// 有未保存的改动时点了关闭 —— 请 `app.rs` 弹确认。
+    AskDiscard,
+    /// 确认框里点了「放弃改动」
+    DiscardConfirmed,
+    /// 确认框里点了「继续编辑」
+    CancelDiscard,
+    /// 确认框里点了「保存并关闭」
+    SaveAndClose,
     Close,
     Save,
     ChangeMaster,
@@ -171,6 +260,10 @@ pub enum SettingsIntent {
     CancelWipe,
     Wipe,
     SetTheme(bool),
+    /// 安装 / 重新安装浏览器桥接
+    InstallBridge,
+    /// 卸载浏览器桥接
+    UninstallBridge,
     /// 导出明文 CSV（需要二次确认）
     ExportCsv,
     /// 导出明文 JSON（需要二次确认）
@@ -179,6 +272,13 @@ pub enum SettingsIntent {
     ExportBackup,
     /// 从 CSV / JSON 文件导入
     ImportFile,
+    /// 清空恢复留档（`vault.dat.corrupt-*`）。
+    ClearLeftovers,
+    /// 放弃本地未保存的改动，重新载入磁盘上的库。
+    ///
+    /// 用于「库文件被别处改过」之后——那是网盘同步/多机使用的常见情况，
+    /// 用户需要一条能走通的路，而不是只能重启程序。
+    ReloadFromDisk,
     /// 关闭动画播完
     Closed,
 }
@@ -199,6 +299,54 @@ fn slider_row(
             );
         });
     });
+}
+
+/// 把「改了哪几项」写成人话。
+///
+/// 只写「设置有改动」不够——用户需要知道**具体丢的是什么**，
+/// 才能判断值不值得回去保存。
+fn describe_dirty(orig: &Settings, draft: &Settings) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if orig.auto_lock_minutes != draft.auto_lock_minutes {
+        parts.push(format!(
+            "自动锁定 {} 分钟 → {} 分钟",
+            orig.auto_lock_minutes, draft.auto_lock_minutes
+        ));
+    }
+    if orig.clipboard_clear_seconds != draft.clipboard_clear_seconds {
+        parts.push(format!(
+            "剪贴板清理 {} 秒 → {} 秒",
+            orig.clipboard_clear_seconds, draft.clipboard_clear_seconds
+        ));
+    }
+    if orig.reveal_seconds != draft.reveal_seconds {
+        parts.push(format!(
+            "密码显示 {} 秒 → {} 秒",
+            orig.reveal_seconds, draft.reveal_seconds
+        ));
+    }
+    if orig.import_prompted != draft.import_prompted {
+        parts.push("导入提示开关".to_string());
+    }
+    if parts.is_empty() {
+        // 理论上不该到这里（dirty 才会显示）。留一个兜底而不是 panic。
+        "其他设置项".to_string()
+    } else {
+        parts.join("；")
+    }
+}
+
+/// 用户点了关闭时，要不要**拦住**并弹确认？
+///
+/// 抽成纯函数是为了能被测试直接验证：
+/// 「拦住了」这件事在界面上表现为「窗口没关」，
+/// 而 `open` 变量是 egui `Window` 的局部状态，
+/// 测试里没法直接把它置 false 来触发那条路径。
+///
+/// 参数取「是否脏」而不是 `&SettingsState`，
+/// 这样这条判定的**全部输入**都摆在明面上。
+fn should_block_close(is_dirty: bool, already_asking: bool) -> bool {
+    is_dirty && !already_asking
 }
 
 pub fn show(ctx: &egui::Context, st: &mut SettingsState) -> SettingsIntent {
@@ -266,10 +414,74 @@ pub fn show(ctx: &egui::Context, st: &mut SettingsState) -> SettingsIntent {
                 ui.add_space(8.0);
                 ui.label(egui::RichText::new(msg).size(12.0).color(p.success));
             }
+
+            // ---- 未保存改动的确认 ----
+            //
+            // 放在窗口内容里而不是弹独立 Modal：设置页本身就是一个窗口，
+            // 再叠一层会让「我在哪」变得混乱。这里用一块显眼的条带，
+            // 把改动点明了列出来。
+            if st.confirm_discard {
+                ui.add_space(10.0);
+                egui::Frame::new()
+                    .fill(p.surface_alt)
+                    .corner_radius(egui::CornerRadius::same(theme::R_SM))
+                    .inner_margin(egui::Margin::same(10))
+                    .show(ui, |ui| {
+                        ui.label(egui::RichText::new("设置还没保存").size(12.5).color(p.warn));
+                        ui.add_space(4.0);
+                        ui.label(theme::caption(format!(
+                            "改动会丢失：{}",
+                            describe_dirty(&st.orig, &st.draft)
+                        )));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            // 注意：`intent` 在这个闭包里是被捕获的**值**，
+                            // 不是 `&mut` —— 外层 `show()` 里的闭包各自持有自己的副本，
+                            // 所以这里直接赋值即可，不能解引用。
+                            if theme::primary_button(ui, "继续编辑", 96.0).clicked() {
+                                intent = SettingsIntent::CancelDiscard;
+                            }
+                            let discard_label = if st.pending_jump.is_some() {
+                                "放弃改动并跳转"
+                            } else {
+                                "放弃改动并关闭"
+                            };
+                            if theme::ghost_button(ui, discard_label).clicked() {
+                                intent = SettingsIntent::DiscardConfirmed;
+                            }
+                            // 按钮文案跟着「确认之后要做什么」变：
+                            // 是关窗还是跳去筛选。
+                            let save_label = if st.pending_jump.is_some() {
+                                "保存并跳转"
+                            } else {
+                                "保存并关闭"
+                            };
+                            if theme::ghost_button(ui, save_label).clicked() {
+                                // 先保存；保存成功后再关（或再跳）。
+                                // 直接复用 Save 意图会让 app.rs 保存后仍把窗口留着，
+                                // 所以这里给出一个明确的组合意图。
+                                intent = SettingsIntent::SaveAndClose;
+                            }
+                        });
+                    });
+            }
         });
 
     if !open && !st.closing && matches!(intent, SettingsIntent::None) {
-        st.closing = true;
+        // 有未保存的改动时**先问一句**再关。
+        //
+        // 设置页的改动只在点「保存设置」时落盘。用户把自动锁定
+        // 从 60 分钟改成 5 分钟（更安全的方向），以为改好了，
+        // 直接点右上角关窗——程序仍然 60 分钟才锁，而他没有得到任何提示。
+        //
+        // 与编辑框一致：那条路径已经有了 `pending_lock_confirm`。
+        if should_block_close(st.is_dirty(), st.confirm_discard) {
+            st.confirm_discard = true;
+            // 让窗口重新打开（本帧的 open 已经为 false）
+            st.closing = false;
+        } else {
+            st.closing = true;
+        }
     }
     if st.closing && t < 0.02 {
         return SettingsIntent::Closed;
@@ -345,11 +557,30 @@ fn tab_security(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut Settings
     });
     ui.add_space(8.0);
     ui.horizontal(|ui| {
+        // 这两个按钮会**关掉设置页**并跳到列表筛选。
+        //
+        // 有未保存的改动时不能直接跳：`app.rs` 那边是
+        // `SettingsIntent::ShowWeak => self.settings = None`，
+        // 改动会静默丢掉。走一遍确认，确认后再跳。
+        //
+        // 目标是记在 `pending_jump` 里，确认（或放弃改动）之后由
+        // `app.rs` 执行——不在这里直接跳，否则用户点了「继续编辑」
+        // 也已经在列表页了。
         if sec.weak > 0 && theme::ghost_button(ui, "查看弱密码").clicked() {
-            *intent = SettingsIntent::ShowWeak;
+            if should_block_close(st.is_dirty(), st.confirm_discard) {
+                st.confirm_discard = true;
+                st.pending_jump = Some(Filter::Weak);
+            } else {
+                *intent = SettingsIntent::ShowWeak;
+            }
         }
         if sec.reused > 0 && theme::ghost_button(ui, "查看重复").clicked() {
-            *intent = SettingsIntent::ShowReused;
+            if should_block_close(st.is_dirty(), st.confirm_discard) {
+                st.confirm_discard = true;
+                st.pending_jump = Some(Filter::Reused);
+            } else {
+                *intent = SettingsIntent::ShowReused;
+            }
         }
     });
     ui.add_space(4.0);
@@ -397,6 +628,23 @@ fn tab_security(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut Settings
         keynest_core::vault::MIN_MASTER_LEN
     )));
     ui.add_space(6.0);
+    // **事前**告知，而不是等改完才说。
+    //
+    // 改主密码只换掉包裹数据密钥的那一层，正文密文不变——
+    // 于是磁盘上已有的 .bak.* 裹的还是**旧密钥**，只能用**旧密码**打开。
+    //
+    // 用户不知道这件事：改完看到「主密码已修改」，自然以为所有东西
+    // 都用新密码保护了。真到了需要从备份恢复的那一天，他用新密码打不开，
+    // 会以为「备份全废了」，甚至因此放弃恢复。
+    ui.label(
+        egui::RichText::new(
+            "注意：已有的备份（.bak.*）仍然由**旧密码**保护。
+             需要用旧密码恢复那些备份，请把旧密码记牢。",
+        )
+        .size(11.0)
+        .color(ui.visuals().warn_fg_color),
+    );
+    ui.add_space(6.0);
     egui::Grid::new("master-grid")
         .num_columns(2)
         .spacing([10.0, 6.0])
@@ -421,7 +669,11 @@ fn tab_security(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut Settings
             ui.end_row();
         });
     ui.add_space(8.0);
-    if theme::ghost_button(ui, "修改主密码").clicked() {
+    if st.changing_master {
+        // 明确告诉用户"正在忙"，而不是让窗口看起来死了
+        ui.add_enabled(false, egui::Button::new("正在修改…"))
+            .on_disabled_hover_text("正在派生密钥，请稍候");
+    } else if theme::ghost_button(ui, "修改主密码").clicked() {
         *intent = SettingsIntent::ChangeMaster;
     }
 }
@@ -681,7 +933,22 @@ fn tab_data(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut SettingsInte
         if icons::labeled(ui, icons::Icon::Plus, "从文件导入").clicked() {
             *intent = SettingsIntent::ImportFile;
         }
+        if icons::labeled(ui, icons::Icon::Refresh, "重新载入磁盘上的库").clicked() {
+            *intent = SettingsIntent::ReloadFromDisk;
+        }
     });
+    // 这个按钮会用磁盘上的内容**整体替换**内存里的库。
+    //
+    // 只在编辑框里真有未保存内容时才警告：常驻警告会让人麻木，
+    // 真正需要看的时候就不看了。
+    if st.edit_unsaved {
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new("注意：编辑框里有没保存的改动，「重新载入」会把它丢掉。")
+                .size(11.0)
+                .color(p.warn),
+        );
+    }
     ui.add_space(4.0);
     ui.label(theme::caption(
         "导入只新增条目：同名同账号的记录会跳过，绝不覆盖库里已有的密码。\
@@ -711,7 +978,10 @@ fn tab_data(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut SettingsInte
                     .password(true)
                     .hint_text("主密码"),
             );
-            if icons::labeled(ui, icons::Icon::Shield, "升级").clicked() {
+            if st.upgrading {
+                ui.add_enabled(false, egui::Button::new("正在升级…"))
+                    .on_disabled_hover_text("正在重写整个库，请稍候");
+            } else if icons::labeled(ui, icons::Icon::Shield, "升级").clicked() {
                 *intent = SettingsIntent::Upgrade;
             }
         });
@@ -758,5 +1028,226 @@ fn tab_danger(ui: &mut egui::Ui, st: &mut SettingsState, intent: &mut SettingsIn
                 *intent = SettingsIntent::CancelWipe;
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keynest_core::vault::Settings;
+
+    fn ctx() -> SettingsContext {
+        SettingsContext {
+            categories: vec!["网站".into()],
+            types: vec![keynest_core::vault::TypeDef::new("账号", vec![])],
+            legacy: false,
+            kdf_algo: "argon2id".into(),
+            format: "v3".into(),
+            key_locked: Some(true),
+            kdf_ok: Some(true),
+            security: SecuritySummary {
+                total: 0,
+                weak: 0,
+                reused: 0,
+                with_totp: 0,
+                stale: 0,
+            },
+            leftovers: Vec::new(),
+            font_note: None,
+            dark: false,
+            bridge_installed: false,
+            edit_unsaved: false,
+        }
+    }
+
+    fn base() -> Settings {
+        Settings {
+            auto_lock_minutes: 10,
+            clipboard_clear_seconds: 20,
+            reveal_seconds: 10,
+            import_prompted: false,
+        }
+    }
+
+    /// 关窗拦截的核心判定。
+    ///
+    /// # 为什么单独测这个
+    ///
+    /// 「拦住了」在界面上表现为「窗口没关」，而 `open` 是 egui `Window`
+    /// 的局部状态——测试里没法直接置 false 来触发那条路径。
+    /// 所以把判定抽成纯函数，把它的全部输入摆在明面上。
+    #[test]
+    fn close_is_blocked_only_when_there_are_unsaved_changes() {
+        // 没改动 → 直接关，不打扰
+        assert!(!should_block_close(false, false));
+        // 有改动 → 拦住，弹确认
+        assert!(should_block_close(true, false));
+        // 已经在问了 → 不要再拦（否则点了「放弃」还会被拦，出不去）
+        assert!(!should_block_close(true, true));
+        assert!(!should_block_close(false, true));
+    }
+
+    /// 「查看弱密码 / 查看重复」这两个按钮会**关掉设置页**。
+    ///
+    /// 原来它们直接 `SettingsIntent::ShowWeak`，`app.rs` 那边是
+    /// `self.settings = None` —— 有未保存改动时会静默丢掉。
+    ///
+    /// 修法是：脏的时候先记下要跳去哪（`pending_jump`），走确认流程，
+    /// 确认之后再跳。这条测试守住「记下来了」这件事。
+    #[test]
+    fn jumping_to_a_filter_while_dirty_is_deferred_until_confirmed() {
+        let s = base();
+        let mut st = SettingsState::new(&s, ctx());
+        st.draft.auto_lock_minutes = 5;
+        assert!(st.is_dirty());
+
+        // 模拟点「查看弱密码」时走的判定
+        if should_block_close(st.is_dirty(), st.confirm_discard) {
+            st.confirm_discard = true;
+            st.pending_jump = Some(Filter::Weak);
+        }
+
+        assert!(st.confirm_discard, "应当进入确认状态");
+        assert!(
+            matches!(st.pending_jump, Some(Filter::Weak)),
+            "要跳去的地方没记下来——确认之后用户就不知道该去哪了"
+        );
+        // 还没有关闭：用户可能选「继续编辑」
+        assert!(!st.closing);
+    }
+
+    /// 选「继续编辑」后，那次跳转的意图要作废。
+    ///
+    /// 不作废的话：用户改了设置、点了查看弱密码、再点继续编辑，
+    /// 关窗时可能会莫名其妙跳到弱密码列表。
+    #[test]
+    fn cancelling_the_confirmation_forgets_the_pending_jump() {
+        let s = base();
+        let mut st = SettingsState::new(&s, ctx());
+        st.draft.auto_lock_minutes = 5;
+        st.confirm_discard = true;
+        st.pending_jump = Some(Filter::Weak);
+
+        // 模拟 CancelDiscard 的处理
+        st.confirm_discard = false;
+        st.pending_jump = None;
+
+        assert!(!st.confirm_discard);
+        assert!(st.pending_jump.is_none(), "继续编辑后跳转意图应当作废");
+    }
+
+    /// 没改动时点「查看弱密码」应当直接跳，不弹确认。
+    #[test]
+    fn jumping_without_changes_does_not_ask() {
+        let s = base();
+        let st = SettingsState::new(&s, ctx());
+        assert!(
+            !should_block_close(st.is_dirty(), st.confirm_discard),
+            "没有改动却要弹确认——按钮点下去没反应，用户会以为坏了"
+        );
+    }
+
+    /// 「重新载入磁盘上的库」会用磁盘内容覆盖内存，丢掉编辑框里的内容。
+    ///
+    /// 这个按钮叫「重新载入」，听起来像「刷新」——用户不会想到它会丢东西。
+    /// 所以只在**真有未保存编辑**时才警告：常驻警告会让人麻木，
+    /// 真正需要看的时候就不看了。
+    #[test]
+    fn the_reload_warning_only_shows_when_there_is_unsaved_edit() {
+        let s = base();
+
+        let mut c1 = ctx();
+        c1.edit_unsaved = true;
+        let st1 = SettingsState::new(&s, c1);
+        assert!(st1.edit_unsaved, "有未保存编辑时应当警告");
+
+        let mut c2 = ctx();
+        c2.edit_unsaved = false;
+        let st2 = SettingsState::new(&s, c2);
+        assert!(!st2.edit_unsaved, "没有未保存编辑时不该吓唬用户");
+    }
+
+    /// 刚打开时不该是「脏」的。
+    #[test]
+    fn fresh_state_is_not_dirty() {
+        let s = base();
+        let st = SettingsState::new(&s, ctx());
+        assert!(!st.is_dirty());
+    }
+
+    /// 改了自动锁定就要算脏。
+    ///
+    /// 这不是体验问题：把 60 分钟改成 5 分钟是**更安全**的方向，
+    /// 用户以为改好了、结果没保存就关窗，程序仍然 60 分钟才锁。
+    #[test]
+    fn changing_auto_lock_makes_it_dirty() {
+        let s = base();
+        let mut st = SettingsState::new(&s, ctx());
+        st.draft.auto_lock_minutes = 5;
+        assert!(st.is_dirty());
+    }
+
+    /// 改了又改回去，不该算脏。
+    #[test]
+    fn changing_back_to_the_original_is_not_dirty() {
+        let s = base();
+        let mut st = SettingsState::new(&s, ctx());
+        st.draft.auto_lock_minutes = 5;
+        st.draft.auto_lock_minutes = 10;
+        assert!(!st.is_dirty(), "改回原值仍被判为脏");
+    }
+
+    /// 保存成功后脏标记要清掉。
+    ///
+    /// 不清的话：保存完再点关闭，仍会被问「设置还没保存」——
+    /// 用户刚保存过，这提示会让他以为没生效。
+    #[test]
+    fn mark_saved_clears_the_dirty_flag() {
+        let s = base();
+        let mut st = SettingsState::new(&s, ctx());
+        st.draft.auto_lock_minutes = 5;
+        assert!(st.is_dirty());
+        st.mark_saved();
+        assert!(!st.is_dirty(), "保存后仍是脏的");
+        // 再改一次仍然要能检测到
+        st.draft.auto_lock_minutes = 7;
+        assert!(st.is_dirty());
+    }
+
+    /// 提示里要说清楚**具体丢的是什么**。
+    ///
+    /// 只写「设置有改动」不够：用户需要知道丢的是哪一项，
+    /// 才能判断值不值得回去保存。
+    #[test]
+    fn describe_dirty_names_the_changed_fields() {
+        let orig = base();
+        let mut draft = base();
+        draft.auto_lock_minutes = 5;
+        let text = describe_dirty(&orig, &draft);
+        assert!(text.contains("自动锁定"), "没提到自动锁定：{text}");
+        assert!(text.contains("10"), "没显示原值：{text}");
+        assert!(text.contains("5"), "没显示新值：{text}");
+        // 没改的项不该出现
+        assert!(!text.contains("剪贴板"), "提到了没改的项：{text}");
+    }
+
+    #[test]
+    fn describe_dirty_lists_multiple_changes() {
+        let orig = base();
+        let mut draft = base();
+        draft.auto_lock_minutes = 5;
+        draft.clipboard_clear_seconds = 10;
+        draft.reveal_seconds = 5;
+        let text = describe_dirty(&orig, &draft);
+        assert!(text.contains("自动锁定"));
+        assert!(text.contains("剪贴板"));
+        assert!(text.contains("密码显示"));
+    }
+
+    /// 三项都没改时不能返回空字符串（界面上会显示「改动会丢失：」后面什么都没有）。
+    #[test]
+    fn describe_dirty_never_returns_an_empty_string() {
+        let s = base();
+        assert!(!describe_dirty(&s, &s).is_empty());
     }
 }

@@ -4,5 +4,6 @@
 //! 从而在不接触真实仓库的前提下截图检查视觉效果。
 
 pub mod app;
+pub mod bridge;
 pub mod ui;
 pub mod views;

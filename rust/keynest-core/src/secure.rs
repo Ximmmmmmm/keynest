@@ -10,6 +10,7 @@
 //! * 自动锁定改用 `GetLastInputInfo` 的系统级闲置，而不是前端心跳。
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
@@ -20,6 +21,37 @@ pub const DEFAULT_CLIPBOARD_TTL: Duration = Duration::from_secs(20);
 
 /// 每次复制的代数。用于「旧定时器不要清掉新内容」。
 static COPY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 最近一次「自动清除剪贴板」失败的时间与原因。
+///
+/// 为什么需要它：清除失败时密码仍留在剪贴板里，而用户以为已经清掉了。
+/// 原来那处是 `let _ = clear_if_matches(...)`，失败被完全吞掉——
+/// 这是安全属性上的静默失效，比普通的功能失败严重得多。
+static LAST_CLEAR_FAILURE: Mutex<Option<(std::time::Instant, String)>> = Mutex::new(None);
+
+fn record_clear_failure(reason: &str) {
+    if let Ok(mut slot) = LAST_CLEAR_FAILURE.lock() {
+        *slot = Some((std::time::Instant::now(), reason.to_string()));
+    }
+}
+
+/// 取最近一次清除失败（若有）。
+///
+/// 界面据此提示用户「请手动清空剪贴板」。取用后不清除记录——
+/// 用户可能需要反复看到提示，直到他手动复制了别的内容。
+pub fn last_clear_failure() -> Option<String> {
+    LAST_CLEAR_FAILURE
+        .lock()
+        .ok()
+        .and_then(|slot| slot.as_ref().map(|(_, r)| r.clone()))
+}
+
+/// 清除成功后调用，抹掉失败记录。
+fn clear_failure_record() {
+    if let Ok(mut slot) = LAST_CLEAR_FAILURE.lock() {
+        *slot = None;
+    }
+}
 
 /* ================================================================== */
 /* Windows 实现                                                        */
@@ -200,7 +232,16 @@ mod imp {
                 dwTime: 0,
             };
             if !GetLastInputInfo(&mut info).as_bool() {
-                return Duration::ZERO;
+                // 拿不到系统空闲时长时，返回一个**极大**的值，而不是 0。
+                //
+                // 调用方算的是 `app_idle.min(sys_idle)`：
+                // 返回 0 会让结果恒为 0，于是**自动锁定永远不触发**——
+                // 密码库就这么一直开着。`GetLastInputInfo` 失败很罕见，
+                // 但后果是灾难性的，所以这里必须往「保守」的方向倒。
+                //
+                // 返回极大值 → `min` 退回到应用自己的计时，
+                // 自动锁定照常工作。
+                return SYSTEM_IDLE_UNKNOWN;
             }
             // GetTickCount 是 32 位毫秒计数，会回绕；用 wrapping_sub 处理
             let now = GetTickCount();
@@ -231,7 +272,11 @@ mod imp {
     }
 
     pub fn system_idle() -> Duration {
-        Duration::ZERO
+        // 非 Windows 上没有系统级闲置时长。
+        //
+        // 返回 0 会让 `app_idle.min(sys_idle)` 恒为 0，
+        // **自动锁定永远不触发**。返回极大值则退回到应用自己的计时。
+        SYSTEM_IDLE_UNKNOWN
     }
 }
 
@@ -245,7 +290,9 @@ mod imp {
 /// 1. 立即写入剪贴板，且标记为不进入历史/云同步；
 /// 2. `ttl` 到期后，**仅当内容仍是本次写入的文本**时才清空；
 /// 3. 若期间又复制了别的内容，定时器什么都不做；
-/// 4. 若期间又调用了一次本函数，旧定时器会让位给新的一次。
+/// 4. 若期间又调用了一次本函数，旧定时器会让位给新的一次；
+/// 5. **清除失败会被记录**，界面可以提示用户手动清空
+///    （原来这里失败是静默的，密码会一直留在剪贴板里）。
 pub fn copy_sensitive(text: &str, ttl: Option<Duration>) -> Result<()> {
     let ttl = ttl.unwrap_or(DEFAULT_CLIPBOARD_TTL);
     imp::copy_sensitive_text(text)?;
@@ -260,7 +307,20 @@ pub fn copy_sensitive(text: &str, ttl: Option<Duration>) -> Result<()> {
         if COPY_GENERATION.load(Ordering::SeqCst) != generation {
             return;
         }
-        let _ = imp::clear_if_matches(expected.as_str());
+
+        // 清除失败必须留痕：密码还在剪贴板里，而用户以为已经没了。
+        // 失败时重试一次——Windows 上剪贴板被别的程序短暂占用是常见情况，
+        // 隔一下再试通常就好了。
+        match imp::clear_if_matches(expected.as_str()) {
+            Ok(_) => clear_failure_record(),
+            Err(e) => {
+                std::thread::sleep(Duration::from_millis(300));
+                match imp::clear_if_matches(expected.as_str()) {
+                    Ok(_) => clear_failure_record(),
+                    Err(_) => record_clear_failure(&e.to_string()),
+                }
+            }
+        }
     });
 
     Ok(())
@@ -280,15 +340,46 @@ pub fn clipboard_text() -> Option<String> {
     imp::read_text()
 }
 
-/// 系统级闲置时长。自动锁定应基于这个值，而不是应用内的心跳。
+/// 「系统空闲时长**未知**」的标记值。
+///
+/// # 为什么要有这个常量
+///
+/// `system_idle()` 在拿不到系统状态时（`GetLastInputInfo` 失败、
+/// 非 Windows 平台）会返回这个值，而不是 0。
+///
+/// 区别很要紧：调用方算的是 `app_idle.min(sys_idle)`。
+/// 返回 0 会让结果恒为 0，**自动锁定永远不触发**——
+/// 密码库就这么一直开着，用户却以为设了 5 分钟自动锁定。
+///
+/// 用一个具名常量而不是裸的 `Duration::MAX`：
+/// 意图写在代码里，将来有人读到 `min` 那行时能立刻明白
+/// 「MAX 在这里表示未知，不是真的空闲了一亿年」。
+pub const SYSTEM_IDLE_UNKNOWN: Duration = Duration::MAX;
+
+/// 系统级闲置时长（最后一次键鼠输入至今）。
+///
+/// 返回 [`SYSTEM_IDLE_UNKNOWN`] 表示**拿不到**系统状态，
+/// 调用方应当退回到应用自己的计时，而不是把它当成 0。
 pub fn system_idle() -> Duration {
     imp::system_idle()
 }
 
 /// 是否已超过闲置阈值。
+///
+/// # 「系统空闲未知」时返回 false
+///
+/// `system_idle()` 拿不到系统状态时返回 `Duration::MAX`。
+/// 若直接拿它比大小，`MAX >= threshold` 恒为真——会得出
+/// 「系统一直很空闲」的结论，正好与事实相反。
+///
+/// 所以这里显式排除「未知」这一情形：拿不到就别下结论。
 pub fn is_idle_beyond(minutes: u32) -> bool {
     let threshold = Duration::from_secs(minutes as u64 * 60);
-    system_idle() >= threshold
+    let idle = system_idle();
+    if idle == SYSTEM_IDLE_UNKNOWN {
+        return false;
+    }
+    idle >= threshold
 }
 
 #[cfg(test)]
