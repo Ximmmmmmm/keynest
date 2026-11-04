@@ -1028,10 +1028,7 @@ fn the_api_key_type_renders_in_the_edit_dialog() {
     );
     let key_draft = st.fields.iter().find(|f| f.label == "Secret").unwrap();
     assert!(key_draft.secret, "「Secret」字段必须打码");
-    assert!(
-        !key_draft.hint.is_empty(),
-        "「Secret」字段应当有输入提示"
-    );
+    assert!(!key_draft.hint.is_empty(), "「Secret」字段应当有输入提示");
 
     let ctx = Context::default();
     let mut out = ctx.run_ui(
