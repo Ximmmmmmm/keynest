@@ -186,6 +186,7 @@ jobs:
       # 让人摸不着头脑的错。这里显式展开并检查数量。
       - name: 单元与集成测试
         working-directory: browser-extension
+        shell: bash
         run: |
           set -euo pipefail
           files=$(ls tests/*.test.js)

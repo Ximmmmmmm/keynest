@@ -76,6 +76,11 @@ jobs:
       # 发布失败时必须能定位，否则只能靠猜。
       - name: 测试
         working-directory: rust
+        # **必须显式指定 bash**：windows-latest 的默认 shell 是 pwsh，
+        # 而下面用了 `${PIPESTATUS[0]}` 这种 bash 语法。
+        # 不写这一行，这一步会在 0 秒内报「术语不是 cmdlet 的名称」之类的错——
+        # 加诊断的那次提交就是这么把发布搞挂的（前一步 Clippy 明明通过了）。
+        shell: bash
         run: |
           cargo test --workspace --no-fail-fast 2>&1 | tee test-output.txt
           status=${PIPESTATUS[0]}
@@ -302,6 +307,9 @@ jobs:
       # 在 Linux 上算哈希，避免 Windows 的 CRLF/编码差异影响校验文件格式。
       - name: 生成 SHA-256 校验文件
         working-directory: release-stage
+        # 同「测试」那一步：windows-latest 默认 pwsh，
+        # 而这段用了 `set -euo pipefail`、反斜杠续行与 `>` 重定向。
+        shell: bash
         run: |
           set -euo pipefail
           # 覆盖全部随包发布的文件，而不是只算 exe——
