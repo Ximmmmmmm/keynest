@@ -999,7 +999,11 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
                 //
                 // 它要求所有行**等高**——本列表的 ROW_H 是固定的，
                 // 标题与副标题都用 painter 绝对定位绘制，正好满足。
+                // 固定 id：给测试一个稳定的入口去设定滚动位置
+                // （egui 的滚轮事件在无头环境里驱动不起来，详见
+                //  tests/gui_headless.rs 的 every_entry_can_be_scrolled_to）
                 egui::ScrollArea::vertical()
+                    .id_salt("entry-list-scroll")
                     .auto_shrink([false, false])
                     .show_viewport(ui, |ui, viewport| {
                         let total = visible.len();
@@ -1007,14 +1011,28 @@ pub fn show(ui: &mut egui::Ui, v: MainView<'_>) -> MainIntent {
                         let row_h = ROW_H + spacing.y;
 
                         // 内容总高度：滚动条靠它算。
-                        // 与 egui `show_rows` 的算法一致。
-                        ui.set_height((row_h * total as f32 - spacing.y).max(0.0));
+                        //
+                        // 用 `set_min_height` 而不是 `set_height`：
+                        //
+                        // `set_height` 会**同时**限制上下界，等于把当前光标
+                        // 夹到「总高度」那个盒子里——紧接着的 `add_space(上方偏移)`
+                        // 再把光标往下推，第一行的落点就变成「总高度 + 偏移」，
+                        // 滚到哪儿都看不见正确的那几行。表现是「后面的条目永远不出现」。
+                        //
+                        // `set_min_height` 只抬下界、不动光标，配合上下 `add_space`
+                        // 的线性堆叠，三者相加正好是内容总高度。
+                        ui.set_min_height((row_h * total as f32 - spacing.y).max(0.0));
 
-                        // viewport 是**相对坐标**（滚动时 min.y 为负）。
-                        // 取反得到「已滚过的距离」，语义非负、没有环绕问题。
-                        let scrolled = (-viewport.min.y).max(0.0);
-                        let range =
-                            visible_row_range(scrolled, scrolled + viewport.height(), total, row_h);
+                        // `show_viewport` 给的 viewport 是**内容坐标系里的窗口**：
+                        // 滚到底时 `min.y` 是一个**正数**（已滚过的距离），
+                        // 不是负数——这一点我一开始理解反了，
+                        // 写成 `-viewport.min.y`，结果滚动量恒等于 0，
+                        // 于是画面永远停在最前面几行（「滚下去全是空白」）。
+                        //
+                        // 实测（200 条，滚到底）：
+                        //   viewport=(9118, 9800)  h=682
+                        // 直接拿 min.y 当已滚距离即可。
+                        let range = visible_row_range(viewport.min.y, viewport.max.y, total, row_h);
 
                         // 上方占位：让滚动条的高度与真实内容一致
                         if range.start > 0 {

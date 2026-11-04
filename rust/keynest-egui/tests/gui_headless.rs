@@ -276,13 +276,10 @@ fn render_settings_tab(tab: keynest_egui::views::settings::Tab) {
 #[test]
 fn every_settings_tab_renders() {
     use keynest_egui::views::settings::Tab;
-    for tab in [
-        Tab::Appearance,
-        Tab::Security,
-        Tab::Data,
-        Tab::Browser,
-        Tab::Danger,
-    ] {
+    // 用 `Tab::ALL` 而不是手写一份：增减分区时这条测试自动跟随，
+    // 不会因为「忘了往清单里加一行」而漏测某个分区
+    // （删「浏览器」分区时就因此改过一次）。
+    for tab in Tab::ALL {
         render_settings_tab(tab);
     }
 }
@@ -830,6 +827,148 @@ fn the_first_frame_of_a_large_vault_is_not_a_freeze() {
     assert!(
         first.as_secs() < 1,
         "5 万条的首次渲染要 {first:?}，用户会以为程序卡死了"
+    );
+}
+
+/// **每一条都必须能被滚到。**
+///
+/// # 这是虚拟滚动最危险的失败模式
+///
+/// 「只渲染可视区域」改错了，界面**看起来完全正常**：
+/// 顶部几条显示得好好的，滚动条也在——只是**滚不到底**，
+/// 后面的条目永远不出现。用户会以为「数据丢了」。
+///
+/// # egui 滚轮的两个前置条件（踩过）
+///
+/// 1. `RawInput.time` 必须**递进**。egui 的 `WheelState` 用时间戳
+///    判断「这次滚动动作是否还在进行」，时间恒为 0 时它认为事件没到。
+/// 2. 指针必须先在列表**上方**（`PointerMoved`），egui 才知道滚哪个区域。
+#[test]
+fn every_entry_can_be_scrolled_to() {
+    use keynest_egui::views::main_view::{Filter, MainView, SortBy};
+
+    let data = data_with(200);
+
+    /// 渲染一帧，返回（意图, 画出的条目标题）。
+    fn frame(
+        ctx: &Context,
+        data: &VaultData,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> (MainIntent, Vec<String>) {
+        let mut search = String::new();
+        let mut filter = Filter::All;
+        let mut sort = SortBy::UpdatedDesc;
+        let mut selected = None;
+        let mut reveal = None;
+        let mut new_cat = String::new();
+        let copy_banner: Option<(std::time::Instant, u32)> = None;
+        let mut intent = MainIntent::None;
+        let mut out = ctx.run_ui(
+            RawInput {
+                time: Some(time),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui: &mut Ui| {
+                intent = keynest_egui::views::main_view::show(
+                    ui,
+                    MainView {
+                        data,
+                        search: &mut search,
+                        filter: &mut filter,
+                        sort: &mut sort,
+                        selected_id: &mut selected,
+                        reveal: &mut reveal,
+                        copy_banner: &copy_banner,
+                        new_category_buf: &mut new_cat,
+                        focus_search: false,
+                        idle_left_secs: 0,
+                        toast: None,
+                    },
+                );
+            },
+        );
+        let mut titles = Vec::new();
+        for sh in &out.shapes {
+            if let egui::Shape::Text(t) = &sh.shape {
+                let txt = t.galley.text().to_string();
+                if txt.starts_with("站点 ") {
+                    titles.push(txt);
+                }
+            }
+        }
+        out.textures_delta.clear();
+        (intent, titles)
+    }
+
+    let ctx = Context::default();
+    let mut t = 0.0f64;
+
+    // 第一帧：让布局与 ScrollArea 建档
+    let _ = frame(&ctx, &data, t, vec![]);
+    t += 0.016;
+
+    // 指针放到列表上
+    let _ = frame(
+        &ctx,
+        &data,
+        t,
+        vec![egui::Event::PointerMoved(egui::Pos2::new(200.0, 400.0))],
+    );
+    t += 0.016;
+
+    let (_, top_titles) = frame(&ctx, &data, t, vec![]);
+    assert!(!top_titles.is_empty(), "首屏一条都没画");
+
+    // 滚轮：Start → 多次 Move → End，时间戳递进
+    let wheel = |phase: egui::TouchPhase, dy: f32| egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, dy),
+        modifiers: egui::Modifiers::default(),
+        phase,
+        source: egui::MouseWheelSource::Wheel,
+    };
+
+    // 往下滚很多次（每次 -400，足够滚过 200 行 ≈ 10800px）
+    let _ = frame(&ctx, &data, t, vec![wheel(egui::TouchPhase::Start, -400.0)]);
+    t += 0.016;
+    for _ in 0..60 {
+        let _ = frame(&ctx, &data, t, vec![wheel(egui::TouchPhase::Move, -400.0)]);
+        t += 0.016;
+    }
+    let _ = frame(&ctx, &data, t, vec![wheel(egui::TouchPhase::End, 0.0)]);
+    t += 0.016;
+
+    // 多发几帧让平滑滚动收敛
+    for _ in 0..30 {
+        let _ = frame(&ctx, &data, t, vec![]);
+        t += 0.016;
+    }
+
+    let (_, bottom_titles) = frame(&ctx, &data, t, vec![]);
+
+    assert!(
+        !bottom_titles.is_empty(),
+        "滚到底之后一条都没画 —— 下半部分的内容整个消失了"
+    );
+
+    let last_title = &data.entries.last().unwrap().title;
+    assert!(
+        bottom_titles.iter().any(|x| x == last_title),
+        "滚到底之后看不见最后一条（{}）。看到的是：{:?} —— 共 {} 条",
+        last_title,
+        bottom_titles,
+        bottom_titles.len()
+    );
+
+    assert_ne!(
+        top_titles, bottom_titles,
+        "滚到底之后看到的还是首屏那几条 —— 滚动没有生效"
     );
 }
 

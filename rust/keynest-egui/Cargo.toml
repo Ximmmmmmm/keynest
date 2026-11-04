@@ -5,6 +5,11 @@ edition = "2021"
 description = "钥巢 — 纯 Rust egui 桌面端"
 license = "MIT OR Apache-2.0"
 
+[build-dependencies]
+# 把 build/icon.ico 与版本信息嵌进 exe，让资源管理器显示应用图标。
+# 用 winresource（winres 的维护版）：winres 已停更，而它需要 .rc 文件与外部工具链。
+winresource = "0.1"
+
 [dependencies]
 eframe = "0.37.0"
 egui = "0.37"
