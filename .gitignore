@@ -54,7 +54,9 @@ desktop.ini
 
 # 打包产物
 dist/
-build/icon.png
+# 注意：`build/icon.png` **不是**产物，是图标源文件。
+# 它由 scripts/make-icon.py 生成后要进仓库——`main.rs` 用 include_bytes!
+# 把它编进二进制，缺了它全新检出就编译不过（v0.5.0 的发布就是这么失败的）。
 rust/keynest-app/gen/
 
 # ===== 单文件绿色版与备份产物（第二阶段补充）=====
